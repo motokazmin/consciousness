@@ -225,12 +225,28 @@ class PolarH10Source(HRVSource):
     async def _loop(self):
         from bleak import BleakClient
 
+        from hrv_core.ble_scan import (
+            bleak_adapter_kwargs,
+            ensure_ble_stack_compatible,
+            format_bleak_connect_error,
+        )
+
+        try:
+            ensure_ble_stack_compatible()
+        except Exception as e:
+            print(f"BLE: {e}")
+            return
+
+        bt_kw = bleak_adapter_kwargs()
+
         while not self._should_stop():
             self._last_rr_ts = None
             reconnect_pause = False
             try:
                 print(f"Connecting to {self.address}...")
-                async with BleakClient(self.address, timeout=15.0) as client:
+                async with BleakClient(
+                    self.address, timeout=15.0, **bt_kw
+                ) as client:
                     print("Connected ✓")
                     await self._start_notify_with_retries(client)
                     print(
@@ -270,6 +286,10 @@ class PolarH10Source(HRVSource):
                         except Exception:
                             pass
             except Exception as exc:
+                hint = format_bleak_connect_error(exc)
+                if hint:
+                    print(f"BLE error: {hint}")
+                    return
                 err_s = str(exc).lower()
                 if any(
                     w in err_s

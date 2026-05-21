@@ -31,3 +31,5 @@ python cluster.py
 ```
 
 ANT+ (опционально): `pip install 'openant>=1.3'`, см. флаги `--ant-plus` и `--ant-fallback` в [hrv_mvp.md](hrv_mvp.md).
+
+**BLE / BlueZ:** если при подключении видите `Bleak requires BlueZ >= 5.55`, в системе старая BlueZ (часто 5.53). Переустановите зависимости: `pip install 'bleak>=0.22.3,<1'`, либо обновите BlueZ в ОС.

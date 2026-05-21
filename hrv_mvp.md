@@ -17,7 +17,7 @@
 ## Стек
 
 - **Python 3.12**, Ubuntu
-- **bleak** — BLE-подключение к Polar H10
+- **bleak** (в `requirements.txt`: **0.22.x**, не 1.x+) — BLE к Polar H10; **bleak ≥1** требует **BlueZ ≥5.55**, на Ubuntu 20.04 часто **5.53** — тогда `pip install 'bleak>=0.22.3,<1'`
 - **numpy / matplotlib** — вычисления; CLI: real-time графики
 - **FastAPI + uvicorn** — веб-UI (форма сессии, WebSocket, архив); фронт: **uPlot** (CDN)
 - **SQLite** — локальное хранилище точек, сессий и персонального baseline по часу
