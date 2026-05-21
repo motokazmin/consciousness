@@ -195,9 +195,12 @@ async def session_stream(websocket: WebSocket, session_id: int):
 
 @app.get("/api/scan")
 async def scan_ble():
-    from bleak import BleakScanner
+    from hrv_core.ble_scan import BleScanError, discover_ble_devices
 
-    devices = await BleakScanner.discover(timeout=10.0)
+    try:
+        devices = await discover_ble_devices(timeout=10.0)
+    except BleScanError as e:
+        raise HTTPException(503, str(e)) from e
     polar = [d for d in devices if d.name and "Polar" in d.name]
     out = []
     for d in polar or devices:
