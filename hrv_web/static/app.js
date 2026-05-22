@@ -17,14 +17,254 @@ let driftCount = 0;
 let lastRmssd  = null;
 let sessionBaseline = null;
 
+// ── AWARENESS MODE ────────────────────────────────────────────────────────
+const BREATH_EXPAND_MS  = 4000;
+const BREATH_HOLD_MS    = 1000;
+const BREATH_CONTRACT_MS = 6000;
+const BREATH_CYCLE_MS   = BREATH_EXPAND_MS + BREATH_HOLD_MS + BREATH_CONTRACT_MS;
+const BREATH_SCALE_MIN  = 0.45;
+const BREATH_SCALE_MAX  = 1.0;
+
+const awareness = {
+  breathGuide: false,
+  driftSound: false,
+  ambientBg: false,
+  sessionActive: false,
+  breathStartMs: 0,
+  breathRaf: null,
+  audioCtx: null,
+  lastDriftCueAt: 0,
+};
+
+function awarenessOptions() {
+  const g = $("opt_breath_guide");
+  const s = $("opt_drift_sound");
+  const a = $("opt_ambient_bg");
+  return {
+    breathGuide: g ? g.checked : false,
+    driftSound:  s ? s.checked : false,
+    ambientBg:   a ? a.checked : false,
+  };
+}
+
+async function ensureAudioContext() {
+  if (!awareness.audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    awareness.audioCtx = new Ctx();
+  }
+  if (awareness.audioCtx.state === "suspended") {
+    await awareness.audioCtx.resume();
+  }
+  return awareness.audioCtx;
+}
+
+async function playDriftTone() {
+  if (!awareness.driftSound || !awareness.sessionActive) return;
+  try {
+    const ctx = await ensureAudioContext();
+    if (!ctx) return;
+
+    const t0 = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(440, t0);
+    osc.frequency.exponentialRampToValueAtTime(349, t0 + 0.5);
+
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.14, t0 + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.65);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.7);
+  } catch (e) {
+    console.warn("drift tone:", e);
+  }
+}
+
+function breathPhase(elapsedMs) {
+  const t = elapsedMs % BREATH_CYCLE_MS;
+  if (t < BREATH_EXPAND_MS) {
+    const p = t / BREATH_EXPAND_MS;
+    return { label: "Вдох", scale: BREATH_SCALE_MIN + (BREATH_SCALE_MAX - BREATH_SCALE_MIN) * p };
+  }
+  if (t < BREATH_EXPAND_MS + BREATH_HOLD_MS) {
+    return { label: "Пауза", scale: BREATH_SCALE_MAX };
+  }
+  const p = (t - BREATH_EXPAND_MS - BREATH_HOLD_MS) / BREATH_CONTRACT_MS;
+  return { label: "Выдох", scale: BREATH_SCALE_MAX - (BREATH_SCALE_MAX - BREATH_SCALE_MIN) * p };
+}
+
+function setBreathScale(scale) {
+  const ring = $("breath_ring");
+  const glow = $("breath_glow");
+  const tf = `scale(${scale})`;
+  if (ring) ring.style.transform = tf;
+  if (glow) glow.style.transform = tf;
+}
+
+function updateBreathGuide() {
+  if (!awareness.breathGuide || !awareness.sessionActive) {
+    awareness.breathRaf = null;
+    return;
+  }
+  const elapsed = performance.now() - awareness.breathStartMs;
+  const { label, scale } = breathPhase(elapsed);
+  setBreathScale(scale);
+  const lbl = $("breath_label");
+  if (lbl) lbl.textContent = label;
+  awareness.breathRaf = requestAnimationFrame(updateBreathGuide);
+}
+
+function startBreathGuide() {
+  stopBreathGuide();
+  if (!awareness.breathGuide) {
+    setBreathGuideVisible(false);
+    return;
+  }
+  setBreathGuideVisible(true);
+  awareness.breathStartMs = performance.now();
+  awareness.breathRaf = requestAnimationFrame(updateBreathGuide);
+}
+
+function stopBreathGuide() {
+  if (awareness.breathRaf) cancelAnimationFrame(awareness.breathRaf);
+  awareness.breathRaf = null;
+  setBreathScale(BREATH_SCALE_MIN);
+}
+
+function setBreathGuideVisible(on) {
+  const stage = $("breath_stage");
+  const idle = $("breath_idle_msg");
+  const visual = $("breath_visual");
+  const label = $("breath_label");
+  const hint = $("breath_hint");
+  if (idle) idle.hidden = on;
+  if (visual) visual.hidden = !on;
+  if (label) label.hidden = !on;
+  if (hint) hint.hidden = !on;
+  if (stage) stage.classList.toggle("idle", !on);
+}
+
+function updateAmbientBg() {
+  const bg = $("ambient-bg");
+  if (!awareness.ambientBg || !awareness.sessionActive) {
+    document.body.classList.remove("awareness-ambient");
+    if (bg) bg.style.background = "var(--bg)";
+    return;
+  }
+  document.body.classList.add("awareness-ambient");
+
+  const refHigh = sessionBaseline != null && sessionBaseline > 10 ? sessionBaseline : 55;
+  const refLow = Math.max(15, refHigh * 0.45);
+  const rm = lastRmssd != null ? lastRmssd : refHigh * 0.7;
+  const t = Math.max(0, Math.min(1, (rm - refLow) / (refHigh - refLow)));
+
+  const r = Math.round(6 + t * 28);
+  const g = Math.round(8 + t * 52);
+  const b = Math.round(14 + t * 96);
+  const gr = Math.round(30 + t * 80);
+  const gg = Math.round(70 + t * 90);
+  const gb = Math.round(130 + t * 80);
+  const glowA = (0.12 + t * 0.38).toFixed(2);
+
+  if (bg) {
+    bg.style.background =
+      `radial-gradient(ellipse 85% 65% at 50% 32%, rgba(${gr},${gg},${gb},${glowA}), transparent 72%), ` +
+      `rgb(${r}, ${g}, ${b})`;
+  }
+}
+
+function resetAmbientBg() {
+  document.body.classList.remove("awareness-ambient");
+  const bg = $("ambient-bg");
+  if (bg) bg.style.background = "var(--bg)";
+}
+
+function syncAwarenessStats() {
+  const rmEl = $("aware_rmssd");
+  const baseEl = $("aware_base");
+  const driftEl = $("aware_drift");
+  if (rmEl) {
+    rmEl.textContent = lastRmssd !== null ? lastRmssd.toFixed(1) : "—";
+    if (lastRmssd !== null && sessionBaseline !== null && sessionBaseline > 1) {
+      const ratio = lastRmssd / sessionBaseline;
+      rmEl.className = "stat-value" + (ratio < 0.75 ? " bad" : ratio > 0.95 ? " good" : " warn");
+    } else {
+      rmEl.className = "stat-value";
+    }
+  }
+  if (baseEl) baseEl.textContent = sessionBaseline !== null ? sessionBaseline.toFixed(1) : "—";
+  if (driftEl) {
+    driftEl.textContent = String(driftCount);
+    driftEl.className = "stat-value" + (driftCount > 0 ? " bad" : "");
+  }
+}
+
+function applyAwarenessOptions(opts) {
+  awareness.breathGuide = opts.breathGuide;
+  awareness.driftSound = opts.driftSound;
+  awareness.ambientBg = opts.ambientBg;
+}
+
+function startAwarenessSession(opts) {
+  applyAwarenessOptions(opts);
+  awareness.sessionActive = true;
+  updateAmbientBg();
+  startBreathGuide();
+}
+
+function stopAwarenessSession() {
+  awareness.sessionActive = false;
+  stopBreathGuide();
+  setBreathGuideVisible(false);
+  resetAmbientBg();
+  const badge = $("awareness_drift_badge");
+  if (badge) badge.classList.remove("active");
+}
+
+function triggerDriftCue(fromServer) {
+  const now = Date.now();
+  if (now - awareness.lastDriftCueAt < 120000) return;
+  awareness.lastDriftCueAt = now;
+  if (fromServer) driftCount++;
+  flashDriftBadge();
+  playDriftTone();
+  syncAwarenessStats();
+}
+
+function maybeClientDriftCue() {
+  if (!awareness.driftSound || !awareness.sessionActive) return;
+  if (lastRmssd === null || sessionBaseline === null || sessionBaseline <= 1) return;
+  if (rmBuf.length < 30) return;
+  if (lastRmssd >= sessionBaseline * 0.80) return;
+  triggerDriftCue(false);
+}
+
+function flashDriftBadge() {
+  for (const id of ["drift_badge", "awareness_drift_badge"]) {
+    const el = $(id);
+    if (!el) continue;
+    el.classList.add("active");
+    setTimeout(() => el.classList.remove("active"), 4000);
+  }
+}
+
 // ── TABS ──────────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll("nav button").forEach((x) => x.classList.remove("active"));
+  document.querySelectorAll("section").forEach((s) => s.classList.remove("visible"));
+  const btn = document.querySelector(`nav button[data-tab="${name}"]`);
+  const sec = document.getElementById(`tab-${name}`);
+  if (btn) btn.classList.add("active");
+  if (sec) sec.classList.add("visible");
+}
+
 document.querySelectorAll("nav button").forEach((b) => {
-  b.addEventListener("click", () => {
-    document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
-    document.querySelectorAll("section").forEach(s => s.classList.remove("visible"));
-    b.classList.add("active");
-    $(`tab-${b.dataset.tab}`).classList.add("visible");
-  });
+  b.addEventListener("click", () => switchTab(b.dataset.tab));
 });
 
 // ── API ───────────────────────────────────────────────────────────────────
@@ -70,10 +310,12 @@ function fmtAxisSec(u, splits) {
 
 function plotWidth(el) {
   const p = el.parentElement;
-  return Math.max(300, Math.floor((p ? p.clientWidth : 700) - 16));
+  const w = el.clientWidth || (p ? p.clientWidth : 0) || window.innerWidth - 380;
+  return Math.max(720, Math.floor(w - 8));
 }
 
-const PLOT_H = 200;
+const LIVE_PLOT_H = 360;
+const ARCHIVE_PLOT_H = 300;
 
 const RR_COLOR   = "#00d4ff";
 const RMSSD_COLOR = "#39e085";
@@ -81,7 +323,7 @@ const BASE_COLOR  = "rgba(255,255,255,0.12)";
 
 function rrCfg(timed, w) {
   return {
-    width: w, height: PLOT_H,
+    width: w, height: LIVE_PLOT_H,
     padding: [8, 8, 0, 0],
     scales: {
       x: { ...xScaleLinear, range: timed ? [0, durationSec] : [-60, 0] },
@@ -114,7 +356,7 @@ function rrCfg(timed, w) {
 
 function rmssdCfg(timed, w, yMax) {
   return {
-    width: w, height: PLOT_H,
+    width: w, height: LIVE_PLOT_H,
     padding: [8, 8, 0, 0],
     scales: {
       x: { ...xScaleLinear, range: timed ? [0, durationSec] : [-300, 0] },
@@ -172,11 +414,10 @@ function makeRMPlot(el, timed) {
 // ── RESIZE ────────────────────────────────────────────────────────────────
 let _resizeT = null;
 function resizePlots() {
-  const h = PLOT_H;
-  if (rrPlot && $("rrPlot")) rrPlot.setSize({ width: plotWidth($("rrPlot")), height: h });
-  if (rmPlot && $("rmPlot")) rmPlot.setSize({ width: plotWidth($("rmPlot")), height: h });
-  if (archRR  && $("arch_rr"))  archRR.setSize({ width: plotWidth($("arch_rr")),  height: h });
-  if (archRM  && $("arch_rm"))  archRM.setSize({ width: plotWidth($("arch_rm")),  height: h });
+  if (rrPlot && $("rrPlot")) rrPlot.setSize({ width: plotWidth($("rrPlot")), height: LIVE_PLOT_H });
+  if (rmPlot && $("rmPlot")) rmPlot.setSize({ width: plotWidth($("rmPlot")), height: LIVE_PLOT_H });
+  if (archRR  && $("arch_rr"))  archRR.setSize({ width: plotWidth($("arch_rr")),  height: ARCHIVE_PLOT_H });
+  if (archRM  && $("arch_rm"))  archRM.setSize({ width: plotWidth($("arch_rm")),  height: ARCHIVE_PLOT_H });
 }
 window.addEventListener("resize", () => {
   clearTimeout(_resizeT);
@@ -185,6 +426,8 @@ window.addEventListener("resize", () => {
 
 // ── STATS ─────────────────────────────────────────────────────────────────
 function updateStats() {
+  syncAwarenessStats();
+  updateAmbientBg();
   if (lastRmssd === null) return;
   const rmssdEl = $("stat_rmssd");
   rmssdEl.textContent = lastRmssd.toFixed(1);
@@ -192,6 +435,7 @@ function updateStats() {
   if (sessionBaseline !== null && sessionBaseline > 1) {
     const ratio = lastRmssd / sessionBaseline;
     rmssdEl.className = "stat-value" + (ratio < 0.75 ? " bad" : ratio > 0.95 ? " good" : " warn");
+    maybeClientDriftCue();
   }
   $("stat_base").textContent = sessionBaseline !== null ? sessionBaseline.toFixed(1) : "—";
   $("stat_drift").textContent = String(driftCount);
@@ -280,8 +524,10 @@ function onWsMessage(ev) {
     setStatus("Сессия завершена.");
     $("btn_stop").disabled = true;
     $("btn_start").disabled = false;
+    setAwarenessControlsEnabled(true);
     if (ws) { ws.close(); ws = null; }
     stopRaf();
+    stopAwarenessSession();
     return;
   }
   if (msg.type === "beat" && msg.t?.length) {
@@ -291,11 +537,9 @@ function onWsMessage(ev) {
       lastRmssd = msg.m[i];
       updateHR(msg.r[i]);
     }
-    if (msg.drift) {
-      driftCount++;
-      $("drift_badge").classList.add("active");
-      setTimeout(() => $("drift_badge").classList.remove("active"), 4000);
-    }
+    updateAmbientBg();
+    syncAwarenessStats();
+    if (msg.drift) triggerDriftCue(true);
   }
 }
 
@@ -309,6 +553,12 @@ function setErr(txt) {
   const el = $("live_err");
   el.textContent = txt;
   el.classList.toggle("visible", !!txt);
+}
+
+function setAwarenessControlsEnabled(on) {
+  for (const id of ["opt_breath_guide", "opt_drift_sound", "opt_ambient_bg"]) {
+    $(id).disabled = !on;
+  }
 }
 
 async function startLive() {
@@ -329,6 +579,9 @@ async function startLive() {
   };
 
   try {
+    const opts = awarenessOptions();
+    if (opts.driftSound || opts.breathGuide) await ensureAudioContext();
+
     const res = await api("/api/sessions", { method: "POST", body: JSON.stringify(body) });
     currentSessionId = res.id;
     const timed = body.minutes != null && body.minutes > 0;
@@ -336,6 +589,7 @@ async function startLive() {
     sessionT0   = typeof res.started_at === "number" ? res.started_at : Date.now() / 1000;
     durationSec = timed ? body.minutes * 60 : 0;
     driftCount  = 0;
+    awareness.lastDriftCueAt = 0;
     lastRmssd   = null;
     sessionBaseline = null;
 
@@ -345,6 +599,7 @@ async function startLive() {
     $("stat_hr").textContent    = "—";
     $("stat_drift").textContent = "0";
     $("stat_drift").className   = "stat-value";
+    syncAwarenessStats();
 
     $("stats_strip").classList.add("visible");
     $("live_plots").classList.add("visible");
@@ -365,6 +620,7 @@ async function startLive() {
     setStatus(`Сессия #${currentSessionId} · ${body.tag}${timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);
     $("btn_start").disabled = true;
     $("btn_stop").disabled  = false;
+    setAwarenessControlsEnabled(false);
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/api/sessions/${currentSessionId}/stream`);
@@ -373,6 +629,9 @@ async function startLive() {
 
     stopRaf();
     raf = requestAnimationFrame(redrawLive);
+
+    startAwarenessSession(opts);
+    if (opts.breathGuide) switchTab("awareness");
   } catch (e) {
     setErr(String(e.message || e));
   }
@@ -389,8 +648,10 @@ async function stopLive() {
   }
   $("btn_stop").disabled  = true;
   $("btn_start").disabled = false;
+  setAwarenessControlsEnabled(true);
   if (ws) { ws.close(); ws = null; }
   stopRaf();
+  stopAwarenessSession();
 }
 
 $("btn_start").addEventListener("click", startLive);
@@ -492,6 +753,7 @@ async function openArchiveSession(id) {
   archRR = new uPlot(
     {
       ...rrCfg(true, wR),
+      height: ARCHIVE_PLOT_H,
       scales: { x: { ...xScaleLinear, range: [0, xMax] }, y: { time:false, distr:1, range:[350,1300] } },
     },
     [xs, rr],
@@ -503,6 +765,7 @@ async function openArchiveSession(id) {
   archRM = new uPlot(
     {
       ...rmssdCfg(true, wM, rmax),
+      height: ARCHIVE_PLOT_H,
       scales: { x: { ...xScaleLinear, range: [0, xMax] }, y: { time:false, distr:1, range:[0, rmax] } },
     },
     [xs, rm, blXs, blYs],

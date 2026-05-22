@@ -209,7 +209,17 @@ async def scan_ble():
 
 
 if STATIC_DIR.is_dir():
-    app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
+    from starlette.responses import Response
+    from starlette.staticfiles import StaticFiles
+
+    class DevStaticFiles(StaticFiles):
+        async def get_response(self, path: str, scope):
+            response: Response = await super().get_response(path, scope)
+            if path.endswith((".js", ".html", ".css")):
+                response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return response
+
+    app.mount("/assets", DevStaticFiles(directory=STATIC_DIR), name="assets")
 
 
 @app.get("/")
@@ -217,4 +227,7 @@ def index():
     index_path = STATIC_DIR / "index.html"
     if not index_path.is_file():
         return JSONResponse({"error": "static not built"}, status_code=503)
-    return FileResponse(index_path)
+    return FileResponse(
+        index_path,
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
