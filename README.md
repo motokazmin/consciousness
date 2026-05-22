@@ -2,7 +2,8 @@
 
 Экспериментальный **HRV Awareness Monitor** (Polar H10 / mock, RMSSD, кластеризация).
 
-Подробное описание архитектуры, CLI, веб-UI и статуса фич: **[hrv_mvp.md](hrv_mvp.md)** (в т.ч. раздел **«Baseline и drift»**: что такое session / persistent baseline и событие drift).
+- **Архитектура и назначение:** [ARCHITECTURE.md](ARCHITECTURE.md)
+- **Детали MVP** (CLI, веб-UI, BLE/ANT+, baseline, mock): [hrv_mvp.md](hrv_mvp.md)
 
 ## Быстрый старт
 

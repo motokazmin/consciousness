@@ -279,6 +279,7 @@ def main():
     baseline_at_start = persistent
 
     stop_event = threading.Event()
+    conn_lock = threading.Lock()
     state = HRVSessionState(persistent, desktop_notify=True)
 
     if args.mock:
@@ -297,17 +298,19 @@ def main():
         conn=conn,
         session_id=session_id,
         mock_tag=args.session if source_kind == "mock" else None,
+        conn_lock=conn_lock if source_kind == "ble_ant_fallback" else None,
     )
 
     def on_beat(rr_ms: float, ts: float):
         sample = state.process_beat(rr_ms, ts)
         if sample is None:
             return
-        conn.execute(
-            "INSERT INTO hrv_points (session_id, ts, rr_ms, rmssd) VALUES (?, ?, ?, ?)",
-            (session_id, sample.ts, sample.rr_ms, sample.rmssd),
-        )
-        conn.commit()
+        with conn_lock:
+            conn.execute(
+                "INSERT INTO hrv_points (session_id, ts, rr_ms, rmssd) VALUES (?, ?, ?, ?)",
+                (session_id, sample.ts, sample.rr_ms, sample.rmssd),
+            )
+            conn.commit()
 
     tit_extra = ""
     if args.name:

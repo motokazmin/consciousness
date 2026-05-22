@@ -140,6 +140,8 @@ class MockHRVSource(HRVSource):
 
     def stop(self):
         self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
 
 
 class PolarH10Source(HRVSource):
@@ -313,7 +315,7 @@ class PolarH10Source(HRVSource):
         ).start()
 
     def stop(self):
-        pass
+        self._session_stop.set()
 
 
 def require_openant():
@@ -435,11 +437,13 @@ class FallbackBleAntSource(HRVSource):
         session_stop: threading.Event,
         conn: sqlite3.Connection,
         session_id: int,
+        conn_lock: threading.Lock,
     ):
         self.address = address
         self._session_stop = session_stop
         self._conn = conn
         self._session_id = session_id
+        self._conn_lock = conn_lock
         self._user_cb = None
         self._ble_stop = threading.Event()
         self._first_rr = threading.Event()
@@ -483,11 +487,12 @@ class FallbackBleAntSource(HRVSource):
                 return
             self._ant_started = True
         try:
-            self._conn.execute(
-                "UPDATE sessions SET source=? WHERE id=?",
-                (f"Polar H10 ANT+ fallback (BLE {self.address})", self._session_id),
-            )
-            self._conn.commit()
+            with self._conn_lock:
+                self._conn.execute(
+                    "UPDATE sessions SET source=? WHERE id=?",
+                    (f"Polar H10 ANT+ fallback (BLE {self.address})", self._session_id),
+                )
+                self._conn.commit()
         except Exception:
             pass
         self._ant = AntPlusHRVSource(self._session_stop)
@@ -508,6 +513,7 @@ def build_source(
     conn: sqlite3.Connection | None,
     session_id: int | None,
     mock_tag: str | None = None,
+    conn_lock: threading.Lock | None = None,
 ) -> HRVSource:
     if kind == "mock":
         mt = (mock_tag or "").strip().lower()
@@ -522,7 +528,13 @@ def build_source(
     if kind == "ble_ant_fallback":
         if not address or conn is None or session_id is None:
             raise ValueError("ble_ant_fallback требует address, conn, session_id")
+        if conn_lock is None:
+            raise ValueError("ble_ant_fallback требует conn_lock")
         return FallbackBleAntSource(
-            address, session_stop=session_stop, conn=conn, session_id=session_id
+            address,
+            session_stop=session_stop,
+            conn=conn,
+            session_id=session_id,
+            conn_lock=conn_lock,
         )
     raise ValueError(f"неизвестный source kind: {kind}")

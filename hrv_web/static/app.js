@@ -4,17 +4,30 @@ const $ = (id) => document.getElementById(id);
 
 let rrPlot = null;
 let rmPlot = null;
-let rrBuf = [];
-let rmBuf = [];
-let ws = null;
-let raf = null;
+let rrBuf  = [];
+let rmBuf  = [];
+let ws     = null;
+let raf    = null;
 let currentSessionId = null;
 
-/** "window" — скользящее окно; "timed" — полная ось 0…T от начала сессии */
-let liveMode = "window";
-let sessionT0 = 0;
+let liveMode   = "window";
+let sessionT0  = 0;
 let durationSec = 0;
+let driftCount = 0;
+let lastRmssd  = null;
+let sessionBaseline = null;
 
+// ── TABS ──────────────────────────────────────────────────────────────────
+document.querySelectorAll("nav button").forEach((b) => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
+    document.querySelectorAll("section").forEach(s => s.classList.remove("visible"));
+    b.classList.add("active");
+    $(`tab-${b.dataset.tab}`).classList.add("visible");
+  });
+});
+
+// ── API ───────────────────────────────────────────────────────────────────
 function api(path, opts = {}) {
   return fetch(path, {
     headers: { "Content-Type": "application/json", ...opts.headers },
@@ -22,187 +35,203 @@ function api(path, opts = {}) {
   }).then(async (r) => {
     const t = await r.text();
     let j;
-    try {
-      j = t ? JSON.parse(t) : {};
-    } catch {
-      j = {};
-    }
+    try { j = t ? JSON.parse(t) : {}; } catch { j = {}; }
     if (!r.ok) {
       const d = j.detail;
-      let msg;
-      if (Array.isArray(d)) msg = d.map((x) => x.msg || JSON.stringify(x)).join("; ");
-      else msg = d || j.error || t || r.statusText || String(r.status);
+      const msg = Array.isArray(d)
+        ? d.map(x => x.msg || JSON.stringify(x)).join("; ")
+        : d || j.error || t || r.statusText || String(r.status);
       throw new Error(msg);
     }
     return j;
   });
 }
 
+// ── TAGS ──────────────────────────────────────────────────────────────────
 async function loadTags() {
   const { tags } = await api("/api/tags");
-  const sel = $("tag");
-  const flt = $("flt_tag");
-  sel.innerHTML = "";
-  flt.innerHTML = '<option value="">—</option>';
-  for (const t of tags) {
-    sel.appendChild(new Option(t, t));
-    flt.appendChild(new Option(t, t));
+  for (const sel of [$("tag"), $("flt_tag")]) {
+    if (sel.id === "flt_tag") sel.innerHTML = '<option value="">— все —</option>';
+    else sel.innerHTML = "";
+    for (const t of tags) sel.appendChild(new Option(t, t));
   }
 }
 
-function tab(name) {
-  document.querySelectorAll("nav button").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tab === name);
-  });
-  document.querySelectorAll("section").forEach((s) => {
-    s.classList.toggle("visible", s.id === `tab-${name}`);
-  });
-}
-
-document.querySelectorAll("nav button").forEach((b) => {
-  b.addEventListener("click", () => tab(b.dataset.tab));
-});
-
-/** Ширина графика по контейнеру (без искусственного потолка 900px). */
-function plotWidth(el) {
-  const p = el.parentElement;
-  const cw = p ? p.clientWidth : 800;
-  return Math.max(320, Math.floor(cw - 8));
-}
-
-let _resizeT = null;
-function resizePlotsToContainer() {
-  const h = 220;
-  if (rrPlot && $("rrPlot")) rrPlot.setSize({ width: plotWidth($("rrPlot")), height: h });
-  if (rmPlot && $("rmPlot")) rmPlot.setSize({ width: plotWidth($("rmPlot")), height: h });
-  if (archRR && $("arch_rr")) archRR.setSize({ width: plotWidth($("arch_rr")), height: h });
-  if (archRM && $("arch_rm")) archRM.setSize({ width: plotWidth($("arch_rm")), height: h });
-}
-
-window.addEventListener("resize", () => {
-  if (_resizeT) clearTimeout(_resizeT);
-  _resizeT = setTimeout(() => {
-    _resizeT = null;
-    resizePlotsToContainer();
-  }, 120);
-});
-
-/** uPlot иначе может трактовать X как время и писать «3:00 am» — у нас всегда секунды (число). */
+// ── PLOT HELPERS ──────────────────────────────────────────────────────────
 const xScaleLinear = { time: false, distr: 1 };
 
 function fmtAxisSec(u, splits) {
-  return splits.map((v) => {
+  return splits.map(v => {
     const n = Number(v);
     if (!Number.isFinite(n)) return "";
     return Math.abs(n) >= 100 ? String(Math.round(n)) : n.toFixed(1);
   });
 }
 
-function makeRRPlot(el, timed) {
-  const w = plotWidth(el);
-  if (timed) {
-    return new uPlot(
-      {
-        width: w,
-        height: 220,
-        title: `RR — сек от начала сессии (0…${Math.round(durationSec)} с)`,
-        scales: {
-          x: { ...xScaleLinear, range: [0, durationSec] },
-          y: { time: false, distr: 1, range: [350, 1300] },
-        },
-        series: [{}, { stroke: "rgb(79,195,247)", width: 1 }],
-        axes: [
-          { stroke: "#888", label: "с от начала, с", values: fmtAxisSec },
-          { stroke: "#888", label: "RR, ms" },
-        ],
-      },
-      [[], []],
-      el
-    );
-  }
-  return new uPlot(
-    {
-      width: w,
-      height: 220,
-      title: "RR — последние 60 с (сек от «сейчас»)",
-      scales: {
-        x: { ...xScaleLinear, range: [-60, 0] },
-        y: { time: false, distr: 1, range: [350, 1300] },
-      },
-      series: [{}, { stroke: "rgb(79,195,247)", width: 1 }],
-      axes: [
-        { stroke: "#888", label: "с от «сейчас», с", values: fmtAxisSec },
-        { stroke: "#888", label: "RR, ms" },
-      ],
+function plotWidth(el) {
+  const p = el.parentElement;
+  return Math.max(300, Math.floor((p ? p.clientWidth : 700) - 16));
+}
+
+const PLOT_H = 200;
+
+const RR_COLOR   = "#00d4ff";
+const RMSSD_COLOR = "#39e085";
+const BASE_COLOR  = "rgba(255,255,255,0.12)";
+
+function rrCfg(timed, w) {
+  return {
+    width: w, height: PLOT_H,
+    padding: [8, 8, 0, 0],
+    scales: {
+      x: { ...xScaleLinear, range: timed ? [0, durationSec] : [-60, 0] },
+      y: { time: false, distr: 1, range: [350, 1300] },
     },
-    [[], []],
-    el
-  );
+    series: [
+      {},
+      { stroke: RR_COLOR, width: 1.5, fill: "rgba(0,212,255,0.04)" },
+    ],
+    axes: [
+      {
+        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
+        label: timed ? "с от начала" : "с от сейчас",
+        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
+        stroke: "#5a6478",
+        values: fmtAxisSec,
+      },
+      {
+        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
+        label: "RR, ms",
+        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
+        stroke: "#5a6478",
+        size: 52,
+      },
+    ],
+    cursor: { show: true, x: true, y: false },
+    legend: { show: false },
+  };
+}
+
+function rmssdCfg(timed, w, yMax) {
+  return {
+    width: w, height: PLOT_H,
+    padding: [8, 8, 0, 0],
+    scales: {
+      x: { ...xScaleLinear, range: timed ? [0, durationSec] : [-300, 0] },
+      y: { time: false, distr: 1, range: [0, yMax || 120] },
+    },
+    series: [
+      {},
+      {
+        stroke: RMSSD_COLOR,
+        width: 2,
+        fill: "rgba(57,224,133,0.07)",
+      },
+      // baseline series
+      {
+        stroke: BASE_COLOR,
+        width: 1,
+        dash: [4, 4],
+      },
+    ],
+    axes: [
+      {
+        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
+        label: timed ? "с от начала" : "с от сейчас",
+        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
+        stroke: "#5a6478",
+        values: fmtAxisSec,
+      },
+      {
+        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
+        label: "RMSSD, ms",
+        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
+        stroke: "#5a6478",
+        size: 52,
+      },
+    ],
+    cursor: { show: true, x: true, y: false },
+    legend: { show: false },
+  };
+}
+
+function makeRRPlot(el, timed) {
+  if (rrPlot) { rrPlot.destroy(); rrPlot = null; }
+  el.innerHTML = "";
+  rrPlot = new uPlot(rrCfg(timed, plotWidth(el)), [[], []], el);
+  return rrPlot;
 }
 
 function makeRMPlot(el, timed) {
-  const w = plotWidth(el);
-  if (timed) {
-    return new uPlot(
-      {
-        width: w,
-        height: 220,
-        title: `RMSSD — сек от начала сессии (0…${Math.round(durationSec)} с)`,
-        scales: {
-          x: { ...xScaleLinear, range: [0, durationSec] },
-          y: { time: false, distr: 1, range: [0, 120] },
-        },
-        series: [{}, { stroke: "rgb(129,199,132)", width: 1 }],
-        axes: [
-          { stroke: "#888", label: "с от начала, с", values: fmtAxisSec },
-          { stroke: "#888", label: "RMSSD, ms" },
-        ],
-      },
-      [[], []],
-      el
-    );
-  }
-  return new uPlot(
-    {
-      width: w,
-      height: 220,
-      title: "RMSSD — последние ~5 мин (сек от «сейчас»)",
-      scales: {
-        x: { ...xScaleLinear, range: [-300, 0] },
-        y: { time: false, distr: 1, range: [0, 120] },
-      },
-      series: [{}, { stroke: "rgb(129,199,132)", width: 1 }],
-      axes: [
-        { stroke: "#888", label: "с от «сейчас», с", values: fmtAxisSec },
-        { stroke: "#888", label: "RMSSD, ms" },
-      ],
-    },
-    [[], []],
-    el
-  );
+  if (rmPlot) { rmPlot.destroy(); rmPlot = null; }
+  el.innerHTML = "";
+  rmPlot = new uPlot(rmssdCfg(timed, plotWidth(el)), [[], [], []], el);
+  return rmPlot;
 }
 
+// ── RESIZE ────────────────────────────────────────────────────────────────
+let _resizeT = null;
+function resizePlots() {
+  const h = PLOT_H;
+  if (rrPlot && $("rrPlot")) rrPlot.setSize({ width: plotWidth($("rrPlot")), height: h });
+  if (rmPlot && $("rmPlot")) rmPlot.setSize({ width: plotWidth($("rmPlot")), height: h });
+  if (archRR  && $("arch_rr"))  archRR.setSize({ width: plotWidth($("arch_rr")),  height: h });
+  if (archRM  && $("arch_rm"))  archRM.setSize({ width: plotWidth($("arch_rm")),  height: h });
+}
+window.addEventListener("resize", () => {
+  clearTimeout(_resizeT);
+  _resizeT = setTimeout(resizePlots, 120);
+});
+
+// ── STATS ─────────────────────────────────────────────────────────────────
+function updateStats() {
+  if (lastRmssd === null) return;
+  const rmssdEl = $("stat_rmssd");
+  rmssdEl.textContent = lastRmssd.toFixed(1);
+  // colour coding vs baseline
+  if (sessionBaseline !== null && sessionBaseline > 1) {
+    const ratio = lastRmssd / sessionBaseline;
+    rmssdEl.className = "stat-value" + (ratio < 0.75 ? " bad" : ratio > 0.95 ? " good" : " warn");
+  }
+  $("stat_base").textContent = sessionBaseline !== null ? sessionBaseline.toFixed(1) : "—";
+  $("stat_drift").textContent = String(driftCount);
+  if (driftCount > 0) $("stat_drift").className = "stat-value bad";
+}
+
+function updateHR(rrMs) {
+  if (rrMs > 100) $("stat_hr").textContent = Math.round(60000 / rrMs);
+}
+
+// ── REDRAW LOOP ───────────────────────────────────────────────────────────
 function trimBuf(buf, windowSec) {
-  const now = Date.now() / 1000;
-  while (buf.length && buf[0][0] < now - windowSec) buf.shift();
+  const cutoff = Date.now() / 1000 - windowSec;
+  while (buf.length && buf[0][0] < cutoff) buf.shift();
+}
+
+function computeBaseline(buf, n) {
+  const tail = buf.slice(-n).map(p => p[1]);
+  if (!tail.length) return null;
+  return tail.reduce((a, b) => a + b, 0) / tail.length;
 }
 
 function redrawLive() {
   if (liveMode === "timed") {
-    const xsR = rrBuf.map((p) => Math.max(0, p[0] - sessionT0));
-    const ysR = rrBuf.map((p) => p[1]);
-    const xsM = rmBuf.map((p) => Math.max(0, p[0] - sessionT0));
-    const ysM = rmBuf.map((p) => p[1]);
+    const xsR = rrBuf.map(p => Math.max(0, p[0] - sessionT0));
+    const ysR = rrBuf.map(p => p[1]);
+    const xsM = rmBuf.map(p => Math.max(0, p[0] - sessionT0));
+    const ysM = rmBuf.map(p => p[1]);
+
     if (rrPlot && xsR.length) {
       rrPlot.setData([xsR, ysR]);
-      rrPlot.setScale("x", { min: 0, max: durationSec });
-      const mn = Math.min(...ysR);
-      const mx = Math.max(...ysR);
+      const mn = Math.min(...ysR), mx = Math.max(...ysR);
       rrPlot.setScale("y", { min: Math.max(300, mn - 40), max: mx + 40 });
     }
     if (rmPlot && xsM.length) {
-      rmPlot.setData([xsM, ysM]);
-      rmPlot.setScale("x", { min: 0, max: durationSec });
+      const bl = computeBaseline(rmBuf, 30);
+      if (bl !== null) sessionBaseline = bl;
+      const blXs = xsM.length ? [xsM[0], xsM[xsM.length - 1]] : [];
+      const blYs = bl !== null ? [bl, bl] : [];
+      rmPlot.setData([xsM, ysM, blXs.length ? blXs : [], blYs.length ? blYs : []]);
       const mx = Math.max(40, ...ysM) * 1.15;
       rmPlot.setScale("y", { min: 0, max: mx });
     }
@@ -210,21 +239,28 @@ function redrawLive() {
     const now = Date.now() / 1000;
     trimBuf(rrBuf, 65);
     trimBuf(rmBuf, 310);
-    const xsR = rrBuf.map((p) => p[0] - now);
-    const ysR = rrBuf.map((p) => p[1]);
-    const xsM = rmBuf.map((p) => p[0] - now);
-    const ysM = rmBuf.map((p) => p[1]);
+
+    const xsR = rrBuf.map(p => p[0] - now);
+    const ysR = rrBuf.map(p => p[1]);
+    const xsM = rmBuf.map(p => p[0] - now);
+    const ysM = rmBuf.map(p => p[1]);
+
     if (rrPlot && xsR.length) {
       rrPlot.setData([xsR, ysR]);
       const mx = Math.max(400, ...ysR, 900);
       rrPlot.setScale("y", { min: mx - 500, max: mx + 100 });
     }
     if (rmPlot && xsM.length) {
-      rmPlot.setData([xsM, ysM]);
+      const bl = computeBaseline(rmBuf, 30);
+      if (bl !== null) sessionBaseline = bl;
+      const blXs = xsM.length ? [xsM[0], xsM[xsM.length - 1]] : [];
+      const blYs = bl !== null ? [bl, bl] : [];
+      rmPlot.setData([xsM, ysM, blXs.length ? blXs : [], blYs.length ? blYs : []]);
       const mx = Math.max(40, ...ysM) * 1.2;
       rmPlot.setScale("y", { min: 0, max: mx });
     }
   }
+  updateStats();
   raf = requestAnimationFrame(redrawLive);
 }
 
@@ -233,6 +269,7 @@ function stopRaf() {
   raf = null;
 }
 
+// ── WS ────────────────────────────────────────────────────────────────────
 function onWsMessage(ev) {
   const msg = JSON.parse(ev.data);
   if (msg.type === "meta") {
@@ -240,29 +277,45 @@ function onWsMessage(ev) {
     return;
   }
   if (msg.type === "ended") {
-    $("live_status").textContent += " Сессия завершена.";
+    setStatus("Сессия завершена.");
     $("btn_stop").disabled = true;
     $("btn_start").disabled = false;
-    if (ws) ws.close();
-    ws = null;
+    if (ws) { ws.close(); ws = null; }
     stopRaf();
     return;
   }
-  if (msg.type === "beat" && msg.t && msg.t.length) {
+  if (msg.type === "beat" && msg.t?.length) {
     for (let i = 0; i < msg.t.length; i++) {
       rrBuf.push([msg.t[i], msg.r[i]]);
       rmBuf.push([msg.t[i], msg.m[i]]);
+      lastRmssd = msg.m[i];
+      updateHR(msg.r[i]);
+    }
+    if (msg.drift) {
+      driftCount++;
+      $("drift_badge").classList.add("active");
+      setTimeout(() => $("drift_badge").classList.remove("active"), 4000);
     }
   }
 }
 
+// ── START / STOP ──────────────────────────────────────────────────────────
+function setStatus(txt) {
+  const el = $("live_status");
+  el.textContent = txt;
+  el.classList.toggle("visible", !!txt);
+}
+function setErr(txt) {
+  const el = $("live_err");
+  el.textContent = txt;
+  el.classList.toggle("visible", !!txt);
+}
+
 async function startLive() {
-  $("live_err").textContent = "";
+  setErr("");
   const participant = $("participant").value.trim();
-  if (!participant) {
-    $("live_err").textContent = "Укажите участника";
-    return;
-  }
+  if (!participant) { setErr("Укажите участника"); return; }
+
   const rawMin = $("minutes").value.trim();
   const minutes = rawMin ? parseFloat(rawMin.replace(",", ".")) : null;
   const body = {
@@ -274,54 +327,85 @@ async function startLive() {
     minutes: minutes != null && !Number.isNaN(minutes) && minutes > 0 ? minutes : null,
     desktop_notify: $("desktop_notify").checked,
   };
+
   try {
     const res = await api("/api/sessions", { method: "POST", body: JSON.stringify(body) });
     currentSessionId = res.id;
     const timed = body.minutes != null && body.minutes > 0;
-    liveMode = timed ? "timed" : "window";
-    sessionT0 = typeof res.started_at === "number" ? res.started_at : Date.now() / 1000;
+    liveMode    = timed ? "timed" : "window";
+    sessionT0   = typeof res.started_at === "number" ? res.started_at : Date.now() / 1000;
     durationSec = timed ? body.minutes * 60 : 0;
+    driftCount  = 0;
+    lastRmssd   = null;
+    sessionBaseline = null;
 
-    $("live_plots").style.display = "block";
-    $("live_status").textContent = timed
-      ? `Сессия #${currentSessionId} — ось времени 0…${Math.round(durationSec)} с от старта (полные кривые).`
-      : `Сессия #${currentSessionId} — скользящее окно (укажите длительность для оси от начала).`;
+    $("stat_rmssd").textContent = "—";
+    $("stat_rmssd").className   = "stat-value";
+    $("stat_base").textContent  = "—";
+    $("stat_hr").textContent    = "—";
+    $("stat_drift").textContent = "0";
+    $("stat_drift").className   = "stat-value";
+
+    $("stats_strip").classList.add("visible");
+    $("live_plots").classList.add("visible");
+
+    if (timed) {
+      $("rr_plot_title").textContent = `RR — 0 … ${Math.round(durationSec)} с от старта`;
+      $("rm_plot_title").textContent = `RMSSD — 0 … ${Math.round(durationSec)} с от старта`;
+    } else {
+      $("rr_plot_title").textContent = "RR — последние 60 с";
+      $("rm_plot_title").textContent = "RMSSD — последние 5 мин";
+    }
+
+    rrBuf = []; rmBuf = [];
+    makeRRPlot($("rrPlot"), timed);
+    makeRMPlot($("rmPlot"), timed);
+    requestAnimationFrame(resizePlots);
+
+    setStatus(`Сессия #${currentSessionId} · ${body.tag}${timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);
     $("btn_start").disabled = true;
-    $("btn_stop").disabled = false;
-    rrBuf = [];
-    rmBuf = [];
-    $("rrPlot").innerHTML = "";
-    $("rmPlot").innerHTML = "";
-    rrPlot = makeRRPlot($("rrPlot"), timed);
-    rmPlot = makeRMPlot($("rmPlot"), timed);
-    requestAnimationFrame(() => resizePlotsToContainer());
+    $("btn_stop").disabled  = false;
+
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/api/sessions/${currentSessionId}/stream`);
     ws.onmessage = onWsMessage;
-    ws.onerror = () => {
-      $("live_err").textContent = "WebSocket ошибка";
-    };
+    ws.onerror   = () => setErr("WebSocket ошибка");
+
     stopRaf();
     raf = requestAnimationFrame(redrawLive);
   } catch (e) {
-    $("live_err").textContent = String(e.message || e);
+    setErr(String(e.message || e));
   }
 }
 
 async function stopLive() {
-  $("live_err").textContent = "";
+  setErr("");
   if (!currentSessionId) return;
   try {
-    const s = await api(`/api/sessions/${currentSessionId}/stop`, { method: "POST" });
-    $("live_status").textContent = JSON.stringify(s, null, 2);
+    await api(`/api/sessions/${currentSessionId}/stop`, { method: "POST" });
+    setStatus("Сессия остановлена.");
   } catch (e) {
-    $("live_err").textContent = String(e.message || e);
+    setErr(String(e.message || e));
   }
-  $("btn_stop").disabled = true;
+  $("btn_stop").disabled  = true;
   $("btn_start").disabled = false;
-  if (ws) ws.close();
-  ws = null;
+  if (ws) { ws.close(); ws = null; }
   stopRaf();
+}
+
+$("btn_start").addEventListener("click", startLive);
+$("btn_stop").addEventListener("click",  stopLive);
+
+// ── ARCHIVE ───────────────────────────────────────────────────────────────
+function escapeHtml(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+function fmtTime(ts) {
+  if (ts == null) return "";
+  return new Date(ts * 1000).toLocaleString("ru-RU");
+}
+function tagPill(t) {
+  return `<span class="tag-pill ${escapeHtml(t)}">${escapeHtml(t)}</span>`;
 }
 
 async function loadArchive() {
@@ -334,89 +418,101 @@ async function loadArchive() {
   const tb = $("arch_rows");
   tb.innerHTML = "";
   for (const s of sessions) {
+    const dur = s.ended ? Math.round((s.ended - s.started) / 60) : null;
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${s.id}</td><td>${escapeHtml(s.participant || "")}</td><td>${escapeHtml(s.tag)}</td><td>${escapeHtml(String(s.source).slice(0, 40))}</td><td>${fmtTime(s.started)}</td><td>${s.ended ? fmtTime(s.ended) : "…"}</td>`;
+    tr.innerHTML =
+      `<td style="color:var(--text-dim);font-family:var(--mono);font-size:.8rem">${s.id}</td>` +
+      `<td>${escapeHtml(s.participant || "")}</td>` +
+      `<td>${tagPill(s.tag)}</td>` +
+      `<td style="color:var(--text-dim);font-size:.78rem">${escapeHtml(String(s.source).slice(0, 38))}</td>` +
+      `<td style="font-size:.82rem">${fmtTime(s.started)}</td>` +
+      `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--text-muted)'>…</span>"}</td>` +
+      `<td style="font-family:var(--mono);font-size:.82rem;color:${s.drift_events > 0 ? "var(--yellow)" : "var(--text-muted)"}">${s.drift_events ?? 0}</td>`;
     tr.addEventListener("click", () => openArchiveSession(s.id));
     tb.appendChild(tr);
   }
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function fmtTime(ts) {
-  if (ts == null) return "";
-  const d = new Date(ts * 1000);
-  return d.toLocaleString();
-}
-
 let archRR = null;
 let archRM = null;
 
+function renderSummaryGrid(sum) {
+  const grid = $("arch_summary_grid");
+  grid.innerHTML = "";
+  const fields = [
+    ["RMSSD mean",  sum.rmssd_mean != null ? sum.rmssd_mean.toFixed(1) + " ms" : "—"],
+    ["RMSSD min",   sum.rmssd_min  != null ? sum.rmssd_min.toFixed(1)  + " ms" : "—"],
+    ["RMSSD max",   sum.rmssd_max  != null ? sum.rmssd_max.toFixed(1)  + " ms" : "—"],
+    ["RR mean",     sum.rr_mean    != null ? sum.rr_mean.toFixed(0)    + " ms" : "—"],
+    ["Длительность", sum.duration_min != null ? sum.duration_min.toFixed(1) + " мин" : "—"],
+    ["Drift",       sum.drift_events != null ? String(sum.drift_events) : "—"],
+    ["Baseline",    sum.baseline_at_start != null ? sum.baseline_at_start.toFixed(1) + " ms" : "нет"],
+  ];
+  for (const [label, value] of fields) {
+    const cell = document.createElement("div");
+    cell.className = "summary-cell";
+    cell.innerHTML = `<div class="s-label">${label}</div><div class="s-value">${value}</div>`;
+    grid.appendChild(cell);
+  }
+}
+
 async function openArchiveSession(id) {
-  $("arch_detail").style.display = "block";
-  $("arch_id").textContent = id;
-  const sum = await api(`/api/sessions/${id}`);
-  $("arch_summary").textContent = JSON.stringify(sum, null, 2);
+  const detail = $("arch_detail");
+  detail.classList.add("visible");
+  $("arch_id").textContent = String(id);
+
+  try {
+    const sum = await api(`/api/sessions/${id}`);
+    renderSummaryGrid(sum);
+  } catch {
+    $("arch_summary_grid").innerHTML = "<p style='color:var(--text-dim);font-size:.8rem'>Сводка недоступна (сессия ещё идёт?)</p>";
+  }
+
   const { points } = await api(`/api/sessions/${id}/points?max_points=12000`);
   if (!points.length) return;
-  const t0 = points[0].ts;
-  const xs = points.map((p) => p.ts - t0);
-  const rr = points.map((p) => p.rr_ms);
-  const rm = points.map((p) => p.rmssd);
+
+  const t0   = points[0].ts;
+  const xs   = points.map(p => p.ts - t0);
+  const rr   = points.map(p => p.rr_ms);
+  const rm   = points.map(p => p.rmssd);
+  const xMax = Math.max(...xs, 1);
+
+  // baseline for archive RMSSD
+  const blVal = rm.reduce((a, b) => a + b, 0) / rm.length;
+  const blXs  = [0, xMax];
+  const blYs  = [blVal, blVal];
+
   $("arch_rr").innerHTML = "";
   $("arch_rm").innerHTML = "";
-  const xMax = Math.max(...xs, 1);
+
+  if (archRR) { archRR.destroy(); archRR = null; }
+  if (archRM) { archRM.destroy(); archRM = null; }
+
   const wR = plotWidth($("arch_rr"));
   archRR = new uPlot(
     {
-      width: wR,
-      height: 220,
-      title: "RR (сек от начала сессии)",
-      scales: {
-        x: { ...xScaleLinear, range: [0, xMax] },
-        y: { time: false, distr: 1, range: [350, 1300] },
-      },
-      series: [{}, { stroke: "rgb(79,195,247)", width: 1 }],
-      axes: [
-        { stroke: "#888", label: "с от начала, с", values: fmtAxisSec },
-        { stroke: "#888", label: "RR, ms" },
-      ],
+      ...rrCfg(true, wR),
+      scales: { x: { ...xScaleLinear, range: [0, xMax] }, y: { time:false, distr:1, range:[350,1300] } },
     },
     [xs, rr],
     $("arch_rr")
   );
+
   const rmax = Math.max(50, ...rm) * 1.15;
-  const wM = plotWidth($("arch_rm"));
+  const wM   = plotWidth($("arch_rm"));
   archRM = new uPlot(
     {
-      width: wM,
-      height: 220,
-      title: "RMSSD (сек от начала сессии)",
-      scales: {
-        x: { ...xScaleLinear, range: [0, xMax] },
-        y: { time: false, distr: 1, range: [0, rmax] },
-      },
-      series: [{}, { stroke: "rgb(129,199,132)", width: 1 }],
-      axes: [
-        { stroke: "#888", label: "с от начала, с", values: fmtAxisSec },
-        { stroke: "#888", label: "RMSSD, ms" },
-      ],
+      ...rmssdCfg(true, wM, rmax),
+      scales: { x: { ...xScaleLinear, range: [0, xMax] }, y: { time:false, distr:1, range:[0, rmax] } },
     },
-    [xs, rm],
+    [xs, rm, blXs, blYs],
     $("arch_rm")
   );
-  requestAnimationFrame(() => resizePlotsToContainer());
+
+  requestAnimationFrame(resizePlots);
+  detail.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-$("btn_start").addEventListener("click", startLive);
-$("btn_stop").addEventListener("click", stopLive);
 $("btn_reload").addEventListener("click", loadArchive);
 
-loadTags().catch((e) => {
-  $("live_err").textContent = String(e);
-});
+loadTags().catch(e => setErr(String(e)));

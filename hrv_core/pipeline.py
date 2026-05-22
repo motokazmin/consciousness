@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -92,7 +93,12 @@ class HRVSessionState:
             )
             if self._desktop_notify:
                 try:
-                    subprocess.run(["notify-send", "HRV Monitor", msg], timeout=2)
+                    threading.Thread(
+                        target=subprocess.run,
+                        args=(["notify-send", "HRV Monitor", msg],),
+                        kwargs={"timeout": 2},
+                        daemon=True,
+                    ).start()
                 except Exception:
                     pass
             print(f"\n⚠  {msg}")
