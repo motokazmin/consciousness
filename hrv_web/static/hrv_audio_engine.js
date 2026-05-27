@@ -1,7 +1,53 @@
 /* global window */
 
 /**
+ * Механика Web Audio API (кратко):
+ *
+ *   Звук в браузере строится как граф узлов (AudioNode).
+ *   Каждый узел — один шаг обработки сигнала:
+ *     OscillatorNode    — генерирует тон заданной частоты
+ *     AudioBufferSource — воспроизводит буфер (например, шум)
+ *     GainNode          — множитель громкости (0 = тишина, 1 = без изменений)
+ *     BiquadFilterNode  — фильтр (lowpass, highpass и др.)
+ *   Узлы соединяются через .connect(): сигнал течёт по цепочке до
+ *   ctx.destination — виртуальных «колонок».
+ *
+ *   Ключевая идея: узлы создаются один раз и живут всё время.
+ *   Управление звуком — это изменение параметров (gain, frequency и др.)
+ *   на живых узлах, а не пересоздание графа. Параметры — это AudioParam,
+ *   у них есть методы планирования изменений во времени:
+ *     setValueAtTime(v, t)             — мгновенно установить v в момент t
+ *     linearRampToValueAtTime(v, t)    — линейно дойти до v к моменту t
+ *     setTargetAtTime(v, t, τ)         — экспоненциально приближаться к v
+ *                                        начиная с t; τ (time constant) —
+ *                                        скорость: меньше = резче
+ *
  * Генеративный звуковой ландшафт HRV-биофидбека (Web Audio API).
+ *
+ * Два режима работы (setMode):
+ *
+ *  smooth_rr — «Фоновый ландшафт»
+ *    Текстура (space_pad / sea_wave / tibetan_bowl) звучит непрерывно.
+ *    RR-интервал управляет тембром: короткий RR → открытый фильтр (яркий звук),
+ *    длинный RR → закрытый фильтр (глухой). Обновляется каждый фрейм через
+ *    processFrame({ smoothed_rr }).
+ *
+ *  rmssd_trigger — «Трансовый Порог»
+ *    Четыре синус-осциллятора (padFreqs) крутятся постоянно, но молчат —
+ *    их общий padGain стоит на нуле. Как только rmssd_normalized превышает
+ *    rampStart, padGain плавно нарастает до padGainMax; при падении — затухает.
+ *    Скорость нарастания/затухания — padSmoothSec (time constant setTargetAtTime).
+ *    Что крутить для изменения звука:
+ *      тембр/аккорд → padFreqs, padDetuneCents (или тип волны "sine" в start())
+ *      громкость     → padGainMax
+ *      порог старта  → rampStart / rampEnd
+ *      плавность     → padSmoothSec (0.08 = резко, 0.5+ = плавный fade)
+ *    Текстура в этом режиме тише (textureGain 0.045 vs 0.14) — служит фоном.
+ *
+ * Удар сердца (triggerBeat):
+ *    Вызывается отдельно при каждом R-пике. Создаёт короткий tone (sine + triangle),
+ *    высота которого зависит от RR: быстрый пульс → высокая нота пентатоники,
+ *    медленный → низкая. Независим от режима.
  */
 class HrvAudioEngine {
   static TEXTURES = ["space_pad", "sea_wave", "tibetan_bowl"];
@@ -32,9 +78,17 @@ class HrvAudioEngine {
       padSmoothSec: 0.08,
       padGainMax: 0.28,
       textureGain: 0.045,
-      padFreqs: [220, 277.18, 329.63, 440],
-      padDetuneCents: [-7, 0, 5, 12],
+      // 8 осцилляторов в унисон: каждая частота дублируется с зеркальной расстройкой.
+      // Больше разброс центов → шире и теплее; слишком много → расстроенно.
+      padFreqs: [220, 220, 277.18, 277.18, 329.63, 329.63, 440, 440],
+      padDetuneCents: [-12, +12, -9, +9, -7, +7, -5, +5],
     },
+    // Текстура — постоянно звучащий фоновый слой. Три варианта:
+    //   space_pad    — осцилляторы на пилообразной волне, фильтрованный хор
+    //   sea_wave     — розовый шум, модулированный LFO (имитация волн)
+    //   tibetan_bowl — синус-обертоны с вибрато, как чаша
+    // В каждом варианте есть lowpass-фильтр (lp), частота среза которого
+    // управляется через smoothed_rr в режиме smooth_rr.
     textures: {
       space_pad: {
         freqs: [65.41, 98.0, 130.81, 196.0],
@@ -60,6 +114,18 @@ class HrvAudioEngine {
     },
   };
 
+  // Граф аудиоузлов (создаётся в start(), все поля null до вызова):
+  //
+  //   padOscs[] ──► padGain ──► rmssdMixGain ──┐
+  //   texture   ──────────────► smoothMixGain ──┼──► masterGain ──► [колонки]
+  //   triggerBeat ────────────► heartBeatGain ──┘
+  //
+  //   masterGain    — общая громкость; используется для fade in/out при старте и стопе
+  //   smoothMixGain — шина режима smooth_rr;     setMode() выставляет gain=1 или 0
+  //   rmssdMixGain  — шина режима rmssd_trigger; setMode() выставляет gain=1 или 0
+  //                   (текстура подключена к обеим шинам, слышна только через активную)
+  //   padGain       — громкость осцилляторов Порога; единственное что двигает processFrame()
+  //   heartBeatGain — шина ударов сердца; минует режимные шины, биты слышны всегда
   constructor() {
     this.ctx = null;
     this.running = false;
@@ -89,6 +155,11 @@ class HrvAudioEngine {
     const t0 = this.ctx.currentTime;
     const cfg = HrvAudioEngine.config;
 
+    // Граф узлов создаётся один раз здесь. Дальше звук управляется
+    // только изменением параметров живых узлов — узлы не пересоздаются.
+    // linearRampToValueAtTime — запланированный переход к значению к конкретному моменту времени.
+    // setTargetAtTime (используется ниже) — экспоненциальное приближение без фиксированного конца,
+    // скорость задаётся time constant: меньше = резче.
     this.masterGain = this.ctx.createGain();
     this.masterGain.gain.setValueAtTime(0.0001, t0);
     this.masterGain.gain.linearRampToValueAtTime(1, t0 + cfg.rampSec);
@@ -106,9 +177,12 @@ class HrvAudioEngine {
     this.padGain.gain.setValueAtTime(0, t0);
     this.padGain.connect(this.rmssdMixGain);
 
+    // Осцилляторы Порога: запускаются здесь и крутятся всегда.
+    // Тишина обеспечивается не остановкой, а padGain = 0.
+    // processFrame() только двигает padGain при изменении rmssd_normalized.
     this.padOscs = cfg.rmssdTrigger.padFreqs.map((freq, i) => {
       const osc = this.ctx.createOscillator();
-      osc.type = "sine";
+      osc.type = "triangle"; // "triangle" — мягче и теплее чем "sine" за счёт обертонов
       osc.frequency.setValueAtTime(freq, t0);
       osc.detune.setValueAtTime(cfg.rmssdTrigger.padDetuneCents[i] || 0, t0);
       osc.connect(this.padGain);
@@ -215,6 +289,8 @@ class HrvAudioEngine {
     }
   }
 
+  // Единственная точка управления звуком в рантайме.
+  // Не создаёт узлы — только меняет параметры живого графа.
   processFrame(data) {
     if (!this.ctx || !this.running) return;
     const t0 = this.ctx.currentTime;
@@ -524,6 +600,8 @@ class HrvAudioEngine {
     return notes[Math.max(0, Math.min(notes.length - 1, notes.length - 1 - idx))];
   }
 
+  // Переводит rmssd_normalized → громкость pad.
+  // Мёртвая зона: rn < rampStart → 0. Линейный рост: rampStart..rampEnd → 0..padGainMax.
   _rmssdToPadGain(rn) {
     const cfg = HrvAudioEngine.config.rmssdTrigger;
     if (rn <= cfg.threshold) return 0;
