@@ -1,5 +1,6 @@
 """Ядро HRV: источники, pipeline, БД, сводки."""
 
+from hrv_core.biofeedback import BreathFeedbackLoop, BreathPhase, BreathState
 from hrv_core.constants import DB_PATH, SESSION_TAGS
 from hrv_core.db import init_db, load_hour_baseline, update_session_baseline
 from hrv_core.mock_verify import run_mock_verify
@@ -19,6 +20,9 @@ __all__ = [
     "DB_PATH",
     "SESSION_TAGS",
     "AntPlusHRVSource",
+    "BreathFeedbackLoop",
+    "BreathPhase",
+    "BreathState",
     "FallbackBleAntSource",
     "HRVSessionState",
     "HRVSource",

@@ -8,7 +8,6 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from hrv_core.constants import DB_PATH, SESSION_TAGS
@@ -28,7 +27,6 @@ class StartSessionBody(BaseModel):
     source: str = Field(..., description="mock | ble | ant | ble_ant_fallback")
     address: str | None = None
     minutes: float | None = Field(None, gt=0)
-    desktop_notify: bool = True
 
 
 @app.get("/api/health")
@@ -55,7 +53,6 @@ def start_session(body: StartSessionBody):
             source_kind=body.source,
             address=body.address,
             minutes=body.minutes,
-            desktop_notify=body.desktop_notify,
         )
     except RuntimeError as e:
         if "already_running" in str(e):

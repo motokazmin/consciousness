@@ -4,6 +4,7 @@
 
 - **Архитектура и назначение:** [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Детали MVP** (CLI, веб-UI, BLE/ANT+, baseline, mock): [hrv_mvp.md](hrv_mvp.md)
+- **Веб-аудио (Web Audio):** [ARCHITECTURE.md § Веб-аудио](ARCHITECTURE.md#веб-аудио-где-генерируется-звук)
 
 ## Быстрый старт
 

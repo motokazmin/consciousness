@@ -31,7 +31,7 @@
                              │
 ┌────────────────────────────▼────────────────────────────────┐
 │  hrv_core — ядро                                            │
-│  pipeline (RMSSD, drift)  │  db (SQLite)  │  summary         │
+│  pipeline (RMSSD, drift)  │  biofeedback (RSA) │  db │  summary │
 └────────────────────────────┬────────────────────────────────┘
                              │ callback(rr_ms, ts)
 ┌────────────────────────────▼────────────────────────────────┐
@@ -80,11 +80,10 @@ flowchart LR
 ### Обработка одного удара
 
 1. **Источник** (`hrv_core/sources.py`) в отдельном потоке вызывает `callback(rr_ms, ts)`.
-2. **`HRVSessionState.process_beat()`** (`hrv_core/pipeline.py`):
-   - обновляет скользящий буфер RR (60 с) и историю для графиков;
-   - считает RMSSD;
-   - сравнивает с baseline и при необходимости фиксирует **drift**;
-   - возвращает `BeatSample(ts, rr_ms, rmssd, drift_just_fired)`.
+2. **`BreathFeedbackLoop.process_rr()`** (`hrv_core/biofeedback.py`) и **`HRVSessionState.process_beat()`** (`hrv_core/pipeline.py`):
+   - biofeedback: медианная фильтрация RR, EMA-тренд → фаза вдох/выдох (RSA), `resonance_score`;
+   - pipeline: скользящий буфер RR (60 с), RMSSD, drift;
+   - возвращает `BeatSample(ts, rr_ms, rmssd, drift_just_fired)`; breath-состояние уходит в WebSocket полем `breath`.
 3. **UI-слой** сохраняет точку в `hrv_points`, обновляет графики (CLI или WebSocket).
 4. **При завершении сессии** — summary, обновление персонального baseline по часу.
 
@@ -99,6 +98,7 @@ flowchart LR
 | `constants.py` | Пороги, таймауты, пути (`DB_PATH`, `DRIFT_THRESHOLD=0.80`, окно RMSSD 60 с) |
 | `sources.py` | Абстракция `HRVSource`, реализации mock/BLE/ANT+/fallback, фабрика `build_source()` |
 | `pipeline.py` | `compute_rmssd()`, `HRVSessionState`, детекция drift, `notify-send` |
+| `biofeedback.py` | `BreathFeedbackLoop.process_rr()` — фаза дыхания, RSA amplitude, resonance score |
 | `db.py` | Схема SQLite, миграции, baseline по часу 0–23 |
 | `summary.py` | Session summary для CLI и JSON API |
 | `ble_scan.py` | BLE-сканирование Polar, проверка BlueZ/bleak |
@@ -110,7 +110,9 @@ flowchart LR
 |--------|------|
 | `server.py` | FastAPI: REST + WebSocket, раздача статики |
 | `session_manager.py` | `SessionManager` — одна активная сессия, очередь для WebSocket |
-| `static/` | SPA: форма сессии, live-графики (uPlot), архив |
+| `static/app.js` | SPA: форма, WebSocket, `processAudioFrame()` |
+| `static/hrv_audio_engine.js` | Web Audio: пульс, текстуры, трансовый pad |
+| `static/index.html` | UI режимов «Дышащий Эмбиент» / «Трансовый Порог» |
 
 ### Точки входа
 
@@ -174,11 +176,86 @@ baseline   (hour, rmssd_mean, n_samples, updated_at)   -- hour 0–23
 | `/` | GET | SPA |
 | `/api/sessions` | POST/GET | Старт / список сессий |
 | `/api/sessions/{id}/stop` | POST | Остановка + summary |
-| `/api/sessions/{id}/stream` | WebSocket | Live: `beat`, `meta`, `ended` |
+| `/api/sessions/{id}/stream` | WebSocket | Live: `beat` (+ `breath`), `breath`, `meta`, `ended` |
 | `/api/sessions/{id}/points` | GET | Точки (с downsampling) |
 | `/api/scan` | GET | BLE-сканирование Polar |
 
 Одновременно допускается **только одна активная сессия** (409 Conflict при повторном старте).
+
+---
+
+## Веб-аудио: где генерируется звук
+
+Генеративный звук синтезируется **только в браузере** (Web Audio API). Сервер аудио не передаёт: по WebSocket приходят метрики (`beat`), клиент воспроизводит звук локально.
+
+**Файлы:** [`hrv_web/static/hrv_audio_engine.js`](hrv_web/static/hrv_audio_engine.js) (синтез), [`hrv_web/static/app.js`](hrv_web/static/app.js) (маршрутизация).
+
+### Цепочка вызова
+
+```
+WebSocket { type: "beat" }
+  → app.js: onWsMessage()
+  → processAudioFrame(msg, i)
+  → audioEngine.processFrame(frame)   // фон + трансовый pad
+  → audioEngine.triggerBeat(rr_ms)    // щелчок на каждый удар
+```
+
+Кадр `beat` содержит: `r` (RR), `m` (RMSSD), `sr` (smoothed_rr), `rn` (rmssd_normalized), `bl` (session baseline), `drift`.
+
+### 1. Звук на каждый пульс
+
+| | |
+|---|---|
+| **Метод** | `HrvAudioEngine.triggerBeat(rrMs)` |
+| **Когда** | На **каждый** RR из WebSocket, в **обоих** режимах |
+| **Как** | Два одноразовых осциллятора (sine + triangle), AD-огибающая ~0.22 с |
+| **Частота** | `_rrToPitch()` — пентатоника из `config.beat.pentatonic` по RR |
+| **Выход** | `heartBeatGain` → `masterGain` → динамики |
+
+Параметры: `config.beat.duration`, `gainPeak`, `pentatonic`.
+
+### 2. Монотонный (фоновый) звук
+
+| | |
+|---|---|
+| **Запуск** | `HrvAudioEngine.start()` → `_createTexture()` |
+| **Текстуры** | `space_pad` (4 sawtooth), `sea_wave` (loop-шум + LFO), `tibetan_bowl` (5 sine + LFO) |
+| **Когда играет** | Постоянно после «▶ Запустить звук», пока сессия активна |
+
+**Режим «Дышащий Эмбиент»** (`smooth_rr`): громкость фона не меняется, меняется **cutoff lowpass** по `smoothed_rr` — `_setTextureCutoff()` в `processFrame()`.
+
+**Режим «Трансовый Порог»** (`rmssd_trigger`): та же текстура играет тихо (`rmssdTrigger.textureGain`) через `rmssdMixGain`.
+
+### 3. Звук на резкую смену состояния (только «Трансовый Порог»)
+
+| | |
+|---|---|
+| **Режим** | `rmssd_trigger` |
+| **Осцилляторы** | 4 sine на `padFreqs` — создаются в `start()`, крутятся всегда |
+| **Триггер** | `processFrame()` при изменении `rmssd_normalized` |
+| **Громкость** | `_rmssdToPadGain(rn)` → `padGain.setTargetAtTime(gain, t0, padSmoothSec)` |
+
+Пороги (`config.rmssdTrigger`):
+
+| Параметр | Значение | Смысл |
+|----------|----------|--------|
+| `threshold` | 1.0 | ниже — pad выключен |
+| `rampStart` | 2.5 | начало нарастания |
+| `rampEnd` | 3.5 | полная громкость `padGainMax` |
+| `padSmoothSec` | 0.08 | скорость нарастания/затухания pad |
+
+«Скачок» = рост `rn` выше `rampStart`; затухание — когда `rn` падает (тот же `padSmoothSec`).
+
+### Режимы и микшер
+
+```
+masterGain
+├── heartBeatGain          ← triggerBeat (всегда)
+├── smoothMixGain          ← текстура в режиме smooth_rr
+└── rmssdMixGain           ← текстура (тихо) + padGain (транс)
+```
+
+Переключение режимов: радиокнопки `audio_mode` в форме → `setMode()` кроссфейдом `rampSec`.
 
 ---
 
@@ -223,8 +300,9 @@ Python 3.12 · numpy · bleak (BLE) · openant (опц.) · matplotlib · FastAP
 
 ```
 consciousness/
-├── hrv_core/           # Ядро: источники, pipeline, БД
-├── hrv_web/            # FastAPI + статика
+├── hrv_core/           # Ядро: источники, pipeline, biofeedback, БД
+├── tests/              # unittest (biofeedback)
+├── hrv_web/            # FastAPI + статика (app.js, hrv_audio_engine.js)
 ├── hrv_monitor.py      # CLI
 ├── cluster.py          # Кластеризация
 ├── requirements.txt
@@ -232,3 +310,21 @@ consciousness/
 ├── ARCHITECTURE.md     # Этот документ
 └── hrv_mvp.md          # Детальная спецификация MVP
 ```
+
+---
+
+## Biofeedback (RSA)
+
+Модуль [`hrv_core/biofeedback.py`](hrv_core/biofeedback.py) определяет фазу дыхания по респираторной синусовой аритмии (RR падает на вдохе, растёт на выдохе) без отдельного датчика дыхания.
+
+| Поле WebSocket `breath` | Описание |
+|-------------------------|----------|
+| `phase` | `inhale` / `exhale` / `hold` |
+| `phase_progress` | 0.0–1.0, прогресс текущей фазы |
+| `rsa_amplitude` | размах RR в текущем полуцикле, мс |
+| `resonance_score` | 0.0–1.0, амплитуда RSA × «синусоидальность» тренда |
+
+**Интеграция:** `RunningSession.on_beat()` вызывает `process_rr()` параллельно с RMSSD; веб breath guide на вкладке «Осознанность» синхронизируется с серверной фазой (fallback — таймер 4/1/6 с до прогрева).
+
+**Тесты:** `python -m unittest tests.test_biofeedback`
+

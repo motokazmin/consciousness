@@ -13,181 +13,54 @@ let currentSessionId = null;
 let liveMode   = "window";
 let sessionT0  = 0;
 let durationSec = 0;
-let driftCount = 0;
 let lastRmssd  = null;
+let lastRmssdNormalized = null;
+let lastSmoothedRr = null;
 let sessionBaseline = null;
 
-// ── AWARENESS MODE ────────────────────────────────────────────────────────
-const BREATH_EXPAND_MS  = 4000;
-const BREATH_HOLD_MS    = 1000;
-const BREATH_CONTRACT_MS = 6000;
-const BREATH_CYCLE_MS   = BREATH_EXPAND_MS + BREATH_HOLD_MS + BREATH_CONTRACT_MS;
-const BREATH_SCALE_MIN  = 0.45;
-const BREATH_SCALE_MAX  = 1.0;
+// ── AUDIO BIOFEEDBACK ─────────────────────────────────────────────────────
+let audioEngine = null;
+let audioSessionActive = false;
+let audioEnabled = false;
+let audioMode = "smooth_rr";
+let audioTexture = "space_pad";
 
-const awareness = {
-  breathGuide: false,
-  driftSound: false,
-  ambientBg: false,
-  sessionActive: false,
-  breathStartMs: 0,
-  breathRaf: null,
-  audioCtx: null,
-  lastDriftCueAt: 0,
+function audioOptions() {
+  const el = $("opt_audio_biofeedback");
+  return { audioBiofeedback: el ? el.checked : false };
+}
+
+function currentAudioMode() {
+  const selected = document.querySelector('input[name="audio_mode"]:checked');
+  return selected ? selected.value : audioMode;
+}
+
+function currentAudioTexture() {
+  const el = $("audio_texture");
+  return el ? el.value : audioTexture;
+}
+
+const TEXTURE_LABELS = {
+  space_pad: "Космический пэд",
+  sea_wave: "Морской прибой",
+  tibetan_bowl: "Тибетская чаша",
 };
 
-function awarenessOptions() {
-  const g = $("opt_breath_guide");
-  const s = $("opt_drift_sound");
-  const a = $("opt_ambient_bg");
-  return {
-    breathGuide: g ? g.checked : false,
-    driftSound:  s ? s.checked : false,
-    ambientBg:   a ? a.checked : false,
-  };
+function setAudioStatus(text, active) {
+  const pill = $("audio_status_pill");
+  const label = $("audio_status_label");
+  if (pill) pill.classList.toggle("active", !!active);
+  if (label) label.textContent = text;
 }
 
-async function ensureAudioContext() {
-  if (!awareness.audioCtx) {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return null;
-    awareness.audioCtx = new Ctx();
-  }
-  if (awareness.audioCtx.state === "suspended") {
-    await awareness.audioCtx.resume();
-  }
-  return awareness.audioCtx;
-}
+function syncBiofeedbackStats() {
+  const rmEl = $("bf_rmssd");
+  const baseEl = $("bf_base");
+  const rnEl = $("bf_rn");
+  const srEl = $("bf_smoothed_rr");
+  const modeEl = $("bf_mode_label");
+  const texEl = $("bf_texture_label");
 
-async function playDriftTone() {
-  if (!awareness.driftSound || !awareness.sessionActive) return;
-  try {
-    const ctx = await ensureAudioContext();
-    if (!ctx) return;
-
-    const t0 = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(440, t0);
-    osc.frequency.exponentialRampToValueAtTime(349, t0 + 0.5);
-
-    gain.gain.setValueAtTime(0.0001, t0);
-    gain.gain.exponentialRampToValueAtTime(0.14, t0 + 0.04);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.65);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(t0);
-    osc.stop(t0 + 0.7);
-  } catch (e) {
-    console.warn("drift tone:", e);
-  }
-}
-
-function breathPhase(elapsedMs) {
-  const t = elapsedMs % BREATH_CYCLE_MS;
-  if (t < BREATH_EXPAND_MS) {
-    const p = t / BREATH_EXPAND_MS;
-    return { label: "Вдох", scale: BREATH_SCALE_MIN + (BREATH_SCALE_MAX - BREATH_SCALE_MIN) * p };
-  }
-  if (t < BREATH_EXPAND_MS + BREATH_HOLD_MS) {
-    return { label: "Пауза", scale: BREATH_SCALE_MAX };
-  }
-  const p = (t - BREATH_EXPAND_MS - BREATH_HOLD_MS) / BREATH_CONTRACT_MS;
-  return { label: "Выдох", scale: BREATH_SCALE_MAX - (BREATH_SCALE_MAX - BREATH_SCALE_MIN) * p };
-}
-
-function setBreathScale(scale) {
-  const ring = $("breath_ring");
-  const glow = $("breath_glow");
-  const tf = `scale(${scale})`;
-  if (ring) ring.style.transform = tf;
-  if (glow) glow.style.transform = tf;
-}
-
-function updateBreathGuide() {
-  if (!awareness.breathGuide || !awareness.sessionActive) {
-    awareness.breathRaf = null;
-    return;
-  }
-  const elapsed = performance.now() - awareness.breathStartMs;
-  const { label, scale } = breathPhase(elapsed);
-  setBreathScale(scale);
-  const lbl = $("breath_label");
-  if (lbl) lbl.textContent = label;
-  awareness.breathRaf = requestAnimationFrame(updateBreathGuide);
-}
-
-function startBreathGuide() {
-  stopBreathGuide();
-  if (!awareness.breathGuide) {
-    setBreathGuideVisible(false);
-    return;
-  }
-  setBreathGuideVisible(true);
-  awareness.breathStartMs = performance.now();
-  awareness.breathRaf = requestAnimationFrame(updateBreathGuide);
-}
-
-function stopBreathGuide() {
-  if (awareness.breathRaf) cancelAnimationFrame(awareness.breathRaf);
-  awareness.breathRaf = null;
-  setBreathScale(BREATH_SCALE_MIN);
-}
-
-function setBreathGuideVisible(on) {
-  const stage = $("breath_stage");
-  const idle = $("breath_idle_msg");
-  const visual = $("breath_visual");
-  const label = $("breath_label");
-  const hint = $("breath_hint");
-  if (idle) idle.hidden = on;
-  if (visual) visual.hidden = !on;
-  if (label) label.hidden = !on;
-  if (hint) hint.hidden = !on;
-  if (stage) stage.classList.toggle("idle", !on);
-}
-
-function updateAmbientBg() {
-  const bg = $("ambient-bg");
-  if (!awareness.ambientBg || !awareness.sessionActive) {
-    document.body.classList.remove("awareness-ambient");
-    if (bg) bg.style.background = "var(--bg)";
-    return;
-  }
-  document.body.classList.add("awareness-ambient");
-
-  const refHigh = sessionBaseline != null && sessionBaseline > 10 ? sessionBaseline : 55;
-  const refLow = Math.max(15, refHigh * 0.45);
-  const rm = lastRmssd != null ? lastRmssd : refHigh * 0.7;
-  const t = Math.max(0, Math.min(1, (rm - refLow) / (refHigh - refLow)));
-
-  const r = Math.round(6 + t * 28);
-  const g = Math.round(8 + t * 52);
-  const b = Math.round(14 + t * 96);
-  const gr = Math.round(30 + t * 80);
-  const gg = Math.round(70 + t * 90);
-  const gb = Math.round(130 + t * 80);
-  const glowA = (0.12 + t * 0.38).toFixed(2);
-
-  if (bg) {
-    bg.style.background =
-      `radial-gradient(ellipse 85% 65% at 50% 32%, rgba(${gr},${gg},${gb},${glowA}), transparent 72%), ` +
-      `rgb(${r}, ${g}, ${b})`;
-  }
-}
-
-function resetAmbientBg() {
-  document.body.classList.remove("awareness-ambient");
-  const bg = $("ambient-bg");
-  if (bg) bg.style.background = "var(--bg)";
-}
-
-function syncAwarenessStats() {
-  const rmEl = $("aware_rmssd");
-  const baseEl = $("aware_base");
-  const driftEl = $("aware_drift");
   if (rmEl) {
     rmEl.textContent = lastRmssd !== null ? lastRmssd.toFixed(1) : "—";
     if (lastRmssd !== null && sessionBaseline !== null && sessionBaseline > 1) {
@@ -198,60 +71,112 @@ function syncAwarenessStats() {
     }
   }
   if (baseEl) baseEl.textContent = sessionBaseline !== null ? sessionBaseline.toFixed(1) : "—";
-  if (driftEl) {
-    driftEl.textContent = String(driftCount);
-    driftEl.className = "stat-value" + (driftCount > 0 ? " bad" : "");
+  if (rnEl) {
+    rnEl.textContent = lastRmssdNormalized !== null ? lastRmssdNormalized.toFixed(2) : "—";
+    rnEl.className = "stat-value" + (lastRmssdNormalized != null && lastRmssdNormalized >= 2.5 ? " good" : "");
+  }
+  if (srEl) srEl.textContent = lastSmoothedRr !== null ? Math.round(lastSmoothedRr) + " ms" : "—";
+  if (modeEl) {
+    modeEl.textContent = audioMode === "smooth_rr" ? "Дышащий Эмбиент" : "Трансовый Порог";
+  }
+  if (texEl) {
+    texEl.textContent = TEXTURE_LABELS[audioTexture] || audioTexture;
   }
 }
 
-function applyAwarenessOptions(opts) {
-  awareness.breathGuide = opts.breathGuide;
-  awareness.driftSound = opts.driftSound;
-  awareness.ambientBg = opts.ambientBg;
-}
-
-function startAwarenessSession(opts) {
-  applyAwarenessOptions(opts);
-  awareness.sessionActive = true;
-  updateAmbientBg();
-  startBreathGuide();
-}
-
-function stopAwarenessSession() {
-  awareness.sessionActive = false;
-  stopBreathGuide();
-  setBreathGuideVisible(false);
-  resetAmbientBg();
-  const badge = $("awareness_drift_badge");
-  if (badge) badge.classList.remove("active");
-}
-
-function triggerDriftCue(fromServer) {
-  const now = Date.now();
-  if (now - awareness.lastDriftCueAt < 120000) return;
-  awareness.lastDriftCueAt = now;
-  if (fromServer) driftCount++;
-  flashDriftBadge();
-  playDriftTone();
-  syncAwarenessStats();
-}
-
-function maybeClientDriftCue() {
-  if (!awareness.driftSound || !awareness.sessionActive) return;
-  if (lastRmssd === null || sessionBaseline === null || sessionBaseline <= 1) return;
-  if (rmBuf.length < 30) return;
-  if (lastRmssd >= sessionBaseline * 0.80) return;
-  triggerDriftCue(false);
-}
-
-function flashDriftBadge() {
-  for (const id of ["drift_badge", "awareness_drift_badge"]) {
-    const el = $(id);
-    if (!el) continue;
-    el.classList.add("active");
-    setTimeout(() => el.classList.remove("active"), 4000);
+async function startAudioEngine() {
+  if (!window.HrvAudioEngine) {
+    setErr("HrvAudioEngine не загружен");
+    return;
+  }
+  if (audioEngine?.running) return;
+  try {
+    audioEngine = new HrvAudioEngine();
+    audioTexture = currentAudioTexture();
+    audioEngine.textureId = audioTexture;
+    audioEngine.setMode(audioMode);
+    await audioEngine.start();
+    setAudioStatus("Звук активен", true);
+    $("btn_audio_start").disabled = true;
+  } catch (e) {
+    setErr(String(e.message || e));
   }
 }
+
+async function stopAudioEngine() {
+  if (!audioEngine) return;
+  await audioEngine.stop();
+  audioEngine = null;
+  setAudioStatus("Звук остановлен", false);
+  const btn = $("btn_audio_start");
+  if (btn) btn.disabled = !audioSessionActive || !audioEnabled;
+}
+
+function setAudioMode(mode) {
+  if (mode !== "smooth_rr" && mode !== "rmssd_trigger") return;
+  audioMode = mode;
+  audioEngine?.setMode(mode);
+  syncBiofeedbackStats();
+}
+
+function setAudioTexture(textureId) {
+  if (!HrvAudioEngine?.TEXTURES?.includes(textureId)) return;
+  audioTexture = textureId;
+  audioEngine?.setTexture(textureId);
+  syncBiofeedbackStats();
+}
+
+function setBiofeedbackPanelVisible(on) {
+  const stage = $("biofeedback_stage");
+  const idle = $("biofeedback_idle_msg");
+  const controls = $("biofeedback_controls");
+  if (idle) idle.hidden = on;
+  if (controls) controls.hidden = !on;
+  if (stage) stage.classList.toggle("idle", !on);
+}
+
+function startBiofeedbackSession(opts) {
+  audioEnabled = opts.audioBiofeedback;
+  audioSessionActive = true;
+  audioMode = currentAudioMode();
+  setBiofeedbackPanelVisible(audioEnabled);
+  setAudioStatus(audioEnabled ? "Ожидание запуска звука" : "Аудио выключено", false);
+  const btn = $("btn_audio_start");
+  if (btn) btn.disabled = !audioEnabled;
+  syncBiofeedbackStats();
+}
+
+function stopBiofeedbackSession() {
+  audioSessionActive = false;
+  stopAudioEngine();
+  setBiofeedbackPanelVisible(false);
+  setAudioStatus("Нет активной сессии", false);
+  const btn = $("btn_audio_start");
+  if (btn) btn.disabled = true;
+}
+
+function processAudioFrame(msg, i) {
+  if (!audioEngine?.running) return;
+  const frame = {
+    ts: msg.t[i],
+    rr_ms: msg.r[i],
+    rmssd: msg.m[i],
+    rmssd_normalized: msg.rn?.[i] ?? null,
+    smoothed_rr: msg.sr?.[i] ?? null,
+  };
+  audioEngine.processFrame(frame);
+  audioEngine.triggerBeat(frame.rr_ms);
+}
+
+document.querySelectorAll('input[name="audio_mode"]').forEach((el) => {
+  el.addEventListener("change", () => setAudioMode(el.value));
+});
+
+$("audio_texture")?.addEventListener("change", (ev) => {
+  setAudioTexture(ev.target.value);
+});
+
+$("btn_audio_start")?.addEventListener("click", startAudioEngine);
 
 // ── TABS ──────────────────────────────────────────────────────────────────
 function switchTab(name) {
@@ -426,20 +351,19 @@ window.addEventListener("resize", () => {
 
 // ── STATS ─────────────────────────────────────────────────────────────────
 function updateStats() {
-  syncAwarenessStats();
-  updateAmbientBg();
+  syncBiofeedbackStats();
   if (lastRmssd === null) return;
   const rmssdEl = $("stat_rmssd");
   rmssdEl.textContent = lastRmssd.toFixed(1);
-  // colour coding vs baseline
   if (sessionBaseline !== null && sessionBaseline > 1) {
     const ratio = lastRmssd / sessionBaseline;
     rmssdEl.className = "stat-value" + (ratio < 0.75 ? " bad" : ratio > 0.95 ? " good" : " warn");
-    maybeClientDriftCue();
   }
   $("stat_base").textContent = sessionBaseline !== null ? sessionBaseline.toFixed(1) : "—";
-  $("stat_drift").textContent = String(driftCount);
-  if (driftCount > 0) $("stat_drift").className = "stat-value bad";
+  const rnEl = $("stat_rn");
+  if (rnEl) {
+    rnEl.textContent = lastRmssdNormalized !== null ? lastRmssdNormalized.toFixed(2) : "—";
+  }
 }
 
 function updateHR(rrMs) {
@@ -524,10 +448,10 @@ function onWsMessage(ev) {
     setStatus("Сессия завершена.");
     $("btn_stop").disabled = true;
     $("btn_start").disabled = false;
-    setAwarenessControlsEnabled(true);
+    setBiofeedbackControlsEnabled(true);
     if (ws) { ws.close(); ws = null; }
     stopRaf();
-    stopAwarenessSession();
+    stopBiofeedbackSession();
     return;
   }
   if (msg.type === "beat" && msg.t?.length) {
@@ -535,11 +459,13 @@ function onWsMessage(ev) {
       rrBuf.push([msg.t[i], msg.r[i]]);
       rmBuf.push([msg.t[i], msg.m[i]]);
       lastRmssd = msg.m[i];
+      if (msg.rn?.[i] != null) lastRmssdNormalized = msg.rn[i];
+      if (msg.sr?.[i] != null) lastSmoothedRr = msg.sr[i];
+      if (msg.bl != null) sessionBaseline = msg.bl;
       updateHR(msg.r[i]);
+      if (audioEnabled) processAudioFrame(msg, i);
     }
-    updateAmbientBg();
-    syncAwarenessStats();
-    if (msg.drift) triggerDriftCue(true);
+    syncBiofeedbackStats();
   }
 }
 
@@ -555,10 +481,9 @@ function setErr(txt) {
   el.classList.toggle("visible", !!txt);
 }
 
-function setAwarenessControlsEnabled(on) {
-  for (const id of ["opt_breath_guide", "opt_drift_sound", "opt_ambient_bg"]) {
-    $(id).disabled = !on;
-  }
+function setBiofeedbackControlsEnabled(on) {
+  const el = $("opt_audio_biofeedback");
+  if (el) el.disabled = !on;
 }
 
 async function startLive() {
@@ -575,12 +500,11 @@ async function startLive() {
     source: $("source").value,
     address: $("address").value.trim() || null,
     minutes: minutes != null && !Number.isNaN(minutes) && minutes > 0 ? minutes : null,
-    desktop_notify: $("desktop_notify").checked,
   };
 
   try {
-    const opts = awarenessOptions();
-    if (opts.driftSound || opts.breathGuide) await ensureAudioContext();
+    const opts = audioOptions();
+    audioMode = currentAudioMode();
 
     const res = await api("/api/sessions", { method: "POST", body: JSON.stringify(body) });
     currentSessionId = res.id;
@@ -588,18 +512,17 @@ async function startLive() {
     liveMode    = timed ? "timed" : "window";
     sessionT0   = typeof res.started_at === "number" ? res.started_at : Date.now() / 1000;
     durationSec = timed ? body.minutes * 60 : 0;
-    driftCount  = 0;
-    awareness.lastDriftCueAt = 0;
     lastRmssd   = null;
+    lastRmssdNormalized = null;
+    lastSmoothedRr = null;
     sessionBaseline = null;
 
     $("stat_rmssd").textContent = "—";
     $("stat_rmssd").className   = "stat-value";
     $("stat_base").textContent  = "—";
     $("stat_hr").textContent    = "—";
-    $("stat_drift").textContent = "0";
-    $("stat_drift").className   = "stat-value";
-    syncAwarenessStats();
+    $("stat_rn").textContent    = "—";
+    syncBiofeedbackStats();
 
     $("stats_strip").classList.add("visible");
     $("live_plots").classList.add("visible");
@@ -620,7 +543,7 @@ async function startLive() {
     setStatus(`Сессия #${currentSessionId} · ${body.tag}${timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);
     $("btn_start").disabled = true;
     $("btn_stop").disabled  = false;
-    setAwarenessControlsEnabled(false);
+    setBiofeedbackControlsEnabled(false);
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/api/sessions/${currentSessionId}/stream`);
@@ -630,8 +553,11 @@ async function startLive() {
     stopRaf();
     raf = requestAnimationFrame(redrawLive);
 
-    startAwarenessSession(opts);
-    if (opts.breathGuide) switchTab("awareness");
+    startBiofeedbackSession(opts);
+    if (opts.audioBiofeedback) {
+      await startAudioEngine();
+      switchTab("biofeedback");
+    }
   } catch (e) {
     setErr(String(e.message || e));
   }
@@ -648,10 +574,10 @@ async function stopLive() {
   }
   $("btn_stop").disabled  = true;
   $("btn_start").disabled = false;
-  setAwarenessControlsEnabled(true);
+  setBiofeedbackControlsEnabled(true);
   if (ws) { ws.close(); ws = null; }
   stopRaf();
-  stopAwarenessSession();
+  stopBiofeedbackSession();
 }
 
 $("btn_start").addEventListener("click", startLive);
@@ -687,8 +613,7 @@ async function loadArchive() {
       `<td>${tagPill(s.tag)}</td>` +
       `<td style="color:var(--text-dim);font-size:.78rem">${escapeHtml(String(s.source).slice(0, 38))}</td>` +
       `<td style="font-size:.82rem">${fmtTime(s.started)}</td>` +
-      `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--text-muted)'>…</span>"}</td>` +
-      `<td style="font-family:var(--mono);font-size:.82rem;color:${s.drift_events > 0 ? "var(--yellow)" : "var(--text-muted)"}">${s.drift_events ?? 0}</td>`;
+      `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--text-muted)'>…</span>"}</td>`;
     tr.addEventListener("click", () => openArchiveSession(s.id));
     tb.appendChild(tr);
   }
@@ -706,7 +631,6 @@ function renderSummaryGrid(sum) {
     ["RMSSD max",   sum.rmssd_max  != null ? sum.rmssd_max.toFixed(1)  + " ms" : "—"],
     ["RR mean",     sum.rr_mean    != null ? sum.rr_mean.toFixed(0)    + " ms" : "—"],
     ["Длительность", sum.duration_min != null ? sum.duration_min.toFixed(1) + " мин" : "—"],
-    ["Drift",       sum.drift_events != null ? String(sum.drift_events) : "—"],
     ["Baseline",    sum.baseline_at_start != null ? sum.baseline_at_start.toFixed(1) + " ms" : "нет"],
   ];
   for (const [label, value] of fields) {

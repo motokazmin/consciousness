@@ -301,8 +301,20 @@ def main():
         conn_lock=conn_lock if source_kind == "ble_ant_fallback" else None,
     )
 
+    breath = BreathFeedbackLoop()
+    last_breath_log = [0.0]
+
     def on_beat(rr_ms: float, ts: float):
+        breath_state = breath.process_rr(rr_ms, ts)
         sample = state.process_beat(rr_ms, ts)
+        if breath_state is not None and ts - last_breath_log[0] >= 5.0:
+            last_breath_log[0] = ts
+            print(
+                f"  breath {breath_state.phase.value}  "
+                f"progress={breath_state.phase_progress:.2f}  "
+                f"rsa={breath_state.rsa_amplitude} ms  "
+                f"resonance={breath_state.resonance_score:.2f}"
+            )
         if sample is None:
             return
         with conn_lock:

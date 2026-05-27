@@ -30,36 +30,15 @@
 
     body {
       font-family: var(--sans);
-      background: transparent;
+      background: var(--bg);
       color: var(--text);
       min-height: 100vh;
       overflow-x: hidden;
     }
 
-    #ambient-bg {
-      position: fixed;
-      inset: 0;
-      z-index: 0;
-      pointer-events: none;
-      background: var(--bg);
-      transition: background 1.6s ease;
-    }
-
     header, nav, main {
       position: relative;
       z-index: 1;
-    }
-
-    body.awareness-ambient header,
-    body.awareness-ambient nav {
-      background: rgba(17, 20, 24, 0.62);
-      backdrop-filter: blur(8px);
-    }
-    body.awareness-ambient main .card,
-    body.awareness-ambient main .stat-cell,
-    body.awareness-ambient main .plot-card,
-    body.awareness-ambient main .table-wrap {
-      background: rgba(17, 20, 24, 0.82);
     }
 
     /* ── HEADER ── */
@@ -319,33 +298,162 @@
       color: var(--text-muted);
     }
 
-    /* ── DRIFT INDICATOR ── */
-    .drift-badge {
+    /* ── AUDIO BIOFEEDBACK ── */
+    .biofeedback-layout {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 20px;
+      align-items: start;
+    }
+    @media (max-width: 900px) {
+      .biofeedback-layout { grid-template-columns: 1fr; }
+    }
+
+    .biofeedback-panel {
+      min-height: 420px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      padding: 28px 24px;
+    }
+    .biofeedback-panel.idle {
+      min-height: 280px;
+      color: var(--text-dim);
+      font-size: 0.88rem;
+      text-align: center;
+      line-height: 1.6;
+      justify-content: center;
+    }
+
+    .audio-status-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .audio-status-pill {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
+      gap: 8px;
       font-family: var(--mono);
-      font-size: 0.7rem;
+      font-size: 0.72rem;
       letter-spacing: 0.08em;
-      padding: 3px 10px;
+      text-transform: uppercase;
+      padding: 6px 12px;
       border-radius: 20px;
-      background: rgba(245,197,66,.1);
-      border: 1px solid rgba(245,197,66,.25);
-      color: var(--yellow);
-      opacity: 0;
-      transition: opacity .4s;
+      background: rgba(90, 100, 120, 0.12);
+      border: 1px solid var(--border2);
+      color: var(--text-dim);
     }
-    .drift-badge.active { opacity: 1; }
-    .drift-dot {
-      width: 6px; height: 6px;
+    .audio-status-pill.active {
+      background: rgba(57, 224, 133, 0.1);
+      border-color: rgba(57, 224, 133, 0.28);
+      color: var(--green);
+    }
+    .audio-status-dot {
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
-      background: var(--yellow);
-      animation: pulse-dot 1s ease-in-out infinite;
+      background: var(--text-muted);
     }
-    @keyframes pulse-dot {
-      0%,100% { opacity: 1; }
-      50%      { opacity: .3; }
+    .audio-status-pill.active .audio-status-dot {
+      background: var(--green);
+      box-shadow: 0 0 8px rgba(57, 224, 133, 0.6);
     }
+
+    .mode-switcher {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .mode-option {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface2);
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .mode-option:has(input:checked) {
+      border-color: rgba(0, 212, 255, 0.45);
+      background: rgba(0, 212, 255, 0.05);
+    }
+    .mode-option input { margin-top: 3px; accent-color: var(--accent); }
+    .mode-option-title {
+      font-size: 0.88rem;
+      font-weight: 500;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+    .mode-option-desc {
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+
+    .texture-field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-width: 320px;
+    }
+    .texture-field label {
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+    }
+    .texture-field select {
+      width: 100%;
+      padding: 9px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border2);
+      border-radius: 7px;
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 0.88rem;
+      outline: none;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%235a6478' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 32px;
+    }
+    .texture-field select:focus {
+      border-color: var(--accent2);
+      box-shadow: 0 0 0 3px rgba(0,212,255,.08);
+    }
+
+    .biofeedback-options {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 14px;
+      padding: 12px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .biofeedback-options-title {
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+    }
+
+    .biofeedback-mini-stats {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .biofeedback-mini-stats .stat-cell { border-radius: 8px; border: 1px solid var(--border); }
 
     /* ── PLOTS PANEL ── */
     .plots-panel {
@@ -482,104 +590,9 @@
     ::-webkit-scrollbar-track { background: var(--bg); }
     ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
-    /* ── AWARENESS MODE ── */
-    .awareness-options {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      margin-bottom: 14px;
-      padding: 12px;
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-    }
-    .awareness-options-title {
-      font-family: var(--mono);
-      font-size: 0.62rem;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--text-dim);
-      margin-bottom: 2px;
-    }
-
-    .awareness-layout {
-      display: grid;
-      grid-template-columns: 1fr 320px;
-      gap: 20px;
-      align-items: start;
-    }
-    @media (max-width: 900px) {
-      .awareness-layout { grid-template-columns: 1fr; }
-    }
-
-    .breath-stage {
-      min-height: 420px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 24px;
-      padding: 32px 20px;
-    }
-    .breath-stage.idle {
-      min-height: 280px;
-      color: var(--text-dim);
-      font-size: 0.88rem;
-      text-align: center;
-      line-height: 1.6;
-    }
-
-    .breath-ring-wrap {
-      position: relative;
-      width: 220px;
-      height: 220px;
-      display: grid;
-      place-items: center;
-    }
-    .breath-ring-glow {
-      position: absolute;
-      inset: 0;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(0,212,255,.22) 0%, transparent 70%);
-      transform: scale(0.55);
-      will-change: transform;
-    }
-    .breath-ring {
-      width: 160px;
-      height: 160px;
-      border-radius: 50%;
-      border: 2px solid rgba(0,212,255,.55);
-      background: rgba(0,212,255,.06);
-      box-shadow: 0 0 40px rgba(0,212,255,.12);
-      transform: scale(0.55);
-      will-change: transform;
-    }
-    .breath-label {
-      font-family: var(--mono);
-      font-size: 0.85rem;
-      letter-spacing: 0.2em;
-      text-transform: uppercase;
-      color: var(--accent);
-    }
-    .breath-hint {
-      font-size: 0.78rem;
-      color: var(--text-muted);
-      text-align: center;
-      max-width: 280px;
-      line-height: 1.5;
-    }
-
-    .awareness-mini-stats {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .awareness-mini-stats .stat-cell { border-radius: 8px; border: 1px solid var(--border); }
   </style>
 </head>
 <body>
-
-<div id="ambient-bg" aria-hidden="true"></div>
 
 <header>
   <div class="logo-mark">
@@ -592,7 +605,7 @@
 
 <nav>
   <button type="button" data-tab="live" class="active">Запись</button>
-  <button type="button" data-tab="awareness">Осознанность</button>
+  <button type="button" data-tab="biofeedback">Биофидбек</button>
   <button type="button" data-tab="archive">Архив</button>
 </nav>
 
@@ -607,9 +620,6 @@
         <div class="card">
           <div class="card-header">
             <span class="card-title">Параметры сессии</span>
-            <div class="drift-badge" id="drift_badge">
-              <div class="drift-dot"></div>DRIFT
-            </div>
           </div>
           <div class="card-body">
             <div class="field">
@@ -643,25 +653,13 @@
                 <input id="minutes" type="number" step="0.5" min="0.5" placeholder="∞" />
               </div>
             </div>
-            <div class="awareness-options">
-              <div class="awareness-options-title">Режим осознанности</div>
+            <div class="biofeedback-options">
+              <div class="biofeedback-options-title">Аудио-биофидбек</div>
               <label class="check-label">
-                <input type="checkbox" id="opt_breath_guide" />
-                Дыхательный гид (4с вдох / 1с пауза / 6с выдох)
-              </label>
-              <label class="check-label">
-                <input type="checkbox" id="opt_drift_sound" checked />
-                Мягкий звук при drift
-              </label>
-              <label class="check-label">
-                <input type="checkbox" id="opt_ambient_bg" checked />
-                Ambient-фон по RMSSD
+                <input type="checkbox" id="opt_audio_biofeedback" checked />
+                Генеративный звуковой ландшафт (Web Audio)
               </label>
             </div>
-            <label class="check-label" style="margin-bottom:18px">
-              <input type="checkbox" id="desktop_notify" checked />
-              notify-send при drift
-            </label>
             <div class="btn-row">
               <button type="button" class="btn btn-primary" id="btn_start">▶ Старт</button>
               <button type="button" class="btn btn-danger" id="btn_stop" disabled>■ Стоп</button>
@@ -693,9 +691,9 @@
             <div class="stat-sub">уд/мин</div>
           </div>
           <div class="stat-cell">
-            <div class="stat-label">Drift</div>
-            <div class="stat-value" id="stat_drift">0</div>
-            <div class="stat-sub">событий</div>
+            <div class="stat-label">RMSSD norm</div>
+            <div class="stat-value" id="stat_rn">—</div>
+            <div class="stat-sub">× baseline</div>
           </div>
         </div>
 
@@ -717,48 +715,87 @@
     </div>
   </section>
 
-  <!-- ── AWARENESS ── -->
-  <section id="tab-awareness">
-    <div class="awareness-layout">
+  <!-- ── BIOFEEDBACK ── -->
+  <section id="tab-biofeedback">
+    <div class="biofeedback-layout">
       <div class="card">
         <div class="card-header">
-          <span class="card-title">Дыхательный гид</span>
-          <div class="drift-badge" id="awareness_drift_badge">
-            <div class="drift-dot"></div>DRIFT
-          </div>
+          <span class="card-title">Аудио-ландшафт</span>
         </div>
-        <div class="card-body breath-stage idle" id="breath_stage">
-          <p id="breath_idle_msg">Включите «Дыхательный гид» в параметрах сессии и нажмите ▶ Старт на вкладке «Запись».</p>
-          <div class="breath-ring-wrap" id="breath_visual" hidden>
-            <div class="breath-ring-glow" id="breath_glow"></div>
-            <div class="breath-ring" id="breath_ring"></div>
+        <div class="card-body biofeedback-panel idle" id="biofeedback_stage">
+          <p id="biofeedback_idle_msg">Включите «Аудио-биофидбек» в параметрах сессии и нажмите ▶ Старт на вкладке «Запись».</p>
+          <div id="biofeedback_controls" hidden>
+            <div class="audio-status-row">
+              <div class="audio-status-pill" id="audio_status_pill">
+                <span class="audio-status-dot"></span>
+                <span id="audio_status_label">Нет активной сессии</span>
+              </div>
+              <button type="button" class="btn btn-primary" id="btn_audio_start" disabled>▶ Запустить звук</button>
+            </div>
+
+            <div class="mode-switcher">
+              <label class="mode-option">
+                <input type="radio" name="audio_mode" value="smooth_rr" checked />
+                <div>
+                  <div class="mode-option-title">Дышащий Эмбиент</div>
+                  <div class="mode-option-desc">Низкий фон «дышит» вслед за smoothed RR — для удержания внимания без экрана.</div>
+                </div>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="audio_mode" value="rmssd_trigger" />
+                <div>
+                  <div class="mode-option-title">Трансовый Порог</div>
+                  <div class="mode-option-desc">Тихий фон + скрытый pad, который нарастает при скачке rmssd_normalized — маркер гипнагогии.</div>
+                </div>
+              </label>
+            </div>
+
+            <div class="texture-field">
+              <label for="audio_texture">Текстура фона</label>
+              <select id="audio_texture">
+                <option value="space_pad">Космический пэд</option>
+                <option value="sea_wave">Морской прибой</option>
+                <option value="tibetan_bowl">Тибетская чаша</option>
+              </select>
+            </div>
+
+            <p style="font-size:.78rem;color:var(--text-muted);line-height:1.55;max-width:520px">
+              Капли сердца звучат на каждый удар H10. Pitch привязан к RR через пентатонику A-minor.
+            </p>
           </div>
-          <div class="breath-label" id="breath_label" hidden>—</div>
-          <p class="breath-hint" id="breath_hint" hidden>Следуйте кругу: расширение — вдох, пауза — задержка, сжатие — выдох.</p>
         </div>
       </div>
 
-      <div class="awareness-mini-stats">
+      <div class="biofeedback-mini-stats">
         <div class="stat-cell">
           <div class="stat-label">RMSSD</div>
-          <div class="stat-value" id="aware_rmssd">—</div>
-          <div class="stat-sub">ms · ambient-фон</div>
+          <div class="stat-value" id="bf_rmssd">—</div>
+          <div class="stat-sub">ms</div>
         </div>
         <div class="stat-cell">
           <div class="stat-label">Baseline</div>
-          <div class="stat-value" id="aware_base">—</div>
+          <div class="stat-value" id="bf_base">—</div>
           <div class="stat-sub">сессия</div>
         </div>
         <div class="stat-cell">
-          <div class="stat-label">Drift</div>
-          <div class="stat-value" id="aware_drift">0</div>
-          <div class="stat-sub">событий</div>
+          <div class="stat-label">RMSSD norm</div>
+          <div class="stat-value" id="bf_rn">—</div>
+          <div class="stat-sub">× baseline</div>
         </div>
-        <div class="card" style="margin-top:4px">
-          <div class="card-body" style="font-size:.82rem;color:var(--text-dim);line-height:1.55">
-            <strong style="color:var(--text);font-weight:500">Ambient</strong> — тёплый синий при высоком RMSSD, тускнеет при падении.<br><br>
-            <strong style="color:var(--text);font-weight:500">Звук drift</strong> — короткий мягкий тон как напоминание вернуть внимание.
-          </div>
+        <div class="stat-cell">
+          <div class="stat-label">Smoothed RR</div>
+          <div class="stat-value" id="bf_smoothed_rr">—</div>
+          <div class="stat-sub">15 с окно</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-label">Режим</div>
+          <div class="stat-value" id="bf_mode_label" style="font-size:.95rem">—</div>
+          <div class="stat-sub">активный</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-label">Текстура</div>
+          <div class="stat-value" id="bf_texture_label" style="font-size:.95rem">—</div>
+          <div class="stat-sub">фон</div>
         </div>
       </div>
     </div>
@@ -792,7 +829,6 @@
                 <th>Источник</th>
                 <th>Начало</th>
                 <th>Конец</th>
-                <th>Drift</th>
               </tr>
             </thead>
             <tbody id="arch_rows"></tbody>
@@ -824,6 +860,7 @@
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
-<script src="/assets/app.js?v=4"></script>
+<script src="/assets/hrv_audio_engine.js?v=3"></script>
+<script src="/assets/app.js?v=6"></script>
 </body>
 </html>

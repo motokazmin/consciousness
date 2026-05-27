@@ -169,10 +169,13 @@ class PolarH10Source(HRVSource):
             return []
         flags = data[0]
         hr_16bit = bool(flags & 0x01)
+        energy_present = bool(flags & 0x08)
         rr_present = bool((flags >> 4) & 0x01)
         if not rr_present:
             return []
         idx = 3 if hr_16bit else 2
+        if energy_present:
+            idx += 2
         values = []
         while idx + 1 < len(data):
             raw = int.from_bytes(data[idx : idx + 2], "little")
@@ -398,19 +401,19 @@ class AntPlusHRVSource(HRVSource):
             while not session_stop.is_set():
                 time.sleep(0.5)
                 now = time.time()
-                if self._last_rr_ts is None:
+                if outer._last_rr_ts is None:
                     if now - session_start > BLE_FIRST_RR_GRACE_SEC:
                         print(
                             f"\nANT+: нет RR за {BLE_FIRST_RR_GRACE_SEC:.0f}s — "
                             "проверьте донгл, пояс и включённый ANT+ на датчике."
                         )
                         session_start = now
-                elif now - self._last_rr_ts > RR_WATCHDOG_SEC:
+                elif now - outer._last_rr_ts > RR_WATCHDOG_SEC:
                     print(
                         f"\nANT+ watchdog: нет RR {RR_WATCHDOG_SEC:.0f}s "
                         "(потеря эфира?). Ожидание снова…"
                     )
-                    self._last_rr_ts = None
+                    outer._last_rr_ts = None
                     session_start = now
 
         try:
@@ -466,8 +469,6 @@ class FallbackBleAntSource(HRVSource):
 
     def _fallback_watch(self):
         if self._first_rr.wait(timeout=ANT_FALLBACK_WAIT_SEC):
-            return
-        if self._first_rr.is_set():
             return
         print(
             f"\nBLE: за {ANT_FALLBACK_WAIT_SEC:.0f}s не было RR — "

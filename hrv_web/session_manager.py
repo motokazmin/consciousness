@@ -33,6 +33,7 @@ def _source_label(kind: str, address: str | None, *, mock_tag: str | None = None
 class RunningSession:
     session_id: int
     conn: sqlite3.Connection
+    conn_lock: threading.Lock
     stop_event: threading.Event
     state: HRVSessionState
     source: Any
@@ -61,20 +62,23 @@ class RunningSession:
         sample = self.state.process_beat(rr_ms, ts)
         if sample is None:
             return
-        self.conn.execute(
-            "INSERT INTO hrv_points (session_id, ts, rr_ms, rmssd) VALUES (?, ?, ?, ?)",
-            (self.session_id, sample.ts, sample.rr_ms, sample.rmssd),
-        )
-        self.conn.commit()
-        self._enqueue_ws(
-            {
-                "type": "beat",
-                "t": [sample.ts],
-                "r": [sample.rr_ms],
-                "m": [sample.rmssd],
-                "drift": sample.drift_just_fired,
-            }
-        )
+        with self.conn_lock:
+            self.conn.execute(
+                "INSERT INTO hrv_points (session_id, ts, rr_ms, rmssd) VALUES (?, ?, ?, ?)",
+                (self.session_id, sample.ts, sample.rr_ms, sample.rmssd),
+            )
+            self.conn.commit()
+        payload = {
+            "type": "beat",
+            "t": [sample.ts],
+            "r": [sample.rr_ms],
+            "m": [sample.rmssd],
+            "sr": [sample.smoothed_rr],
+            "rn": [sample.rmssd_normalized],
+            "bl": sample.session_baseline,
+            "drift": sample.drift_just_fired,
+        }
+        self._enqueue_ws(payload)
 
     def stop_source_only(self) -> None:
         self.stop_event.set()
@@ -111,7 +115,6 @@ class SessionManager:
         source_kind: str,
         address: str | None,
         minutes: float | None,
-        desktop_notify: bool,
     ) -> RunningSession:
         if source_kind in ("ant", "ble_ant_fallback"):
             require_openant()
@@ -135,7 +138,8 @@ class SessionManager:
         hour = datetime.datetime.now().hour
         pers = load_hour_baseline(conn, hour)
         stop_event = threading.Event()
-        state = HRVSessionState(pers, desktop_notify=desktop_notify)
+        conn_lock = threading.Lock()
+        state = HRVSessionState(pers, desktop_notify=False)
         source = build_source(
             source_kind,
             session_stop=stop_event,
@@ -143,10 +147,12 @@ class SessionManager:
             conn=conn,
             session_id=session_id,
             mock_tag=tag if source_kind == "mock" else None,
+            conn_lock=conn_lock,
         )
         rs = RunningSession(
             session_id=session_id,
             conn=conn,
+            conn_lock=conn_lock,
             stop_event=stop_event,
             state=state,
             source=source,
@@ -192,15 +198,16 @@ class SessionManager:
             pass
         rs.stop_source_only()
         ended = time.time()
-        rs.conn.execute(
-            "UPDATE sessions SET ended=?, drift_events=? WHERE id=?",
-            (ended, rs.state.drift_events, session_id),
-        )
-        rs.conn.commit()
-        update_session_baseline(rs.conn, session_id)
-        summary = session_summary_dict(
-            rs.conn, session_id, rs.baseline_at_start, rs.state.drift_events
-        )
+        with rs.conn_lock:
+            rs.conn.execute(
+                "UPDATE sessions SET ended=?, drift_events=? WHERE id=?",
+                (ended, rs.state.drift_events, session_id),
+            )
+            rs.conn.commit()
+            update_session_baseline(rs.conn, session_id)
+            summary = session_summary_dict(
+                rs.conn, session_id, rs.baseline_at_start, rs.state.drift_events
+            )
         rs.conn.close()
         return summary
 
