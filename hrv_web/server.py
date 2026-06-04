@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import queue
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field
 from hrv_core.constants import DB_PATH, SESSION_TAGS
 from hrv_core.db import init_db, load_hour_baseline
 from hrv_core.summary import session_summary_dict
+from hrv_core.tags import normalize_tag
 from hrv_web.session_manager import MANAGER
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -29,6 +31,89 @@ class StartSessionBody(BaseModel):
     minutes: float | None = Field(None, gt=0)
 
 
+def _parse_date_start(iso_date: str | None) -> float | None:
+    """YYYY-MM-DD → unix начала дня (local)."""
+    if not iso_date or not iso_date.strip():
+        return None
+    try:
+        d = datetime.date.fromisoformat(iso_date.strip()[:10])
+    except ValueError as e:
+        raise HTTPException(400, f"Неверная дата: {iso_date}") from e
+    return datetime.datetime.combine(d, datetime.time.min).timestamp()
+
+
+def _parse_date_end(iso_date: str | None) -> float | None:
+    """YYYY-MM-DD → unix конца дня (exclusive upper: start of next day)."""
+    if not iso_date or not iso_date.strip():
+        return None
+    try:
+        d = datetime.date.fromisoformat(iso_date.strip()[:10])
+    except ValueError as e:
+        raise HTTPException(400, f"Неверная дата: {iso_date}") from e
+    next_day = d + datetime.timedelta(days=1)
+    return datetime.datetime.combine(next_day, datetime.time.min).timestamp()
+
+
+def _session_filters(
+    *,
+    participant: str | None,
+    tag: str | None,
+    started_after: str | None,
+    started_before: str | None,
+    ended_only: bool = False,
+) -> tuple[str, list]:
+    q = " FROM sessions WHERE 1=1"
+    args: list = []
+    if ended_only:
+        q += " AND ended IS NOT NULL"
+    if participant:
+        q += " AND participant LIKE ?"
+        args.append(f"%{participant}%")
+    if tag:
+        q += " AND tag = ?"
+        args.append(tag)
+    t0 = _parse_date_start(started_after)
+    t1 = _parse_date_end(started_before)
+    if t0 is not None:
+        q += " AND started >= ?"
+        args.append(t0)
+    if t1 is not None:
+        q += " AND started < ?"
+        args.append(t1)
+    return q, args
+
+
+def _decimate_rows(rows: list, max_points: int) -> list:
+    if len(rows) <= max_points:
+        return rows
+    # Time-based bucketing: divide the time range into max_points equal buckets
+    # and keep the first row in each bucket. Preserves temporal distribution
+    # and avoids discarding peaks in sparse regions.
+    t_start = rows[0][0]
+    t_end   = rows[-1][0]
+    duration = t_end - t_start
+    if duration <= 0:
+        return rows[::max(1, len(rows) // max_points)]
+    bucket_sec = duration / max_points
+    result: list = []
+    next_boundary = t_start
+    for row in rows:
+        if row[0] >= next_boundary:
+            result.append(row)
+            next_boundary = row[0] + bucket_sec
+    return result
+
+
+def _all_tags(conn) -> list[str]:
+    db_tags = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT tag FROM sessions WHERE tag IS NOT NULL AND tag != '' ORDER BY tag"
+        ).fetchall()
+    ]
+    return sorted(set(SESSION_TAGS) | set(db_tags))
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "db": str(DB_PATH.resolve())}
@@ -36,19 +121,24 @@ def health():
 
 @app.get("/api/tags")
 def tags():
-    return {"tags": list(SESSION_TAGS)}
+    conn = init_db()
+    out = _all_tags(conn)
+    conn.close()
+    return {"tags": out}
 
 
 @app.post("/api/sessions")
 def start_session(body: StartSessionBody):
-    if body.tag not in SESSION_TAGS:
-        raise HTTPException(400, f"tag must be one of {SESSION_TAGS}")
+    try:
+        tag = normalize_tag(body.tag)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     if body.source in ("ble", "ble_ant_fallback") and not body.address:
         raise HTTPException(400, "address required for ble / ble_ant_fallback")
     try:
         rs = MANAGER.start(
             participant=body.participant.strip(),
-            tag=body.tag,
+            tag=tag,
             session_name=body.session_name,
             source_kind=body.source,
             address=body.address,
@@ -63,6 +153,7 @@ def start_session(body: StartSessionBody):
         "started": True,
         "started_at": rs.started_at,
         "duration_minutes": rs.duration_minutes,
+        "tag": tag,
     }
 
 
@@ -78,18 +169,22 @@ def stop_session(session_id: int):
 def list_sessions(
     participant: str | None = None,
     tag: str | None = None,
+    started_after: str | None = None,
+    started_before: str | None = None,
     limit: int = 200,
 ):
     conn = init_db()
-    q = "SELECT id, tag, session_name, participant, source, started, ended, drift_events FROM sessions WHERE 1=1"
-    args: list = []
-    if participant:
-        q += " AND participant LIKE ?"
-        args.append(f"%{participant}%")
-    if tag:
-        q += " AND tag = ?"
-        args.append(tag)
-    q += " ORDER BY id DESC LIMIT ?"
+    filt, args = _session_filters(
+        participant=participant,
+        tag=tag,
+        started_after=started_after,
+        started_before=started_before,
+    )
+    q = (
+        "SELECT id, tag, session_name, participant, source, started, ended, drift_events"
+        + filt
+        + " ORDER BY id DESC LIMIT ?"
+    )
     args.append(min(limit, 2000))
     rows = conn.execute(q, args).fetchall()
     conn.close()
@@ -110,26 +205,99 @@ def list_sessions(
     }
 
 
+@app.get("/api/progress")
+def progress_data(
+    tag: str | None = None,
+    started_after: str | None = None,
+    started_before: str | None = None,
+    max_sessions: int = 40,
+    max_points_per_session: int = 4000,
+):
+    max_sessions = max(1, min(max_sessions, 80))
+    max_points_per_session = max(100, min(max_points_per_session, 12_000))
+
+    conn = init_db()
+    filt, args = _session_filters(
+        participant=None,
+        tag=tag,
+        started_after=started_after,
+        started_before=started_before,
+        ended_only=True,
+    )
+    q = (
+        "SELECT id, tag, started, ended"
+        + filt
+        + " ORDER BY started ASC LIMIT ?"
+    )
+    args.append(max_sessions)
+    sessions = conn.execute(q, args).fetchall()
+
+    out_sessions = []
+    for sid, stag, started, ended in sessions:
+        rows = conn.execute(
+            "SELECT ts, rr_ms FROM hrv_points WHERE session_id = ? ORDER BY ts",
+            (sid,),
+        ).fetchall()
+        rows = _decimate_rows(rows, max_points_per_session)
+        if not rows:
+            continue
+        duration_sec = float(ended - started) if ended and started else 0.0
+        if duration_sec <= 0 and rows:
+            duration_sec = float(rows[-1][0] - started)
+        points = [
+            {"x": round(float(ts - started), 3), "rr": float(rr)}
+            for ts, rr in rows
+        ]
+        out_sessions.append(
+            {
+                "id": sid,
+                "tag": stag,
+                "started": started,
+                "duration_sec": duration_sec,
+                "points": points,
+            }
+        )
+    conn.close()
+    return {"sessions": out_sessions}
+
+
+@app.delete("/api/history")
+def wipe_history():
+    if MANAGER.get_active() is not None:
+        raise HTTPException(
+            409,
+            "Сначала остановите активную запись сессии.",
+        )
+    conn = init_db()
+    try:
+        n_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        conn.execute("DELETE FROM hrv_points")
+        conn.execute("DELETE FROM sessions")
+        conn.execute("DELETE FROM baseline")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "deleted_sessions": n_sessions}
+
+
 @app.get("/api/sessions/{session_id}")
 def get_session(session_id: int):
-    import datetime
-
     conn = init_db()
     row = conn.execute(
         "SELECT tag, session_name, participant, source, started, ended, drift_events FROM sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
-    conn.close()
     if not row:
+        conn.close()
         raise HTTPException(404)
     tag, session_name, participant, source, started, ended, drift_n = row
     if ended is None:
+        conn.close()
         raise HTTPException(400, "Сессия ещё не завершена — сводка после stop")
     hour = datetime.datetime.fromtimestamp(started).hour
-    conn2 = init_db()
-    baseline_at_start = load_hour_baseline(conn2, hour)
-    summary = session_summary_dict(conn2, session_id, baseline_at_start, int(drift_n or 0))
-    conn2.close()
+    baseline_at_start = load_hour_baseline(conn, hour)
+    summary = session_summary_dict(conn, session_id, baseline_at_start, int(drift_n or 0))
+    conn.close()
     return summary
 
 
@@ -142,9 +310,7 @@ def session_points(session_id: int, max_points: int = 8000):
         (session_id,),
     ).fetchall()
     conn.close()
-    if len(rows) > max_points:
-        step = max(1, len(rows) // max_points)
-        rows = rows[::step]
+    rows = _decimate_rows(rows, max_points)
     return {
         "points": [{"ts": r[0], "rr_ms": r[1], "rmssd": r[2]} for r in rows],
         "count": len(rows),

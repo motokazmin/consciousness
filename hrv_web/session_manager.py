@@ -192,21 +192,28 @@ class SessionManager:
                 return None
             self._running = None
 
+        # Set stop_event first so on_beat() returns early and no more beats
+        # are appended to ws_queue after the "ended" message.
+        rs.stop_source_only()
+        ended = time.time()
+
         try:
             rs._enqueue_ws({"type": "ended", "session_id": session_id})
         except Exception:
             pass
-        rs.stop_source_only()
-        ended = time.time()
+
         with rs.conn_lock:
+            # Read drift_events inside conn_lock to avoid race with on_beat →
+            # _check_drift which increments drift_events without holding conn_lock.
+            drift_events = rs.state.drift_events
             rs.conn.execute(
                 "UPDATE sessions SET ended=?, drift_events=? WHERE id=?",
-                (ended, rs.state.drift_events, session_id),
+                (ended, drift_events, session_id),
             )
             rs.conn.commit()
             update_session_baseline(rs.conn, session_id)
             summary = session_summary_dict(
-                rs.conn, session_id, rs.baseline_at_start, rs.state.drift_events
+                rs.conn, session_id, rs.baseline_at_start, drift_events
             )
         rs.conn.close()
         return summary

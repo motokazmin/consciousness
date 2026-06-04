@@ -554,6 +554,40 @@
     .tag-pill.rest       { background: rgba(121,110,220,.1); border-color: rgba(121,110,220,.2); color: #9d8ef0; }
     .tag-pill.scroll     { background: rgba(245,197,66,.1); border-color: rgba(245,197,66,.2); color: var(--yellow); }
 
+    .tag-custom-field { margin-top: 8px; }
+    .tag-custom-field[hidden] { display: none; }
+
+    .prog-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      max-height: 140px;
+      overflow-y: auto;
+      margin-top: 12px;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+    }
+    .prog-legend-item { display: flex; align-items: center; gap: 6px; }
+    .prog-legend-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+    .prog-empty {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      padding: 24px 0;
+    }
+    .prog-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
     /* ── ARCHIVE DETAIL ── */
     .arch-detail { display: none; margin-top: 20px; }
     .arch-detail.visible { display: block; }
@@ -607,6 +641,7 @@
   <button type="button" data-tab="live" class="active">Запись</button>
   <button type="button" data-tab="biofeedback">Биофидбек</button>
   <button type="button" data-tab="archive">Архив</button>
+  <button type="button" data-tab="progress">Прогресс</button>
 </nav>
 
 <main>
@@ -629,6 +664,9 @@
             <div class="field">
               <label>Тип активности</label>
               <select id="tag"></select>
+              <div class="tag-custom-field" id="tag_custom_wrap" hidden>
+                <input id="tag_custom" type="text" placeholder="Новая активность…" maxlength="64" />
+              </div>
             </div>
             <div class="field">
               <label>Заметка <span style="color:var(--text-muted);font-size:.7rem;text-transform:none;letter-spacing:0">(необязательно)</span></label>
@@ -815,9 +853,14 @@
             <input id="flt_participant" type="text" placeholder="фильтр…" />
           </div>
           <div class="field">
-            <label>Тег</label>
+            <label>Тип активности</label>
             <select id="flt_tag"><option value="">— все —</option></select>
           </div>
+        </div>
+        <div class="btn-row" style="margin-bottom:14px">
+          <button type="button" class="btn btn-danger" id="btn_wipe_history" style="font-size:.78rem">
+            Очистить всю историю
+          </button>
         </div>
         <div class="table-wrap">
           <table>
@@ -825,7 +868,7 @@
               <tr>
                 <th>#</th>
                 <th>Участник</th>
-                <th>Тип</th>
+                <th>Тип активности</th>
                 <th>Источник</th>
                 <th>Начало</th>
                 <th>Конец</th>
@@ -857,10 +900,57 @@
     </div>
   </section>
 
+  <!-- ── PROGRESS ── -->
+  <section id="tab-progress">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Сравнение сессий (RR)</span>
+      </div>
+      <div class="card-body">
+        <div class="arch-filters">
+          <div class="field">
+            <label>Тип активности</label>
+            <select id="prog_tag"><option value="">— все —</option></select>
+          </div>
+          <div class="field">
+            <label>С даты</label>
+            <input id="prog_from" type="date" />
+          </div>
+          <div class="field">
+            <label>По дату</label>
+            <input id="prog_to" type="date" />
+          </div>
+          <div class="field" style="min-width:auto">
+            <label>&nbsp;</label>
+            <button type="button" class="btn btn-primary" id="btn_prog_build" style="width:100%">Построить</button>
+          </div>
+        </div>
+        <div class="prog-toolbar">
+          <label class="check-label">
+            <input type="checkbox" id="prog_smooth" />
+            Сгладить RR (окно 15 с)
+          </label>
+          <button type="button" class="btn btn-danger" id="btn_wipe_history_prog" style="font-size:.78rem;padding:6px 14px">
+            Очистить всю историю
+          </button>
+        </div>
+        <div class="plot-card">
+          <div class="plot-header">
+            <span class="plot-title">RR — секунды от начала сессии</span>
+          </div>
+          <div class="plot-body" id="progPlot"></div>
+        </div>
+        <div class="prog-legend" id="prog_legend"></div>
+        <p class="prog-empty" id="prog_empty" hidden>Нет завершённых сессий по выбранным фильтрам.</p>
+        <div class="err-bar" id="prog_err"></div>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
 <script src="/assets/hrv_audio_engine.js?v=3"></script>
-<script src="/assets/app.js?v=6"></script>
+<script src="/assets/app.js?v=7"></script>
 </body>
 </html>

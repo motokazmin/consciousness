@@ -60,16 +60,27 @@ class HRVSessionState:
     def set_persistent_baseline(self, value: float | None) -> None:
         self._persistent_baseline = value
 
-    def _smoothed_rr(self, ts: float, rr_ms: float) -> float:
+    def _smoothed_rr(self, ts: float) -> float | None:
+        # Iterate from the end — rr_history is already updated before this call.
+        # Stop as soon as we step outside the window (deque is time-ordered).
         cutoff = ts - SMOOTHED_RR_WINDOW_SEC
-        recent = [r for t, r in self.rr_history if t >= cutoff]
+        recent: list[float] = []
+        for t, r in reversed(self.rr_history):
+            if t < cutoff:
+                break
+            recent.append(r)
         if not recent:
-            return rr_ms
+            return None
         return float(np.mean(recent))
 
     def _session_baseline(self) -> float | None:
         if len(self.rmssd_history) >= BASELINE_SAMPLES // 2:
-            recent = [r for _, r in list(self.rmssd_history)[-BASELINE_SAMPLES:]]
+            # Take last BASELINE_SAMPLES from the end without copying the full deque.
+            recent: list[float] = []
+            for _, r in reversed(self.rmssd_history):
+                recent.append(r)
+                if len(recent) == BASELINE_SAMPLES:
+                    break
             return float(np.mean(recent))
         if self._persistent_baseline is not None:
             return self._persistent_baseline
@@ -112,7 +123,9 @@ class HRVSessionState:
             return None
 
         self.rmssd_history.append((ts, rmssd))
-        smoothed_rr = self._smoothed_rr(ts, rr_ms)
+        smoothed_rr = self._smoothed_rr(ts)
+        if smoothed_rr is None:
+            smoothed_rr = rr_ms
         drift_baseline = self._session_baseline()
         session_baseline = drift_baseline if drift_baseline is not None else rmssd
         rmssd_normalized = rmssd / session_baseline if session_baseline >= 1.0 else 1.0
