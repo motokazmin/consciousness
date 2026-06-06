@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from hrv_core.constants import DB_PATH, SESSION_TAGS
+from hrv_core.session_types import SESSION_TYPES
 from hrv_core.db import delete_session, init_db, load_hour_baseline, wipe_all_history
 from hrv_core.summary import session_summary_dict
 from hrv_core.tags import normalize_tag
@@ -142,6 +143,22 @@ def tags():
     out = _all_tags(conn)
     conn.close()
     return {"tags": out}
+
+
+@app.get("/api/session-types")
+def session_types():
+    """Конфигурация всех типов сессий (slug, label, phrase_prefix, mock_profile)."""
+    return {
+        "session_types": [
+            {
+                "slug": st.slug,
+                "label": st.label,
+                "phrase_prefix": st.phrase_prefix,
+                "mock_profile": st.mock_profile,
+            }
+            for st in SESSION_TYPES.values()
+        ]
+    }
 
 
 @app.post("/api/sessions")

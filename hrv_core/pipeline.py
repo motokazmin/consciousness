@@ -12,6 +12,7 @@ import numpy as np
 
 from hrv_core.constants import (
     BASELINE_SAMPLES,
+    BASELINE_MIN_SAMPLES,
     DRIFT_COOLDOWN_SEC,
     DRIFT_THRESHOLD,
     RMSSD_WINDOW_SEC,
@@ -74,7 +75,7 @@ class HRVSessionState:
         return float(np.mean(recent))
 
     def _session_baseline(self) -> float | None:
-        if len(self.rmssd_history) >= BASELINE_SAMPLES // 2:
+        if len(self.rmssd_history) >= BASELINE_MIN_SAMPLES:
             # Take last BASELINE_SAMPLES from the end without copying the full deque.
             recent: list[float] = []
             for _, r in reversed(self.rmssd_history):

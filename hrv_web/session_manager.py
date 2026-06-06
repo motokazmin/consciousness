@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import queue
 import sqlite3
 import threading
@@ -12,13 +13,15 @@ from typing import Any
 from hrv_core.db import init_db, load_hour_baseline, update_session_baseline
 from hrv_core.pipeline import HRVSessionState
 from hrv_core.sources import build_source, require_openant
+from hrv_core.session_types import SESSION_TYPES
 from hrv_core.summary import session_summary_dict
 
 
 def _source_label(kind: str, address: str | None, *, mock_tag: str | None = None) -> str:
     if kind == "mock":
-        if mock_tag == "meditation":
-            return "mock — профиль медитации (RSA)"
+        st = SESSION_TYPES.get((mock_tag or "").strip().lower())
+        if st and st.mock_profile != "default":
+            return f"mock — профиль {st.label}"
         return "mock"
     if kind == "ble":
         return f"Polar H10  {address}"
@@ -132,8 +135,6 @@ class SessionManager:
         )
         session_id = int(cur.lastrowid)
         conn.commit()
-
-        import datetime
 
         hour = datetime.datetime.now().hour
         pers = load_hour_baseline(conn, hour)

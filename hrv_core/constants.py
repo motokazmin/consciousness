@@ -11,6 +11,9 @@ RMSSD_WINDOW_SEC = 60
 # Число последних точек RMSSD для session baseline и порога drift
 BASELINE_SAMPLES = 60
 
+# Минимум накопленных точек RMSSD в сессии для перехода на session baseline
+BASELINE_MIN_SAMPLES = BASELINE_SAMPLES // 2  # 30
+
 # Окно усреднения RR для метрики smoothed_rr (сек)
 SMOOTHED_RR_WINDOW_SEC = 15
 
@@ -48,4 +51,5 @@ BUSY_DEVICE_HINT = (
 DB_PATH = Path("hrv_data.sqlite")
 
 # Допустимые метки типа активности при старте сессии
-SESSION_TAGS = ("meditation", "focus", "rest", "scroll", "untagged")
+# Источник правды — hrv_core/session_types.py
+from hrv_core.session_types import SESSION_SLUGS as SESSION_TAGS  # noqa: F401

@@ -11,6 +11,9 @@ import argparse
 import sqlite3
 from pathlib import Path
 
+from hrv_core.constants import DB_PATH
+from hrv_core.session_types import TAG_MARKERS
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -21,15 +24,6 @@ try:
 except ImportError:
     raise SystemExit("pip install hdbscan")
 
-DB_PATH = Path("hrv_data.sqlite")
-
-TAG_MARKERS = {
-    "meditation": ("*", 180),
-    "focus":      ("^", 120),
-    "rest":       ("s",  90),
-    "scroll":     ("v",  90),
-    "untagged":   ("o",  40),
-}
 
 # ─── Load ─────────────────────────────────────────────────────────────────────
 

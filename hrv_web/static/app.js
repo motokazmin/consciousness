@@ -27,7 +27,8 @@ let audioMode = "smooth_rr";
 let audioTexture = "space_pad";
 let meditationEngine = null;
 
-const GUIDED_PHRASE_TAGS = { meditation: "sit", rest: "lay" };
+// Динамически заполняется из /api/session-types при старте
+let GUIDED_PHRASE_TAGS = {};
 
 function phrasePrefixForTag(tag) {
   return GUIDED_PHRASE_TAGS[tag] ?? null;
@@ -255,14 +256,9 @@ function api(path, opts = {}) {
 }
 
 // ── TAGS ──────────────────────────────────────────────────────────────────
-const TAG_LABELS = {
-  meditation: "Медитация",
-  focus: "Фокус",
-  rest: "Отдых",
-  scroll: "Скролл",
-  untagged: "Без тега",
-};
-const TAG_PRESETS = ["meditation", "focus", "rest", "scroll", "untagged"];
+// Динамически заполняется из /api/session-types при старте
+let TAG_LABELS = {};
+let TAG_PRESETS = [];
 const CUSTOM_TAGS_KEY = "hrv_custom_tags";
 const TAG_CUSTOM_VALUE = "__custom__";
 
@@ -344,6 +340,23 @@ function resolveSessionTag() {
     return raw;
   }
   return sel.value;
+}
+
+async function loadSessionTypes() {
+  try {
+    const { session_types } = await api("/api/session-types");
+    TAG_LABELS = {};
+    TAG_PRESETS = [];
+    GUIDED_PHRASE_TAGS = {};
+    for (const st of session_types) {
+      TAG_LABELS[st.slug] = st.label;
+      TAG_PRESETS.push(st.slug);
+      if (st.phrase_prefix) GUIDED_PHRASE_TAGS[st.slug] = st.phrase_prefix;
+    }
+  } catch (e) {
+    // fallback — не блокируем UI
+    console.warn("loadSessionTypes failed:", e);
+  }
 }
 
 async function loadTags() {
@@ -1141,5 +1154,5 @@ async function wipeHistory() {
 $("btn_wipe_history")?.addEventListener("click", wipeHistory);
 $("btn_wipe_history_prog")?.addEventListener("click", wipeHistory);
 
-loadTags().catch(e => setErr(String(e)));
+loadSessionTypes().then(() => loadTags()).catch(e => setErr(String(e)));
 syncGuidedPhraseOptionsVisibility();

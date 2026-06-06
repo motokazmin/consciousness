@@ -10,6 +10,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 
+from hrv_core.session_types import SESSION_TYPES
 from hrv_core.constants import (
     ANT_FALLBACK_WAIT_SEC,
     BLE_FIRST_RR_GRACE_SEC,
@@ -518,7 +519,8 @@ def build_source(
 ) -> HRVSource:
     if kind == "mock":
         mt = (mock_tag or "").strip().lower()
-        profile = mt if mt == "meditation" else None
+        st = SESSION_TYPES.get(mt)
+        profile = mt if (st and st.mock_profile == mt) else None
         return MockHRVSource(mock_tag=profile, verbose=True)
     if kind == "ble":
         if not address:

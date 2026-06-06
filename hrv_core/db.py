@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from hrv_core.constants import DB_PATH
 
@@ -103,7 +106,7 @@ def update_session_baseline(conn: sqlite3.Connection, session_id: int) -> None:
 
     conn.commit()
     updated = [r[0] for r in rows]
-    print(f"Baseline updated for hours {updated}")
+    log.debug("Baseline updated for hours %s", updated)
 
 
 def delete_session(conn: sqlite3.Connection, session_id: int) -> bool:
