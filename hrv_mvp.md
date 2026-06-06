@@ -18,12 +18,13 @@
 
 - **Python 3.12**, Ubuntu
 - **bleak** (в `requirements.txt`: **0.22.x**, не 1.x+) — BLE к Polar H10; **bleak ≥1** требует **BlueZ ≥5.55**, на Ubuntu 20.04 часто **5.53** — тогда `pip install 'bleak>=0.22.3,<1'`
-- **numpy / matplotlib** — вычисления; CLI: real-time графики
-- **FastAPI + uvicorn** — веб-UI (форма сессии, WebSocket, архив); фронт: **uPlot** (CDN)
+- **numpy** — вычисления RMSSD и кластеризация
+- **matplotlib** — только offline-графики в `cluster.py`
+- **FastAPI + uvicorn** — единственный UI: форма сессии, WebSocket, архив; фронт: **uPlot** (CDN)
 - **SQLite** — локальное хранилище точек, сессий и персонального baseline по часу
 - **hdbscan + scikit-learn** — кластеризация по RMSSD (`cluster.py`)
-- **notify-send** — десктопные уведомления при drift
-- **openant** (опционально) — ANT+ через USB ANT Stick (Garmin и совместимые); только если используете **`--ant-plus`** или **`--ant-fallback`**
+- **notify-send** — опционально в `HRVSessionState` (в веб-сессии отключён)
+- **openant** (опционально) — ANT+ через USB ANT Stick; в веб-форме: `source = ant` или `ble_ant_fallback`
 
 Зависимости: файл **`requirements.txt`** в корне проекта (без обязательного `openant`; см. комментарий в файле). Установка:
 
@@ -52,50 +53,34 @@ class HRVSource(ABC):
 | `MockHRVSource` | Симуляция RR через AR(1) процесс, цикл состояний focused→drift→recovering |
 | `PolarH10Source` | BLE-подключение к реальному Polar H10, парсинг GATT 0x2A37 |
 | `AntPlusHRVSource` | ANT+ Heart Rate (в т.ч. Polar H10 с включённым ANT+), USB-донгл, библиотека **openant** |
-| `FallbackBleAntSource` | Сначала BLE по `--address`; если за окно нет ни одного RR — переход на **`AntPlusHRVSource`** |
+| `FallbackBleAntSource` | Сначала BLE по MAC из формы; если за окно нет ни одного RR — переход на **`AntPlusHRVSource`** |
 
-Переключение — аргументами CLI: `--mock`, `--address MAC`, **`--ant-plus`**, **`--address … --ant-fallback`**, утилитарные режимы `--mock-verify`, `--scan`.
+Переключение — поле **`source`** в веб-форме: `mock`, `ble`, `ant`, `ble_ant_fallback`; для BLE/fallback — MAC в **`address`**.
 
 У **`PolarH10Source`** есть опциональный внешний **`extra_stop`** (`threading.Event`), чтобы составной режим мог оборвать BLE без завершения всей сессии.
 
-### Поток данных
+### Поток данных (веб)
 
 ```
 HRVSource (BLE asyncio thread / mock thread / ANT+ openant thread)
     ↓  callback(rr_ms, ts)  — per beat
-on_rr()  — source-agnostic handler
-    ├── rr_buffer (deque, 60s window) → compute_rmssd()
-    ├── rr_history / rmssd_history (deque 500) → plots
-    ├── SQLite insert (hrv_points)
-    └── drift check → notify-send
+SessionManager.on_beat() → HRVSessionState.process_beat()
+    ├── compute_rmssd(), drift check
+    ├── SQLite INSERT (hrv_points)
+    └── queue → WebSocket { type: "beat", r, m, sr, rn, bl, drift, … }
 
-matplotlib FuncAnimation (main thread)
-    ← читает rr_history, rmssd_history
-    — обновляется каждые 500ms
-    — два графика: RR intervals (60s) + RMSSD (5 min)
-    — линия RMSSD меняет цвет при drift
+FastAPI + браузер (app.js)
+    ← WebSocket beat-кадры
+    — uPlot: RR + RMSSD (live)
+    — Web Audio биофидбек (опционально)
+    — guided mp3-фразы (meditation / relaxation)
 ```
 
-BLE asyncio loop живёт в daemon-треде; поток ANT+ — отдельный daemon-тред (**openant** `Node`). Matplotlib — в главном потоке.
-Общение через `collections.deque` (thread-safe, single producer).
+BLE asyncio loop живёт в daemon-треде; поток ANT+ — отдельный daemon-тред (**openant** `Node`). Обмен с UI — через `queue.Queue` (WebSocket) и SQLite (`check_same_thread=False`).
 
+### Аудио-биофидбек (веб)
 
-### Biofeedback (RSA)
-
-Модуль `hrv_core/biofeedback.py` — закрытая петля по RR без BLE-зависимостей:
-
-```python
-loop = BreathFeedbackLoop()
-state = loop.process_rr(rr_ms, ts)  # BreathState | None до прогрева (~8 ударов)
-```
-
-**Алгоритм:** медиана (окно 5) + отброс скачков >20%; EMA short/long → фаза INHALE/EXHALE/HOLD; `rsa_amplitude` = размах RR в полуцикле; `resonance_score` ∈ [0, 1].
-
-**WebSocket:** в кадре `beat` (и отдельно `type: breath` до первого RMSSD) поле `breath` с `phase`, `phase_progress`, `rsa_amplitude`, `resonance_score`.
-
-**UI:** вкладка «Осознанность» — круг следует серверной фазе (зеркало дыхания с H10); ambient-фон учитывает `resonance_score`. До прогрева — резервный ритм 4/1/6 с.
-
-**Тесты:** `python -m unittest tests.test_biofeedback` (inline-синус + `MockHRVSource` meditation).
+Вкладка «Биофидбек»: Web Audio в браузере ([`hrv_audio_engine.js`](hrv_web/static/hrv_audio_engine.js)) — пульс на каждый RR, фоновая текстура, трансовый pad по `rmssd_normalized`. Включается чекбоксом «Аудио-биофидбек» в форме сессии. Подробнее — раздел [Веб-аудио](#веб-аудио-где-генерируется-звук) и [ARCHITECTURE.md](ARCHITECTURE.md#веб-аудио-где-генерируется-звук).
 
 ### RMSSD
 
@@ -115,21 +100,33 @@ def compute_rmssd(rr_list):
 |--------|--------|---------------------|
 | **Session baseline** (baseline сессии) | Среднее арифметическое по **последним до 60** уже накопленным точкам RMSSD в этой сессии (последние значения в истории `rmssd_history`). | Как только в сессии есть **≥ 30** точек RMSSD — именно это среднее становится baseline для проверки drift. |
 | **Persistent baseline** (персональный baseline по часу) | Среднее RMSSD **по вашему локальному часу суток (0–23)**, накопленное в таблице **`baseline`** из прошлых сессий. | Пока в **текущей** сессии ещё **меньше 30** точек RMSSD, для порога drift используется persistent baseline **на час старта** (если в БД уже есть запись для этого часа). Если и его нет — уведомления о drift не считаются, пока не накопится 30 точек. |
-| **Drift** | Событие: **текущий RMSSD < baseline × 0,80** (то есть ниже опоры примерно на **20%**). | Не чаще **одного срабатывания в 120 с** (антидребезг): в терминал/лог, при включённой опции — **`notify-send`**, счётчик **`drift_events`** в сессии. На графике **в CLI (matplotlib)** линия RMSSD окрашивается в **красный** («DRIFT»), в **зелёный** — если условие не выполнено («OK»). |
+| **Drift** | Событие: **текущий RMSSD < baseline × 0,80** (то есть ниже опоры примерно на **20%**). | Не чаще **одного срабатывания в 120 с** (антидребезг); счётчик **`drift_events`** в сессии. В веб-сессии **`notify-send` отключён** (`desktop_notify=False`); флаг drift уходит в WebSocket. |
 
 **Интерпретация (осторожно):** drift — это **не диагноз и не «плохая медитация»**, а сигнал «по сравнению с вашей недавней (или типичной для этого часа) линией RMSSD сейчас заметно ниже». Физиология и контекст индивидуальны.
 
-**Веб-UI:** на live-графиках отображаются RR и RMSSD; **пунктирные линии** session / persistent baseline и смена цвета OK/DRIFT — как в **matplotlib CLI** — в текущей вёрстке веба **не выведены**; флаг срабатывания drift по-прежнему уходит в **WebSocket** в поле `drift` у кадра типа `beat` (и при желании можно включить десктопные уведомления). Если в форме задана **длительность сессии (мин)**, live-графики переключаются на ось **секунд от начала записи** \(0…T\) и показывают **все накопленные точки** в этом интервале; без длительности остаётся скользящее окно (последние ~60 с для RR и ~5 мин для RMSSD).
+**Live-графики (веб):** RR и RMSSD (uPlot); пунктирные линии session / persistent baseline и смена цвета по drift **не выведены**. Флаг drift — в WebSocket (`drift` в кадре `beat`). Если в форме задана **длительность сессии (мин)**, оси — **секунды от старта** \(0…T\); без длительности — скользящее окно (последние ~60 с для RR и ~5 мин для RMSSD).
 
 ### SQLite-схема
 
 ```sql
-sessions   (id, tag, source, session_name, participant, started, ended, drift_events)
-hrv_points (id, session_id, ts, rr_ms, rmssd)
-baseline   (hour, rmssd_mean, n_samples, updated_at)  -- hour 0–23, локальное время
+sessions        (id, tag, source, session_name, participant, started, ended, drift_events)
+hrv_points      (id, session_id, ts, rr_ms, rmssd)
+baseline        (hour, rmssd_mean, n_samples, updated_at)  -- hour 0–23, локальное время
+session_types   (slug, label, phrase_prefix, mock_profile, cluster_marker, is_custom)
+meditation_phrase_log (…)  -- лог guided mp3-фраз (meditation / relaxation)
 ```
 
-`tag` — метка сессии: `meditation / focus / rest / scroll / untagged`.
+**`tag`** — slug типа активности в `sessions` (строка): системные — `meditation`, `relaxation`, `test`, `focus`, `scroll`, `untagged`. Справочник для UI и mock-профилей — таблица **`session_types`** (seed из `hrv_core/session_types.py` при первом создании БД). В веб-форме можно добавить свой тип («Новая активность…») — он сохраняется через `POST /api/session-types`. Старый slug **`rest`** переименован в **`relaxation`**.
+
+**Веб: типы активности**
+
+| Действие | API |
+|----------|-----|
+| Список для формы и фильтров | `GET /api/session-types` → `{ session_types: [{ slug, label, phrase_prefix, mock_profile, is_custom }, …] }` |
+| Новый пользовательский тип | `POST /api/session-types` — body `{ slug, label }` |
+| Удалить пользовательский | `DELETE /api/session-types/{slug}` (системные — 403) |
+
+При старте сессии `POST /api/sessions` принимает `tag` (slug), `participant`, `source`, опционально `session_name`, `address`, `minutes`. Полный список endpoint — [ARCHITECTURE.md § Веб-API](ARCHITECTURE.md#веб-api-кратко).
 `source` — строка источника, например: `"mock"`; `"Polar H10  AA:BB:…"` (BLE); **`Polar H10 ANT+`** (только ANT+); **`Polar H10 BLE … (+ANT fallback)`** при старте с **`--ant-fallback`**; при фактическом переключении на ANT+ запись может обновиться на **`Polar H10 ANT+ fallback (BLE …)`**.
 
 ### MockHRVSource
@@ -147,11 +144,7 @@ recovering (rmssd_target=38, noise=11, duration=70s)
 а не от поля `noise` состояния — поле `noise` задаёт только турбулентность целевого RMSSD (`noisy_target`).
 Плавное движение current_rmssd к target: `current += (target - current) * 0.04`.
 
-Если **`tag` / `--session` = `meditation`** и источник **mock** (веб или CLI), включается **профиль медитации**: без цикла focused/drift/recovering; на `mean_rr` накладывается **RSA** (медленная синусоида ~8,5–11,5 с, как дыхательная модуляция RR), плавный дрейф центра и целевой RMSSD в зоне ~48–58 ms — график RR за 60 с выглядит ближе к спокойной практике, чем однородный AR(1) вокруг фиксированного среднего.
-
-**Верификация:** режим `python hrv_monitor.py --mock-verify` — 5 минут без UI и БД;
-сводная таблица фактического RMSSD (окно 60 с) по каждому состоянию и сравнение с `rmssd_target`
-(на границах состояний возможно смешение из‑за скользящего окна).
+Если **`tag = meditation`** и источник **mock**, включается **профиль медитации**: без цикла focused/drift/recovering; на `mean_rr` накладывается **RSA** (медленная синусоида ~8,5–11,5 с), плавный дрейф центра и целевой RMSSD в зоне ~48–58 ms.
 
 ### BLE (Polar H10)
 
@@ -171,9 +164,9 @@ RR в пакете: `rr_ms = raw * 1000 / 1024` (единицы 1/1024 с).
 Профиль **ANT+ Heart Rate**, RR из разницы времени удара (**1/1024 с**, как в BLE-пакете HR). Нужны USB ANT Stick, установленный **`openant`**, права на USB (часто udev-правила из документации **openant**), на Polar H10 — включённая передача по ANT+ (настройки в Polar Flow и т.п.).
 
 - **`AntPlusHRVSource`**: поиск первого HRM в эфире (`device_id=0`), watchdog по отсутствию RR (те же пороги по смыслу, что у BLE: первые **15 с**, затем **12 с** без RR — сообщения в терминал).
-- **`FallbackBleAntSource`**: **30 с** ожидания **первого** RR по BLE; затем пауза **1,5 с** (на случай позднего BLE); если RR так и не было — остановка BLE и старт ANT+. Если RR появился в паузе — остаёмся на BLE, ANT+ не поднимается. При переключении на ANT+ обновляется поле **`sessions.source`** в SQLite.
+- **`FallbackBleAntSource`**: **30 с** ожидания **первого** RR по BLE; затем пауза **1,5 с**; если RR так и не было — остановка BLE и старт ANT+. При переключении на ANT+ обновляется поле **`sessions.source`** в SQLite.
 
-CLI: **`--ant-plus`** (адрес **`--address`** не используется — при совместной передаче в консоли выводится напоминание) и **`--address MAC --ant-fallback`** (несовместимо с **`--mock`** и с **`--ant-plus`**).
+В веб-форме: **`source = ant`** (только ANT+) или **`ble_ant_fallback`** (MAC в `address`).
 
 ---
 
@@ -257,40 +250,38 @@ masterGain
 ## Что реализовано
 
 - [x] Абстракция `HRVSource` — mock, BLE и опционально ANT+ за единым интерфейсом
-- [x] `MockHRVSource` — AR(1), цикл состояний, опция `--mock-verify`
+- [x] `MockHRVSource` — AR(1), цикл состояний, профиль meditation (RSA)
 - [x] `PolarH10Source` — BLE, реконнект, `start_notify` с таймаутом/ретраями, watchdog по отсутствию RR; опциональный **`extra_stop`** для fallback
 - [x] **`AntPlusHRVSource`** / **`FallbackBleAntSource`** — ANT+ и BLE→ANT fallback (**openant** по желанию)
 - [x] RMSSD на скользящем окне 60 с
-- [x] Real-time графики: RR + RMSSD, session baseline и пунктир **persistent baseline** (per-hour)
-- [x] SQLite: `sessions`, `hrv_points`, `baseline`; обновление baseline при завершении сессии
-- [x] Drift detection + `notify-send`
-- [x] CLI: `--mock`, `--mock-verify`, `--address`, `--scan`, `--session`, **`--ant-plus`**, **`--ant-fallback`**
-- [x] **Session summary** при выходе (закрытие окна графика / остановка): длительность, min/mean/max RMSSD, число drift-событий, **vs baseline** (% к персональному baseline на час старта)
-- [x] `cluster.py` — HDBSCAN по RMSSD, визуализация (scatter RMSSD × час суток, boxplot по кластерам)
+- [x] **Веб-UI** (`python -m hrv_web`): live-графики RR + RMSSD (uPlot), архив, вкладка «Прогресс», guided mp3-фразы; типы активности в БД (`/api/session-types`)
+- [x] SQLite: `sessions`, `hrv_points`, `baseline`, `session_types`, `meditation_phrase_log`; обновление baseline при завершении сессии
+- [x] Drift detection (флаг в WebSocket; `notify-send` в веб-сессии отключён)
+- [x] **Session summary** после «Стоп»: длительность, min/mean/max RMSSD, drift-события, **vs baseline**
+- [x] `cluster.py` — HDBSCAN по RMSSD, matplotlib-графики (scatter, boxplot)
 - [x] `requirements.txt`
-- [x] **`BreathFeedbackLoop`** — детекция фазы дыхания по RSA, `resonance_score`; интеграция в WebSocket и breath guide
 - [x] **Web Audio биофидбек** — `hrv_audio_engine.js`: пульс, фоновая текстура, трансовый pad по RMSSD (см. раздел *Веб-аудио*)
-- [x] `tests/test_biofeedback.py` — unit-тесты biofeedback
+- [x] `tests/` — unittest (pipeline, tags, delete_session)
 
 ---
 
 ## Что осталось (опционально)
 
-Идеи на будущее: например, настраиваемые таймауты fallback через CLI, повторная попытка BLE после потери ANT+, поддержка выбора конкретного ANT device ID.
+Идеи на будущее: BLE-сканирование из веб-UI, настраиваемые таймауты fallback, повторная попытка BLE после потери ANT+, поддержка выбора конкретного ANT device ID.
 
 ---
 
 ## Файловая структура
 
 ```
-hrv_core/         — ядро: источники RR, RMSSD/drift, biofeedback, SQLite, mock-verify
-├── tests/            — unittest (biofeedback)
-hrv_web/          — FastAPI + статика
-  static/app.js              — WebSocket, processAudioFrame()
+hrv_core/         — ядро: источники RR, RMSSD/drift, SQLite, session_types (seed)
+tests/            — unittest (pipeline, tags, delete_session, …)
+hrv_web/          — FastAPI + статика (единственный UI записи сессий)
+  static/app.js              — SPA: форма, WebSocket, архив, прогресс
   static/hrv_audio_engine.js — Web Audio: triggerBeat, текстуры, rmssd pad
+  static/meditation_engine.js — guided mp3-фразы (meditation / relaxation)
   static/index.html          — UI режимов «Дышащий Эмбиент» / «Трансовый Порог»
-hrv_monitor.py    — CLI: matplotlib, mock-verify, --scan
-cluster.py        — кластеризация по накопленным данным
+cluster.py        — offline-кластеризация + matplotlib-графики
 requirements.txt  — зависимости pip
 hrv_data.sqlite   — база данных (создаётся автоматически)
 ```
@@ -303,26 +294,17 @@ hrv_data.sqlite   — база данных (создаётся автомати
 # зависимости (один раз или после смены Python)
 pip install -r requirements.txt
 
-# веб-UI (форма параметров, live графики uPlot, архив сессий)
+# основной UI: форма параметров, live-графики uPlot, архив, прогресс
 python -m hrv_web
 # или: uvicorn hrv_web.server:app --host 127.0.0.1 --port 8765
 # Откройте в браузере: http://127.0.0.1:8765/
 
-# mock (разработка, без hardware) — классический CLI + matplotlib
-python hrv_monitor.py --mock --session focus
+# mock без железа: в форме source = Mock, выберите тип активности, ▶ Старт
 
-# проверка mock: 5 мин, таблица RMSSD по состояниям vs target (без UI/БД)
-python hrv_monitor.py --mock-verify
-
-# реальный девайс (BLE)
-python hrv_monitor.py --scan                              # найти MAC
-python hrv_monitor.py --address "AA:BB:CC:DD:EE:FF" --session meditation
+# BLE: source = BLE Polar H10, укажите MAC (AA:BB:CC:DD:EE:FF)
 
 # ANT+ (после pip install 'openant>=1.3', USB ANT Stick; Polar H10 с ANT+)
-python hrv_monitor.py --ant-plus --session focus
-
-# BLE, при отсутствии RR в первые ~30 с — переход на ANT+
-python hrv_monitor.py --address "AA:BB:CC:DD:EE:FF" --ant-fallback --session meditation
+# source = ANT+ (USB stick)  или  BLE → ANT fallback + MAC
 
 # кластеризация (после накопления данных)
 python cluster.py
@@ -330,77 +312,54 @@ python cluster.py --include-mock
 python cluster.py --min-cluster-size 10
 ```
 
-После остановки сессии (кнопка «Стоп» в вебе, закрытие окна графика в CLI **или** Ctrl+C в терминале для CLI) печатается / показывается **session summary**.
+После «Стоп» в вебе — **session summary** в архиве (кнопка «Сводка»).
 
 ---
 
-## Mock-данные: зачем какая команда
+## Mock-данные в веб-UI
 
-Ниже — только сценарии **без Polar H10**: симулятор нужен, чтобы отладить пайплайн (графики, БД, кластеризацию) и понять интерфейс, не думая про Bluetooth.
+Симулятор (`source = mock`) нужен, чтобы отладить пайплайн (графики, БД, кластеризацию) без Bluetooth.
 
-### `pip install -r requirements.txt`
-
-Ставит библиотеки из **`requirements.txt`** (bleak, numpy, matplotlib, hdbscan, scikit-learn и т.д.). Без этого не запустятся `hrv_monitor.py` и `cluster.py`. Имеет смысл повторить после смены версии Python. Режимы **`--ant-plus`** и **`--ant-fallback`** дополнительно требуют **`pip install 'openant>=1.3'`** и USB ANT Stick.
-
-### `python hrv_monitor.py --mock --session <тег>`
-
-**Основной обучающий режим на фейковых данных.**
-
-- Поднимает окно с **двумя графиками** (RR за 60 с и RMSSD за 5 мин) и ведёт себя так же, как с реальным датчиком, но источник — `MockHRVSource` (цикл состояний focused → drift → recovering).
-- **`--session`** — **метка типа активности** для БД и кластеризации. Для **mock** при значении **`meditation`** включается отдельный **профиль симуляции** (RSA и спокойный ритм), для остальных тегов — цикл focused → drift → recovering.
-- Пишет точки в **`hrv_data.sqlite`** и при выходе обновляет **персональный baseline** по часу и печатает **session summary**.
-
-**Когда использовать:** первая знакомство с UI, проверка дрейфа/уведомлений, накопление тестовых сессий перед `cluster.py --include-mock`.
-
-### `python hrv_monitor.py --mock-verify`
-
-**Калибровка генератора, без графиков и без БД.**
-
-- Крутит mock **ровно 5 минут** (или пока не прервёте Ctrl+C), затем выводит **таблицу**: по каждому из трёх состояний — сколько раз посчитался RMSSD в этом состоянии, среднее/разброс и отклонение от `rmssd_target`.
-- Нужен, чтобы убедиться, что **скользящее окно 60 с** + AR(1) дают правдоподобные величины рядом с целевыми RMSSD (на переходах между состояниями возможны «хвосты» из‑за окна).
-
-**Когда использовать:** после смены параметров в `MockHRVSource` или если сомневаетесь, что симулятор ведёт себя ожидаемо.
+1. `python -m hrv_web` → http://127.0.0.1:8765/
+2. Укажите участника, тип активности, **Mock (без железа)**, при желании длительность.
+3. ▶ **Старт** — `MockHRVSource` пишет точки в `hrv_data.sqlite`; при **Стоп** обновляется baseline и доступна сводка.
+4. Для **`meditation`** — профиль RSA (спокойный ритм); для остальных тегов — цикл focused → drift → recovering.
+5. После нескольких mock-сессий: `python cluster.py --include-mock`.
 
 ### `python cluster.py --include-mock`
 
 **Разведочный анализ уже сохранённых точек, включая mock-сессии.**
 
 - По умолчанию `cluster.py` **отфильтровывает** строки, где `source` выглядит как mock, чтобы не смешивать синтетику с реальными измерениями. Флаг **`--include-mock`** отключает этот фильтр.
-- Имеет смысл только если вы **раньше** погоняли `hrv_monitor.py --mock` и в базе есть достаточно точек (см. порог `2 × min_cluster_size` в коде).
+- Имеет смысл только если в базе есть mock-сессии, записанные через веб (`source = mock`).
 
 **Когда использовать:** проверить, что пайплайн кластеризации и графики `cluster.py` работают на накопленных тестовых данных.
 
 ---
 
-## Как читать графики и что это говорит о «состоянии»
+## Как читать live-графики (веб)
 
-Важно: **RMSSD — это один числовой признак вариабельности сердечного ритма**, а не готовый измеритель «уровня осознанности». В литературе более высокий RMSSD чаще связывают с **преобладанием парасимпатики / расслаблением-восстановлением**, более низкий — с **стрессом и нагрузкой**, но это статистика по популяциям, не диагноз. В этом MVP **осознанность** вы проверяете **как гипотезу**: совпадают ли *ваши* субъективные метки сессий с участками графика и с кластерами после накопления данных.
+Важно: **RMSSD — это один числовой признак вариабельности сердечного ритма**, а не готовый измеритель «уровня осознанности». В этом MVP **осознанность** вы проверяете **как гипотезу**: совпадают ли *ваши* субъективные метки сессий с участками графика и с кластерами после накопления данных.
 
-### Верхний график: RR (интервалы R–R, 60 с)
+### RR (верхний график)
 
-- **Ось X:** «секунды назад» (последняя минута).
-- **Что смотреть:** насколько линия **ровная или «дышит»**. Большая пульсация амплитуды (между соседними ударами) обычно даёт **более высокий RMSSD**; почти плоская линия — мало вариатильности, RMSSD падает.
-- **На mock:** вы увидите смену «текстуры» при переходе между состояниями симулятора — это помогает привыкнуть к тому, как вид **RR** связан с нижним графиком.
+- **Без заданной длительности:** ось — последние ~60 с.
+- **С длительностью:** ось — секунды от старта записи.
+- **Что смотреть:** насколько линия **ровная или «дышит»** — амплитуда RR связана с RMSSD.
+- **На mock:** смена «текстуры» при переходах focused → drift → recovering (кроме профиля meditation).
 
-### Нижний график: RMSSD (окно 60 с, на экране — история ~5 минут)
+### RMSSD (нижний график)
 
-Сначала прочитайте раздел **«Baseline и drift»** выше — там определены термины.
+Сначала прочитайте раздел **«Baseline и drift»** — там определены термины.
 
-- **Зелёная / красная линия RMSSD (только CLI matplotlib):** сравнение **текущего** RMSSD с **session baseline**; красный = выполнено условие **drift** (RMSSD ниже baseline примерно на 20%).
-- **Серая пунктирная линия — session baseline:** среднее по последним до **60** значениям RMSSD в сессии (когда точек уже достаточно); от неё считается порог drift для уведомлений.
-- **Синяя пунктирная линия — persistent baseline:** среднее RMSSD **по этому часу суток** из таблицы `baseline` (если есть); опора «как обычно в это время».
-- **Текст на графике (CLI):** текущий RMSSD, baseline сессии, опционально persistent, метка **OK** или **DRIFT**.
-- **Веб:** основная кривая RMSSD без пунктира и без смены цвета по drift; уведомления и флаг `drift` в WebSocket — см. раздел *Baseline и drift*.
-
-### Как не перепутать «осознанность» и цвет линии
-
-- **Зелёный / красный** в приложении — это **не моральная оценка**, а сравнение **текущего RMSSD** с **коротким baseline** (и порог drift). Можно быть «осознанным» при низком RMSSD и наоборот; проект как раз про то, чтобы *сопоставить* субъективные теги и объективные кривые.
-- На **mock** красный участок просто соответствует низкому целевому RMSSD в фазе **drift** симулятора — это тренировка глаза и логики алгоритма, **не** ваша реальная медитация.
+- Отображается **текущая кривая RMSSD** (uPlot); пунктир session / persistent baseline и цвет по drift **не выведены**.
+- В полоске статистики — текущие RMSSD, HR, RN (нормализованный RMSSD), session baseline.
+- Флаг **drift** — в WebSocket (`drift` в кадре `beat`); в UI явно не подсвечивается.
 
 ### Практический порядок на mock
 
-1. Запустить **`--mock --session …`**, 5–15 минут понаблюдать переходы и подписи OK/DRIFT.
-2. При желании — **`--mock-verify`** и сверить таблицу с целями состояний.
-3. После нескольких сессий — **`cluster.py --include-mock`** и посмотреть, как алгоритм группирует точки на плоскости час × RMSSD.
+1. Записать 2–3 сессии с разными тегами (`meditation`, `focus`, …) через **Mock** в вебе.
+2. Сравнить форму кривых на вкладке «Запись» и наложение на «Прогресс».
+3. `python cluster.py --include-mock` — группировка точек на scatter RMSSD × час.
 
 После перехода на **реальный H10** смысл тот же: смотреть **дифференсы и устойчивые участки** относительно своих baseline и своих тегов сессий, а выводы об осознанности оставлять за **самонаблюдением и последующей разметкой**, а не за цветом линии один в один.
