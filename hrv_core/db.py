@@ -42,6 +42,17 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE sessions ADD COLUMN participant TEXT")
     if "drift_events" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN drift_events INTEGER DEFAULT 0")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meditation_phrase_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      INTEGER NOT NULL,
+            phrase_file     TEXT NOT NULL,
+            played_at       REAL NOT NULL,
+            rn_before       REAL,
+            rmssd_before    REAL,
+            rn_after_30s    REAL,
+            rmssd_after_30s REAL
+        )""")
     conn.commit()
     return conn
 

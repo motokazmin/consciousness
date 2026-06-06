@@ -25,6 +25,34 @@ let audioSessionActive = false;
 let audioEnabled = false;
 let audioMode = "smooth_rr";
 let audioTexture = "space_pad";
+let meditationEngine = null;
+
+const GUIDED_PHRASE_TAGS = { meditation: "sit", rest: "lay" };
+
+function phrasePrefixForTag(tag) {
+  return GUIDED_PHRASE_TAGS[tag] ?? null;
+}
+
+function syncGuidedPhraseOptionsVisibility() {
+  const wrap = $("guided_phrase_options");
+  if (!wrap) return;
+  wrap.hidden = !phrasePrefixForTag($("tag")?.value);
+}
+
+function guidedPhraseOptions() {
+  const el = $("opt_guided_phrases");
+  const intervalEl = $("guided_phrase_interval");
+  let phraseMinIntervalSec = 90;
+  if (intervalEl) {
+    const raw = intervalEl.value.trim().replace(",", ".");
+    const n = parseFloat(raw);
+    if (Number.isFinite(n) && n >= 5) phraseMinIntervalSec = n;
+  }
+  return {
+    guidedPhrases: el ? el.checked : false,
+    phraseMinIntervalSec,
+  };
+}
 
 function audioOptions() {
   const el = $("opt_audio_biofeedback");
@@ -145,11 +173,24 @@ function startBiofeedbackSession(opts) {
   const btn = $("btn_audio_start");
   if (btn) btn.disabled = !audioEnabled;
   syncBiofeedbackStats();
+
+  const phrasePrefix = phrasePrefixForTag(opts.tag);
+  if (opts.guidedPhrases && phrasePrefix && window.MeditationEngine) {
+    meditationEngine = new MeditationEngine();
+    meditationEngine.start(
+      opts.sessionId,
+      phrasePrefix,
+      opts.durationMinutes,
+      opts.phraseMinIntervalSec,
+    ).catch(() => {});
+  }
 }
 
 function stopBiofeedbackSession() {
   audioSessionActive = false;
   stopAudioEngine();
+  meditationEngine?.stop();
+  meditationEngine = null;
   setBiofeedbackPanelVisible(false);
   setAudioStatus("Нет активной сессии", false);
   const btn = $("btn_audio_start");
@@ -277,6 +318,7 @@ function fillTagSelect(allTags) {
   sel.appendChild(new Option("Другая…", TAG_CUSTOM_VALUE));
   if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
   syncTagCustomVisibility();
+  syncGuidedPhraseOptionsVisibility();
 }
 
 function syncTagCustomVisibility() {
@@ -286,6 +328,7 @@ function syncTagCustomVisibility() {
   const on = $("tag")?.value === TAG_CUSTOM_VALUE;
   wrap.hidden = !on;
   if (custom) custom.required = on;
+  syncGuidedPhraseOptionsVisibility();
 }
 
 function resolveSessionTag() {
@@ -563,6 +606,7 @@ function onWsMessage(ev) {
       updateHR(msg.r[i]);
       if (audioEnabled) processAudioFrame(msg, i);
     }
+    meditationEngine?.processFrame(msg);
     syncBiofeedbackStats();
   }
 }
@@ -580,8 +624,12 @@ function setErr(txt) {
 }
 
 function setBiofeedbackControlsEnabled(on) {
-  const el = $("opt_audio_biofeedback");
-  if (el) el.disabled = !on;
+  const audioEl = $("opt_audio_biofeedback");
+  const guidedEl = $("opt_guided_phrases");
+  const intervalEl = $("guided_phrase_interval");
+  if (audioEl) audioEl.disabled = !on;
+  if (guidedEl) guidedEl.disabled = !on;
+  if (intervalEl) intervalEl.disabled = !on;
 }
 
 async function startLive() {
@@ -608,7 +656,7 @@ async function startLive() {
   };
 
   try {
-    const opts = audioOptions();
+    const opts = { ...audioOptions(), ...guidedPhraseOptions() };
     audioMode = currentAudioMode();
 
     const res = await api("/api/sessions", { method: "POST", body: JSON.stringify(body) });
@@ -659,7 +707,12 @@ async function startLive() {
     stopRaf();
     raf = requestAnimationFrame(redrawLive);
 
-    startBiofeedbackSession(opts);
+    startBiofeedbackSession({
+      ...opts,
+      tag: body.tag,
+      sessionId: currentSessionId,
+      durationMinutes: body.minutes,
+    });
     if (opts.audioBiofeedback) {
       await startAudioEngine();
       switchTab("biofeedback");
@@ -1050,3 +1103,4 @@ $("btn_wipe_history")?.addEventListener("click", wipeHistory);
 $("btn_wipe_history_prog")?.addEventListener("click", wipeHistory);
 
 loadTags().catch(e => setErr(String(e)));
+syncGuidedPhraseOptionsVisibility();

@@ -691,6 +691,27 @@
                 <input id="minutes" type="number" step="0.5" min="0.5" placeholder="∞" />
               </div>
             </div>
+            <div class="biofeedback-options" id="guided_phrase_options" hidden>
+              <div class="biofeedback-options-title">Guided meditation</div>
+              <label class="check-label">
+                <input type="checkbox" id="opt_guided_phrases" checked />
+                HRV-реактивные голосовые фразы (mp3)
+              </label>
+              <div class="field" style="margin-top:10px;margin-bottom:0">
+                <label for="guided_phrase_interval">Мин. пауза между фразами, сек</label>
+                <input
+                  id="guided_phrase_interval"
+                  type="number"
+                  min="5"
+                  step="5"
+                  value="90"
+                  style="max-width:120px"
+                />
+              </div>
+              <p style="font-size:.75rem;color:var(--text-muted);margin:6px 0 0;line-height:1.45">
+                Медитация — sit_*, отдых — lay_*. Набор фраз подхватывается автоматически из папки phrases/ при старте сессии. Вход и выход — с короткой паузой (~2 с).
+              </p>
+            </div>
             <div class="biofeedback-options">
               <div class="biofeedback-options-title">Аудио-биофидбек</div>
               <label class="check-label">
@@ -951,6 +972,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
 <script src="/assets/hrv_audio_engine.js?v=3"></script>
-<script src="/assets/app.js?v=7"></script>
+<script src="/assets/meditation_engine.js?v=3"></script>
+<script src="/assets/app.js?v=10"></script>
 </body>
 </html>

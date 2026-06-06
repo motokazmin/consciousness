@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import queue
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -18,6 +19,7 @@ from hrv_core.tags import normalize_tag
 from hrv_web.session_manager import MANAGER
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+PHRASE_FILE_RE = re.compile(r"^(sit|lay)_(v|ya|u|z|vykh)_(\d+)\.mp3$")
 
 app = FastAPI(title="HRV Monitor")
 
@@ -29,6 +31,21 @@ class StartSessionBody(BaseModel):
     source: str = Field(..., description="mock | ble | ant | ble_ant_fallback")
     address: str | None = None
     minutes: float | None = Field(None, gt=0)
+
+
+class PhraseLogBody(BaseModel):
+    session_id: int
+    phrase_file: str = Field(..., min_length=1, max_length=200)
+    played_at: float
+    rn_before: float | None = None
+    rmssd_before: float | None = None
+    rn_after_30s: float | None = None
+    rmssd_after_30s: float | None = None
+
+
+class PhraseLogPatchBody(BaseModel):
+    rn_after_30s: float | None = None
+    rmssd_after_30s: float | None = None
 
 
 def _parse_date_start(iso_date: str | None) -> float | None:
@@ -354,6 +371,109 @@ async def session_stream(websocket: WebSocket, session_id: int):
                 break
     except WebSocketDisconnect:
         pass
+
+
+@app.get("/api/meditation/phrase-manifest")
+def phrase_manifest():
+    """Список mp3-фраз, реально лежащих в static/phrases/."""
+    manifest: dict[str, dict[str, list[int]]] = {"sit": {}, "lay": {}}
+    phrases_dir = STATIC_DIR / "phrases"
+    if phrases_dir.is_dir():
+        for path in phrases_dir.glob("*.mp3"):
+            m = PHRASE_FILE_RE.match(path.name)
+            if not m:
+                continue
+            prefix, category, num_s = m.group(1), m.group(2), m.group(3)
+            manifest[prefix].setdefault(category, []).append(int(num_s))
+    for prefix in manifest:
+        for category in manifest[prefix]:
+            manifest[prefix][category] = sorted(manifest[prefix][category])
+    return manifest
+
+
+@app.post("/api/meditation/phrase-log")
+def create_phrase_log(body: PhraseLogBody):
+    conn = init_db()
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO meditation_phrase_log
+                (session_id, phrase_file, played_at, rn_before, rmssd_before,
+                 rn_after_30s, rmssd_after_30s)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                body.session_id,
+                body.phrase_file,
+                body.played_at,
+                body.rn_before,
+                body.rmssd_before,
+                body.rn_after_30s,
+                body.rmssd_after_30s,
+            ),
+        )
+        conn.commit()
+        log_id = cur.lastrowid
+    finally:
+        conn.close()
+    return {"id": log_id, "ok": True}
+
+
+@app.patch("/api/meditation/phrase-log/{log_id}")
+def patch_phrase_log(log_id: int, body: PhraseLogPatchBody):
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM meditation_phrase_log WHERE id = ?", (log_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Запись не найдена")
+        conn.execute(
+            """
+            UPDATE meditation_phrase_log
+            SET rn_after_30s = ?, rmssd_after_30s = ?
+            WHERE id = ?
+            """,
+            (body.rn_after_30s, body.rmssd_after_30s, log_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"id": log_id, "ok": True}
+
+
+@app.get("/api/meditation/phrase-stats")
+def phrase_stats(session_id: int):
+    conn = init_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, session_id, phrase_file, played_at,
+                   rn_before, rmssd_before, rn_after_30s, rmssd_after_30s
+            FROM meditation_phrase_log
+            WHERE session_id = ?
+            ORDER BY played_at
+            """,
+            (session_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "session_id": session_id,
+        "phrases": [
+            {
+                "id": r[0],
+                "session_id": r[1],
+                "phrase_file": r[2],
+                "played_at": r[3],
+                "rn_before": r[4],
+                "rmssd_before": r[5],
+                "rn_after_30s": r[6],
+                "rmssd_after_30s": r[7],
+            }
+            for r in rows
+        ],
+    }
 
 
 @app.get("/api/scan")
