@@ -256,62 +256,33 @@ function api(path, opts = {}) {
 }
 
 // ── TAGS ──────────────────────────────────────────────────────────────────
-// Динамически заполняется из /api/session-types при старте
+// Единственный источник правды — /api/session-types (таблица в БД).
+// Кастомные теги создаются через POST /api/session-types и сразу сохраняются в БД.
 let TAG_LABELS = {};
-let TAG_PRESETS = [];
-const CUSTOM_TAGS_KEY = "hrv_custom_tags";
+let TAG_PRESETS = [];   // системные slugs (is_custom=false)
 const TAG_CUSTOM_VALUE = "__custom__";
 
 function tagLabel(slug) {
   return TAG_LABELS[slug] || slug;
 }
 
-function loadCustomTags() {
-  try {
-    const raw = localStorage.getItem(CUSTOM_TAGS_KEY);
-    const arr = raw ? JSON.parse(raw) : [];
-    return Array.isArray(arr) ? arr.filter((t) => typeof t === "string" && t.trim()) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveCustomTag(tag) {
-  const t = tag.trim();
-  if (!t || TAG_PRESETS.includes(t)) return;
-  const set = new Set([...loadCustomTags(), t]);
-  localStorage.setItem(CUSTOM_TAGS_KEY, JSON.stringify([...set]));
-}
-
-function mergeTagList(apiTags) {
-  const set = new Set([...TAG_PRESETS, ...loadCustomTags(), ...apiTags]);
-  return [...set];
-}
-
-function fillFilterSelect(sel, allTags) {
+function fillFilterSelect(sel, allTypes) {
   const prev = sel.value;
   sel.innerHTML = '<option value="">— все —</option>';
-  const ordered = [
-    ...TAG_PRESETS.filter((t) => allTags.includes(t)),
-    ...allTags.filter((t) => !TAG_PRESETS.includes(t)).sort(),
-  ];
-  for (const t of ordered) {
-    sel.appendChild(new Option(tagLabel(t), t));
+  for (const st of allTypes) {
+    sel.appendChild(new Option(st.label, st.slug));
   }
   if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
 }
 
-function fillTagSelect(allTags) {
+function fillTagSelect(allTypes) {
   const sel = $("tag");
   const prev = sel.value;
   sel.innerHTML = "";
-  for (const t of TAG_PRESETS) {
-    sel.appendChild(new Option(tagLabel(t), t));
+  for (const st of allTypes) {
+    sel.appendChild(new Option(st.label, st.slug));
   }
-  for (const t of allTags.filter((x) => !TAG_PRESETS.includes(x)).sort()) {
-    sel.appendChild(new Option(tagLabel(t), t));
-  }
-  sel.appendChild(new Option("Другая…", TAG_CUSTOM_VALUE));
+  sel.appendChild(new Option("Новая активность…", TAG_CUSTOM_VALUE));
   if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
   syncTagCustomVisibility();
   syncGuidedPhraseOptionsVisibility();
@@ -327,19 +298,31 @@ function syncTagCustomVisibility() {
   syncGuidedPhraseOptionsVisibility();
 }
 
-function resolveSessionTag() {
+async function resolveSessionTag() {
   const sel = $("tag");
-  if (sel.value === TAG_CUSTOM_VALUE) {
-    const raw = $("tag_custom")?.value?.trim() || "";
-    if (!raw) throw new Error("Укажите название новой активности");
-    if (raw.length > 64) throw new Error("Тип активности не длиннее 64 символов");
-    if (!/^[\w\s\-\.а-яА-ЯёЁ]+$/u.test(raw)) {
-      throw new Error("Недопустимые символы в типе активности");
-    }
-    saveCustomTag(raw);
-    return raw;
+  if (sel.value !== TAG_CUSTOM_VALUE) return sel.value;
+
+  const raw = $("tag_custom")?.value?.trim() || "";
+  if (!raw) throw new Error("Укажите название новой активности");
+  if (raw.length > 64) throw new Error("Тип активности не длиннее 64 символов");
+  if (!/^[\w\s\-\.а-яА-ЯёЁ]+$/u.test(raw)) {
+    throw new Error("Недопустимые символы в типе активности");
   }
-  return sel.value;
+
+  // Slug = lowercase, пробелы → '_'
+  const slug = raw.toLowerCase().replace(/\s+/g, "_");
+
+  // Сохраняем в БД если новый
+  const { session_types: existing } = await api("/api/session-types");
+  if (!existing.some((s) => s.slug === slug)) {
+    await api("/api/session-types", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug, label: raw }),
+    });
+  }
+  await loadSessionTypes();
+  return slug;
 }
 
 async function loadSessionTypes() {
@@ -350,21 +333,15 @@ async function loadSessionTypes() {
     GUIDED_PHRASE_TAGS = {};
     for (const st of session_types) {
       TAG_LABELS[st.slug] = st.label;
-      TAG_PRESETS.push(st.slug);
+      if (!st.is_custom) TAG_PRESETS.push(st.slug);
       if (st.phrase_prefix) GUIDED_PHRASE_TAGS[st.slug] = st.phrase_prefix;
     }
+    fillTagSelect(session_types);
+    fillFilterSelect($("flt_tag"), session_types);
+    fillFilterSelect($("prog_tag"), session_types);
   } catch (e) {
-    // fallback — не блокируем UI
     console.warn("loadSessionTypes failed:", e);
   }
-}
-
-async function loadTags() {
-  const { tags: apiTags } = await api("/api/tags");
-  const allTags = mergeTagList(apiTags);
-  fillTagSelect(allTags);
-  fillFilterSelect($("flt_tag"), allTags);
-  fillFilterSelect($("prog_tag"), allTags);
 }
 
 $("tag")?.addEventListener("change", syncTagCustomVisibility);
@@ -654,7 +631,7 @@ async function startLive() {
   const minutes = rawMin ? parseFloat(rawMin.replace(",", ".")) : null;
   let tag;
   try {
-    tag = resolveSessionTag();
+    tag = await resolveSessionTag();
   } catch (e) {
     setErr(String(e.message || e));
     return;
@@ -707,7 +684,7 @@ async function startLive() {
     requestAnimationFrame(resizePlots);
 
     setStatus(`Сессия #${currentSessionId} · ${tagLabel(body.tag)}${timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);
-    loadTags().catch(() => {});
+    loadSessionTypes().catch(() => {});
     $("btn_start").disabled = true;
     $("btn_stop").disabled  = false;
     setBiofeedbackControlsEnabled(false);
@@ -1142,7 +1119,7 @@ async function wipeHistory() {
     $("arch_rows").innerHTML = "";
     const emptyEl = $("prog_empty");
     if (emptyEl) emptyEl.hidden = false;
-    await loadTags();
+    await loadSessionTypes();
     await loadArchive();
     setProgErr("");
     setStatus("История полностью очищена.");
@@ -1154,5 +1131,5 @@ async function wipeHistory() {
 $("btn_wipe_history")?.addEventListener("click", wipeHistory);
 $("btn_wipe_history_prog")?.addEventListener("click", wipeHistory);
 
-loadSessionTypes().then(() => loadTags()).catch(e => setErr(String(e)));
+loadSessionTypes().catch(e => setErr(String(e)));
 syncGuidedPhraseOptionsVisibility();

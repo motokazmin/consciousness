@@ -12,8 +12,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from hrv_core.constants import DB_PATH, SESSION_TAGS
-from hrv_core.session_types import SESSION_TYPES
+from hrv_core.constants import DB_PATH
 from hrv_core.db import delete_session, init_db, load_hour_baseline, wipe_all_history
 from hrv_core.summary import session_summary_dict
 from hrv_core.tags import normalize_tag
@@ -47,6 +46,11 @@ class PhraseLogBody(BaseModel):
 class PhraseLogPatchBody(BaseModel):
     rn_after_30s: float | None = None
     rmssd_after_30s: float | None = None
+
+
+class CreateSessionTypeBody(BaseModel):
+    slug: str = Field(..., min_length=1, max_length=64, pattern=r"^[\w\-\.а-яА-ЯёЁ]+$")
+    label: str = Field(..., min_length=1, max_length=100)
 
 
 def _parse_date_start(iso_date: str | None) -> float | None:
@@ -122,14 +126,16 @@ def _decimate_rows(rows: list, max_points: int) -> list:
     return result
 
 
-def _all_tags(conn) -> list[str]:
-    db_tags = [
-        r[0]
-        for r in conn.execute(
-            "SELECT DISTINCT tag FROM sessions WHERE tag IS NOT NULL AND tag != '' ORDER BY tag"
-        ).fetchall()
+def _all_session_types(conn) -> list[dict]:
+    rows = conn.execute(
+        "SELECT slug, label, phrase_prefix, mock_profile, is_custom "
+        "FROM session_types ORDER BY is_custom ASC, slug ASC"
+    ).fetchall()
+    return [
+        {"slug": r[0], "label": r[1], "phrase_prefix": r[2],
+         "mock_profile": r[3], "is_custom": bool(r[4])}
+        for r in rows
     ]
-    return sorted(set(SESSION_TAGS) | set(db_tags))
 
 
 @app.get("/api/health")
@@ -137,28 +143,53 @@ def health():
     return {"ok": True, "db": str(DB_PATH.resolve())}
 
 
-@app.get("/api/tags")
-def tags():
-    conn = init_db()
-    out = _all_tags(conn)
-    conn.close()
-    return {"tags": out}
-
-
 @app.get("/api/session-types")
-def session_types():
-    """Конфигурация всех типов сессий (slug, label, phrase_prefix, mock_profile)."""
-    return {
-        "session_types": [
-            {
-                "slug": st.slug,
-                "label": st.label,
-                "phrase_prefix": st.phrase_prefix,
-                "mock_profile": st.mock_profile,
-            }
-            for st in SESSION_TYPES.values()
-        ]
-    }
+def get_session_types():
+    """Все типы сессий из БД (системные + пользовательские)."""
+    conn = init_db()
+    out = _all_session_types(conn)
+    conn.close()
+    return {"session_types": out}
+
+
+@app.post("/api/session-types")
+def create_session_type(body: CreateSessionTypeBody):
+    """Создать пользовательский тип сессии."""
+    conn = init_db()
+    try:
+        existing = conn.execute(
+            "SELECT slug FROM session_types WHERE slug = ?", (body.slug,)
+        ).fetchone()
+        if existing:
+            raise HTTPException(409, f"Тип '{body.slug}' уже существует")
+        conn.execute(
+            "INSERT INTO session_types (slug, label, phrase_prefix, mock_profile, is_custom) "
+            "VALUES (?, ?, NULL, 'default', 1)",
+            (body.slug, body.label),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "slug": body.slug, "label": body.label}
+
+
+@app.delete("/api/session-types/{slug}")
+def delete_session_type(slug: str):
+    """Удалить пользовательский тип сессии (системные — нельзя)."""
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT is_custom FROM session_types WHERE slug = ?", (slug,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Тип не найден")
+        if not row[0]:
+            raise HTTPException(403, "Системные типы нельзя удалять")
+        conn.execute("DELETE FROM session_types WHERE slug = ?", (slug,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "deleted": slug}
 
 
 @app.post("/api/sessions")
