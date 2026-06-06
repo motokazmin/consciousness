@@ -8,12 +8,6 @@ HR_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
 # Скользящее окно RR-интервалов для расчёта RMSSD (сек)
 RMSSD_WINDOW_SEC = 60
 
-# Горизонт графика RR в CLI matplotlib (сек «назад» от текущего момента)
-PLOT_RR_SEC = 60
-
-# Горизонт графика RMSSD в CLI matplotlib (сек «назад»)
-PLOT_RMSSD_SEC = 300
-
 # Число последних точек RMSSD для session baseline и порога drift
 BASELINE_SAMPLES = 60
 
@@ -28,9 +22,6 @@ DRIFT_COOLDOWN_SEC = 120
 
 # Пауза перед повторным BLE-подключением после обрыва (сек)
 RECONNECT_DELAY = 3.0
-
-# Длительность прогона mock-verify без UI (сек)
-MOCK_VERIFY_SEC = 300.0
 
 # BLE/ANT+: нет RR дольше этого — watchdog считает потерю потока (сек)
 RR_WATCHDOG_SEC = 12.0

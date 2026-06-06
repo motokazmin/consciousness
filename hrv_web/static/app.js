@@ -773,8 +773,13 @@ async function loadArchive() {
       `<td>${tagPill(s.tag)}</td>` +
       `<td style="color:var(--text-dim);font-size:.78rem">${escapeHtml(String(s.source).slice(0, 38))}</td>` +
       `<td style="font-size:.82rem">${fmtTime(s.started)}</td>` +
-      `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--text-muted)'>…</span>"}</td>`;
+      `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--text-muted)'>…</span>"}</td>` +
+      `<td style="text-align:right"><button type="button" class="btn btn-danger btn-delete-session" data-id="${s.id}" style="font-size:.72rem;padding:4px 10px">Удалить</button></td>`;
     tr.addEventListener("click", () => openArchiveSession(s.id));
+    tr.querySelector(".btn-delete-session")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteSession(s.id);
+    });
     tb.appendChild(tr);
   }
 }
@@ -785,13 +790,18 @@ let archRM = null;
 function renderSummaryGrid(sum) {
   const grid = $("arch_summary_grid");
   grid.innerHTML = "";
+  const durMin = sum.duration_sec != null ? sum.duration_sec / 60 : null;
+  const vsBl =
+    sum.vs_baseline_pct != null
+      ? (sum.vs_baseline_pct >= 0 ? "+" : "") + sum.vs_baseline_pct.toFixed(0) + "%"
+      : "—";
   const fields = [
     ["RMSSD mean",  sum.rmssd_mean != null ? sum.rmssd_mean.toFixed(1) + " ms" : "—"],
     ["RMSSD min",   sum.rmssd_min  != null ? sum.rmssd_min.toFixed(1)  + " ms" : "—"],
     ["RMSSD max",   sum.rmssd_max  != null ? sum.rmssd_max.toFixed(1)  + " ms" : "—"],
-    ["RR mean",     sum.rr_mean    != null ? sum.rr_mean.toFixed(0)    + " ms" : "—"],
-    ["Длительность", sum.duration_min != null ? sum.duration_min.toFixed(1) + " мин" : "—"],
-    ["Baseline",    sum.baseline_at_start != null ? sum.baseline_at_start.toFixed(1) + " ms" : "нет"],
+    ["Длительность", durMin != null ? durMin.toFixed(1) + " мин" : "—"],
+    ["vs baseline", vsBl],
+    ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
   ];
   for (const [label, value] of fields) {
     const cell = document.createElement("div");
@@ -805,6 +815,11 @@ async function openArchiveSession(id) {
   const detail = $("arch_detail");
   detail.classList.add("visible");
   $("arch_id").textContent = String(id);
+  const delBtn = $("btn_delete_arch_session");
+  if (delBtn) {
+    delBtn.hidden = false;
+    delBtn.onclick = () => deleteSession(id);
+  }
 
   try {
     const sum = await api(`/api/sessions/${id}`);
@@ -1076,6 +1091,29 @@ function applyProgressSmooth() {
 $("btn_prog_build")?.addEventListener("click", loadProgress);
 $("prog_smooth")?.addEventListener("change", applyProgressSmooth);
 
+// ── DELETE SESSION ────────────────────────────────────────────────────────
+async function deleteSession(id) {
+  const ok = confirm(`Удалить сессию #${id}?\n\nТочки RR/RMSSD и логи фраз будут удалены. Действие необратимо.`);
+  if (!ok) return;
+  try {
+    await api(`/api/sessions/${id}`, { method: "DELETE" });
+    const openId = $("arch_id")?.textContent;
+    if (openId && String(id) === openId) {
+      $("arch_detail")?.classList.remove("visible");
+      $("btn_delete_arch_session")?.setAttribute("hidden", "");
+      if (archRR) { archRR.destroy(); archRR = null; }
+      if (archRM) { archRM.destroy(); archRM = null; }
+    }
+    await loadArchive();
+    if ($("tab-progress")?.classList.contains("active")) {
+      await loadProgress();
+    }
+    setStatus(`Сессия #${id} удалена.`);
+  } catch (e) {
+    setErr(String(e.message || e));
+  }
+}
+
 // ── WIPE HISTORY ──────────────────────────────────────────────────────────
 async function wipeHistory() {
   const ok = confirm(
@@ -1087,6 +1125,7 @@ async function wipeHistory() {
     progSessionsRaw = [];
     destroyProgPlot();
     $("arch_detail")?.classList.remove("visible");
+    $("btn_delete_arch_session")?.setAttribute("hidden", "");
     $("arch_rows").innerHTML = "";
     const emptyEl = $("prog_empty");
     if (emptyEl) emptyEl.hidden = false;

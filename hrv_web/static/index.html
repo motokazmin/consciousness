@@ -893,6 +893,7 @@
                 <th>Источник</th>
                 <th>Начало</th>
                 <th>Конец</th>
+                <th></th>
               </tr>
             </thead>
             <tbody id="arch_rows"></tbody>
@@ -905,6 +906,9 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">Сессия <span id="arch_id" style="color:var(--accent)"></span></span>
+          <button type="button" class="btn btn-danger" id="btn_delete_arch_session" style="padding:6px 14px;font-size:.78rem" hidden>
+            Удалить сессию
+          </button>
         </div>
         <div class="card-body">
           <div class="summary-grid" id="arch_summary_grid"></div>

@@ -2,7 +2,7 @@
 
 Экспериментальная система мониторинга вариабельности сердечного ритма (HRV) в реальном времени. Проект проверяет гипотезу: **можно ли по одному сигналу RMSSD выделить физиологические кластеры, согласующиеся с субъективными метками активности пользователя** (медитация, фокус, отдых, скроллинг).
 
-> Операционные детали (CLI, BLE/ANT+, mock, baseline): [hrv_mvp.md](hrv_mvp.md)
+> Операционные детали (веб-UI, BLE/ANT+, mock, baseline): [hrv_mvp.md](hrv_mvp.md)
 
 ---
 
@@ -26,12 +26,12 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  UI                                                         │
-│  hrv_monitor.py (CLI + matplotlib)   hrv_web/ (FastAPI+SPA) │
+│  hrv_web/ (FastAPI + SPA, uPlot, Web Audio)                 │
 └────────────────────────────┬────────────────────────────────┘
                              │
 ┌────────────────────────────▼────────────────────────────────┐
 │  hrv_core — ядро                                            │
-│  pipeline (RMSSD, drift)  │  biofeedback (RSA) │  db │  summary │
+│  pipeline (RMSSD, drift)  │  db │  summary │  sources       │
 └────────────────────────────┬────────────────────────────────┘
                              │ callback(rr_ms, ts)
 ┌────────────────────────────▼────────────────────────────────┐
@@ -45,7 +45,7 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Принцип:** одно ядро (`hrv_core`), два независимых интерфейса (CLI и веб), локальное хранилище без облачных сервисов.
+**Принцип:** одно ядро (`hrv_core`), веб-интерфейс для записи и визуализации, локальное хранилище без облачных сервисов.
 
 ---
 
@@ -65,26 +65,21 @@ flowchart LR
         DB[(SQLite)]
     end
 
-    subgraph UI["Интерфейсы"]
-        CLI[matplotlib]
+    subgraph UI["Интерфейс"]
         WEB[WebSocket + uPlot]
     end
 
     S --> CB --> ST
     ST --> RM --> DR
     ST --> DB
-    ST --> CLI
     ST --> WEB
 ```
 
 ### Обработка одного удара
 
 1. **Источник** (`hrv_core/sources.py`) в отдельном потоке вызывает `callback(rr_ms, ts)`.
-2. **`BreathFeedbackLoop.process_rr()`** (`hrv_core/biofeedback.py`) и **`HRVSessionState.process_beat()`** (`hrv_core/pipeline.py`):
-   - biofeedback: медианная фильтрация RR, EMA-тренд → фаза вдох/выдох (RSA), `resonance_score`;
-   - pipeline: скользящий буфер RR (60 с), RMSSD, drift;
-   - возвращает `BeatSample(ts, rr_ms, rmssd, drift_just_fired)`; breath-состояние уходит в WebSocket полем `breath`.
-3. **UI-слой** сохраняет точку в `hrv_points`, обновляет графики (CLI или WebSocket).
+2. **`HRVSessionState.process_beat()`** (`hrv_core/pipeline.py`): скользящий буфер RR (60 с), RMSSD, drift; возвращает `BeatSample(ts, rr_ms, rmssd, drift_just_fired)`.
+3. **Веб-слой** сохраняет точку в `hrv_points`, отправляет метрики по WebSocket, обновляет графики (uPlot).
 4. **При завершении сессии** — summary, обновление персонального baseline по часу.
 
 ---
@@ -98,11 +93,9 @@ flowchart LR
 | `constants.py` | Пороги, таймауты, пути (`DB_PATH`, `DRIFT_THRESHOLD=0.80`, окно RMSSD 60 с) |
 | `sources.py` | Абстракция `HRVSource`, реализации mock/BLE/ANT+/fallback, фабрика `build_source()` |
 | `pipeline.py` | `compute_rmssd()`, `HRVSessionState`, детекция drift, `notify-send` |
-| `biofeedback.py` | `BreathFeedbackLoop.process_rr()` — фаза дыхания, RSA amplitude, resonance score |
-| `db.py` | Схема SQLite, миграции, baseline по часу 0–23 |
-| `summary.py` | Session summary для CLI и JSON API |
-| `ble_scan.py` | BLE-сканирование Polar, проверка BlueZ/bleak |
-| `mock_verify.py` | Валидация mock-генератора без UI и БД |
+| `db.py` | Схема SQLite, миграции, baseline по часу 0–23, удаление сессий |
+| `summary.py` | Session summary (JSON API) |
+| `ble_scan.py` | BLE-сканирование Polar, проверка BlueZ/bleak (подключение) |
 
 ### `hrv_web/` — веб-интерфейс
 
@@ -119,8 +112,7 @@ flowchart LR
 | Команда | Назначение |
 |---------|------------|
 | `python -m hrv_web` | Основной UI: http://127.0.0.1:8765/ |
-| `python hrv_monitor.py` | CLI с matplotlib, `--mock`, `--scan`, BLE/ANT |
-| `python cluster.py` | HDBSCAN по накопленным данным |
+| `python cluster.py` | Offline HDBSCAN по накопленным данным |
 
 ---
 
@@ -139,7 +131,7 @@ class HRVSource(ABC):
 | `AntPlusHRVSource` | ANT+ Heart Rate через openant (опционально) |
 | `FallbackBleAntSource` | 30 с ожидания BLE → переключение на ANT+ |
 
-Переключение: аргументы CLI или поле `source` в веб-форме (`mock`, `ble`, `ant`, `ble_ant_fallback`).
+Переключение: поле `source` в веб-форме (`mock`, `ble`, `ant`, `ble_ant_fallback`).
 
 ---
 
@@ -177,8 +169,9 @@ baseline   (hour, rmssd_mean, n_samples, updated_at)   -- hour 0–23
 | `/api/sessions` | POST/GET | Старт / список сессий |
 | `/api/sessions/{id}/stop` | POST | Остановка + summary |
 | `/api/sessions/{id}/stream` | WebSocket | Live: `beat` (+ `breath`), `breath`, `meta`, `ended` |
+| `/api/sessions/{id}` | DELETE | Удаление одной сессии |
 | `/api/sessions/{id}/points` | GET | Точки (с downsampling) |
-| `/api/scan` | GET | BLE-сканирование Polar |
+| `/api/history` | DELETE | Очистка всей истории |
 
 Одновременно допускается **только одна активная сессия** (409 Conflict при повторном старте).
 
@@ -289,8 +282,8 @@ Python 3.12 · numpy · bleak (BLE) · openant (опц.) · matplotlib · FastAP
 ## Паттерны проектирования
 
 - **Strategy + Factory** — `HRVSource` + `build_source(kind)`.
-- **Shared core, dual UI** — один pipeline, CLI и веб.
-- **Single active session** — `SessionManager` / mutex в CLI.
+- **Shared core, web UI** — один pipeline, веб для записи и графиков.
+- **Single active session** — `SessionManager`.
 - **Incremental personal baseline** — per-hour RMSSD между сессиями.
 - **Graceful hardware handling** — reconnect, watchdog, подсказки про «занятый» H10.
 
@@ -300,11 +293,10 @@ Python 3.12 · numpy · bleak (BLE) · openant (опц.) · matplotlib · FastAP
 
 ```
 consciousness/
-├── hrv_core/           # Ядро: источники, pipeline, biofeedback, БД
-├── tests/              # unittest (biofeedback)
+├── hrv_core/           # Ядро: источники, pipeline, БД
+├── tests/              # unittest (pipeline, tags, db)
 ├── hrv_web/            # FastAPI + статика (app.js, hrv_audio_engine.js)
-├── hrv_monitor.py      # CLI
-├── cluster.py          # Кластеризация
+├── cluster.py          # Offline-кластеризация
 ├── requirements.txt
 ├── hrv_data.sqlite     # БД (runtime)
 ├── ARCHITECTURE.md     # Этот документ
@@ -313,18 +305,7 @@ consciousness/
 
 ---
 
-## Biofeedback (RSA)
+## Аудио-биофидбек (веб)
 
-Модуль [`hrv_core/biofeedback.py`](hrv_core/biofeedback.py) определяет фазу дыхания по респираторной синусовой аритмии (RR падает на вдохе, растёт на выдохе) без отдельного датчика дыхания.
-
-| Поле WebSocket `breath` | Описание |
-|-------------------------|----------|
-| `phase` | `inhale` / `exhale` / `hold` |
-| `phase_progress` | 0.0–1.0, прогресс текущей фазы |
-| `rsa_amplitude` | размах RR в текущем полуцикле, мс |
-| `resonance_score` | 0.0–1.0, амплитуда RSA × «синусоидальность» тренда |
-
-**Интеграция:** `RunningSession.on_beat()` вызывает `process_rr()` параллельно с RMSSD; веб breath guide на вкладке «Осознанность» синхронизируется с серверной фазой (fallback — таймер 4/1/6 с до прогрева).
-
-**Тесты:** `python -m unittest tests.test_biofeedback`
+Биофидбек реализован в браузере: вкладка «Биофидбек», [`hrv_audio_engine.js`](hrv_web/static/hrv_audio_engine.js) (Web Audio). Сервер передаёт только метрики RR/RMSSD по WebSocket.
 

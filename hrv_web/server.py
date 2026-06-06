@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from hrv_core.constants import DB_PATH, SESSION_TAGS
-from hrv_core.db import init_db, load_hour_baseline
+from hrv_core.db import delete_session, init_db, load_hour_baseline, wipe_all_history
 from hrv_core.summary import session_summary_dict
 from hrv_core.tags import normalize_tag
 from hrv_web.session_manager import MANAGER
@@ -287,14 +287,27 @@ def wipe_history():
         )
     conn = init_db()
     try:
-        n_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        conn.execute("DELETE FROM hrv_points")
-        conn.execute("DELETE FROM sessions")
-        conn.execute("DELETE FROM baseline")
-        conn.commit()
+        n_sessions = wipe_all_history(conn)
     finally:
         conn.close()
     return {"ok": True, "deleted_sessions": n_sessions}
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_one_session(session_id: int):
+    active = MANAGER.get_active()
+    if active is not None and active.session_id == session_id:
+        raise HTTPException(
+            409,
+            "Нельзя удалить активную сессию — сначала остановите запись.",
+        )
+    conn = init_db()
+    try:
+        if not delete_session(conn, session_id):
+            raise HTTPException(404, "Сессия не найдена")
+    finally:
+        conn.close()
+    return {"ok": True, "deleted_session_id": session_id}
 
 
 @app.get("/api/sessions/{session_id}")
@@ -474,21 +487,6 @@ def phrase_stats(session_id: int):
             for r in rows
         ],
     }
-
-
-@app.get("/api/scan")
-async def scan_ble():
-    from hrv_core.ble_scan import BleScanError, discover_ble_devices
-
-    try:
-        devices = await discover_ble_devices(timeout=10.0)
-    except BleScanError as e:
-        raise HTTPException(503, str(e)) from e
-    polar = [d for d in devices if d.name and "Polar" in d.name]
-    out = []
-    for d in polar or devices:
-        out.append({"address": d.address, "name": d.name or ""})
-    return {"devices": out}
 
 
 if STATIC_DIR.is_dir():

@@ -104,3 +104,28 @@ def update_session_baseline(conn: sqlite3.Connection, session_id: int) -> None:
     conn.commit()
     updated = [r[0] for r in rows]
     print(f"Baseline updated for hours {updated}")
+
+
+def delete_session(conn: sqlite3.Connection, session_id: int) -> bool:
+    """Удалить сессию и связанные точки/логи фраз. Возвращает True, если сессия была."""
+    row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if not row:
+        return False
+    conn.execute("DELETE FROM hrv_points WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "DELETE FROM meditation_phrase_log WHERE session_id = ?", (session_id,)
+    )
+    conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    conn.commit()
+    return True
+
+
+def wipe_all_history(conn: sqlite3.Connection) -> int:
+    """Удалить всю историю. Возвращает число удалённых сессий."""
+    n_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    conn.execute("DELETE FROM hrv_points")
+    conn.execute("DELETE FROM meditation_phrase_log")
+    conn.execute("DELETE FROM sessions")
+    conn.execute("DELETE FROM baseline")
+    conn.commit()
+    return int(n_sessions)
