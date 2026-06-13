@@ -45,6 +45,8 @@ class RunningSession:
     duration_minutes: float | None
     ws_queue: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=2000))
     timer: threading.Timer | None = None
+    last_resp_rate: float | None = field(default=None)
+    last_resp_wave: list[float] = field(default_factory=list)
 
     def _enqueue_ws(self, payload: dict[str, Any]) -> None:
         try:
@@ -58,6 +60,11 @@ class RunningSession:
                 self.ws_queue.put_nowait(payload)
             except queue.Full:
                 pass
+
+    def on_resp(self, resp_rate: float | None, resp_wave: list[float]) -> None:
+        if resp_rate is not None:
+            self.last_resp_rate = resp_rate
+        self.last_resp_wave = resp_wave
 
     def on_beat(self, rr_ms: float, ts: float) -> None:
         if self.stop_event.is_set():
@@ -80,6 +87,8 @@ class RunningSession:
             "rn": [sample.rmssd_normalized],
             "bl": sample.session_baseline,
             "drift": sample.drift_just_fired,
+            "resp_rate": self.last_resp_rate,
+            "resp_wave": self.last_resp_wave,
         }
         self._enqueue_ws(payload)
 
@@ -141,6 +150,21 @@ class SessionManager:
         stop_event = threading.Event()
         conn_lock = threading.Lock()
         state = HRVSessionState(pers, desktop_notify=False)
+        rs = RunningSession(
+            session_id=session_id,
+            conn=conn,
+            conn_lock=conn_lock,
+            stop_event=stop_event,
+            state=state,
+            source=None,
+            baseline_at_start=pers,
+            started_at=started,
+            duration_minutes=minutes,
+        )
+
+        def _resp(resp_rate: float | None, resp_wave: list[float]) -> None:
+            rs.on_resp(resp_rate, resp_wave)
+
         source = build_source(
             source_kind,
             session_stop=stop_event,
@@ -149,18 +173,9 @@ class SessionManager:
             session_id=session_id,
             mock_tag=tag if source_kind == "mock" else None,
             conn_lock=conn_lock,
+            resp_callback=_resp,
         )
-        rs = RunningSession(
-            session_id=session_id,
-            conn=conn,
-            conn_lock=conn_lock,
-            stop_event=stop_event,
-            state=state,
-            source=source,
-            baseline_at_start=pers,
-            started_at=started,
-            duration_minutes=minutes,
-        )
+        rs.source = source
 
         def _beat(rr: float, ts: float) -> None:
             rs.on_beat(rr, ts)

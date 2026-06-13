@@ -2,8 +2,11 @@
 
 const $ = (id) => document.getElementById(id);
 
+const RESP_WAVEFORM_POINTS = 50;
+
 let rrPlot = null;
 let rmPlot = null;
+let respPlot = null;
 let rrBuf  = [];
 let rmBuf  = [];
 let ws     = null;
@@ -461,11 +464,54 @@ function makeRMPlot(el, timed) {
   return rmPlot;
 }
 
+const RESP_COLOR = "#ffb84d";
+
+function respCfg(w) {
+  return {
+    width: w, height: LIVE_PLOT_H,
+    padding: [8, 8, 0, 0],
+    scales: {
+      x: { time: false, distr: 1, range: [0, RESP_WAVEFORM_POINTS - 1] },
+      y: { time: false, distr: 1 },
+    },
+    series: [
+      {},
+      { stroke: RESP_COLOR, width: 1.5, fill: "rgba(255,184,77,0.06)" },
+    ],
+    axes: [
+      {
+        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
+        label: "точки волны",
+        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
+        stroke: "#5a6478",
+        show: false,
+      },
+      {
+        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
+        label: "ACC Z, отн.",
+        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
+        stroke: "#5a6478",
+        size: 52,
+      },
+    ],
+    cursor: { show: true, x: true, y: false },
+    legend: { show: false },
+  };
+}
+
+function makeRespPlot(el) {
+  if (respPlot) { respPlot.destroy(); respPlot = null; }
+  el.innerHTML = "";
+  respPlot = new uPlot(respCfg(plotWidth(el)), [[], []], el);
+  return respPlot;
+}
+
 // ── RESIZE ────────────────────────────────────────────────────────────────
 let _resizeT = null;
 function resizePlots() {
   if (rrPlot && $("rrPlot")) rrPlot.setSize({ width: plotWidth($("rrPlot")), height: LIVE_PLOT_H });
   if (rmPlot && $("rmPlot")) rmPlot.setSize({ width: plotWidth($("rmPlot")), height: LIVE_PLOT_H });
+  if (respPlot && $("respPlot")) respPlot.setSize({ width: plotWidth($("respPlot")), height: LIVE_PLOT_H });
   if (archRR  && $("arch_rr"))  archRR.setSize({ width: plotWidth($("arch_rr")),  height: ARCHIVE_PLOT_H });
   if (archRM  && $("arch_rm"))  archRM.setSize({ width: plotWidth($("arch_rm")),  height: ARCHIVE_PLOT_H });
   if (progPlot && $("progPlot")) progPlot.setSize({ width: plotWidth($("progPlot")), height: PROGRESS_PLOT_H });
@@ -598,6 +644,15 @@ function onWsMessage(ev) {
     }
     meditationEngine?.processFrame(msg);
     syncBiofeedbackStats();
+
+    if (msg.resp_wave?.length && respPlot) {
+      const xs = msg.resp_wave.map((_, idx) => idx);
+      respPlot.setData([xs, msg.resp_wave]);
+    }
+    if (msg.resp_rate != null) {
+      const el = $("bf_resp_rate");
+      if (el) el.textContent = msg.resp_rate.toFixed(1);
+    }
   }
 }
 
@@ -681,6 +736,7 @@ async function startLive() {
     rrBuf = []; rmBuf = [];
     makeRRPlot($("rrPlot"), timed);
     makeRMPlot($("rmPlot"), timed);
+    makeRespPlot($("respPlot"));
     requestAnimationFrame(resizePlots);
 
     setStatus(`Сессия #${currentSessionId} · ${tagLabel(body.tag)}${timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);

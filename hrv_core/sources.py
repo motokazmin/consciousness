@@ -11,11 +11,17 @@ import time
 from abc import ABC, abstractmethod
 
 from hrv_core.session_types import SESSION_TYPES
+from hrv_core.respiration import RespirationEstimator
 from hrv_core.constants import (
+    ACC_SAMPLE_RATE_HZ,
     ANT_FALLBACK_WAIT_SEC,
     BLE_FIRST_RR_GRACE_SEC,
     BUSY_DEVICE_HINT,
     HR_UUID,
+    PMD_ACC_START,
+    PMD_ACC_STREAM_TYPE,
+    PMD_CONTROL_UUID,
+    PMD_DATA_UUID,
     RECONNECT_DELAY,
     RR_WATCHDOG_SEC,
     START_NOTIFY_RETRIES,
@@ -152,12 +158,15 @@ class PolarH10Source(HRVSource):
         *,
         session_stop: threading.Event,
         extra_stop: threading.Event | None = None,
+        resp_callback=None,
     ):
         self.address = address
         self._session_stop = session_stop
         self._callback = None
         self._last_rr_ts: float | None = None
         self._extra_stop = extra_stop
+        self._resp_callback = resp_callback
+        self._resp_estimator = RespirationEstimator() if resp_callback else None
 
     def _should_stop(self) -> bool:
         if self._session_stop.is_set():
@@ -185,6 +194,42 @@ class PolarH10Source(HRVSource):
                 values.append(ms)
             idx += 2
         return values
+
+    @staticmethod
+    def _parse_acc(data: bytearray) -> tuple[float, list[tuple[int, int, int]]] | None:
+        """Парсинг PMD ACC-фрейма: [type(1)][ts(8)][frame_type(1)][samples...].
+
+        Возвращает (ts_сек, [(x,y,z), ...]) в мг, либо None если фрейм не ACC.
+        Точный формат требует проверки на реальном устройстве/прошивке.
+        """
+        if not data or data[0] != PMD_ACC_STREAM_TYPE:
+            return None
+        if len(data) < 11:
+            return []
+        # timestamp в наносекундах от старта стрима — здесь не используется
+        # напрямую, маркируем приёмом time.time() на уровне callback.
+        body = data[10:]
+        out = []
+        for i in range(0, len(body) - 5, 6):
+            x = int.from_bytes(body[i : i + 2], "little", signed=True)
+            y = int.from_bytes(body[i + 2 : i + 4], "little", signed=True)
+            z = int.from_bytes(body[i + 4 : i + 6], "little", signed=True)
+            out.append((x, y, z))
+        return time.time(), out
+
+    def _acc_notify(self, _sender, data: bytearray):
+        parsed = self._parse_acc(data)
+        if not parsed or self._resp_estimator is None:
+            return
+        ts, samples = parsed
+        if not samples:
+            return
+        self._resp_estimator.add_samples(samples, ts)
+        if self._resp_callback is not None:
+            self._resp_callback(
+                self._resp_estimator.estimate_rate(),
+                self._resp_estimator.waveform(),
+            )
 
     def _ble_notify(self, _sender, data: bytearray):
         now = time.time()
@@ -259,6 +304,21 @@ class PolarH10Source(HRVSource):
                         f"Notifications ✓  (watchdog: нет RR {RR_WATCHDOG_SEC:.0f}s → "
                         f"переподключение)"
                     )
+                    if self._resp_estimator is not None:
+                        try:
+                            await asyncio.sleep(0.3)
+                            await client.write_gatt_char(
+                                PMD_CONTROL_UUID, PMD_ACC_START, response=False
+                            )
+                            await client.start_notify(PMD_DATA_UUID, self._acc_notify)
+                            print("ACC (PMD) ✓ — поток для оценки дыхания запущен")
+                        except Exception as exc:
+                            print(f"ACC (PMD) недоступен, дыхание не оценивается: {exc}")
+                            self._resp_estimator = None
+                            if not client.is_connected:
+                                print("PMD-команда уронила GATT-сессию — переподключение…")
+                                reconnect_pause = True
+                                continue
                     session_start = time.time()
                     while not self._should_stop():
                         await asyncio.sleep(0.5)
@@ -291,6 +351,11 @@ class PolarH10Source(HRVSource):
                             await client.stop_notify(HR_UUID)
                         except Exception:
                             pass
+                        if self._resp_estimator is not None:
+                            try:
+                                await client.stop_notify(PMD_DATA_UUID)
+                            except Exception:
+                                pass
             except Exception as exc:
                 hint = format_bleak_connect_error(exc)
                 if hint:
@@ -516,6 +581,7 @@ def build_source(
     session_id: int | None,
     mock_tag: str | None = None,
     conn_lock: threading.Lock | None = None,
+    resp_callback=None,
 ) -> HRVSource:
     if kind == "mock":
         mt = (mock_tag or "").strip().lower()
@@ -525,7 +591,7 @@ def build_source(
     if kind == "ble":
         if not address:
             raise ValueError("ble требует address")
-        return PolarH10Source(address, session_stop=session_stop)
+        return PolarH10Source(address, session_stop=session_stop, resp_callback=resp_callback)
     if kind == "ant":
         return AntPlusHRVSource(session_stop)
     if kind == "ble_ant_fallback":

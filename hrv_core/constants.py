@@ -5,6 +5,33 @@ from pathlib import Path
 # GATT UUID характеристики Heart Rate Measurement (BLE, Polar H10 и др.)
 HR_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
 
+# Polar PMD (Measurement Data) — нестандартный сервис для потока ACC и др.
+PMD_SERVICE_UUID = "fb005c80-02e7-f387-1cad-8acd2d8df0c8"
+PMD_CONTROL_UUID = "fb005c81-02e7-f387-1cad-8acd2d8df0c8"
+PMD_DATA_UUID = "fb005c82-02e7-f387-1cad-8acd2d8df0c8"
+
+# Команда старта стрима ACC (тип=0x02, диапазон 8G, 50Hz) — требует
+# проверки на реальном H10, точные байты могут отличаться по модели/прошивке.
+PMD_ACC_START = bytearray(
+    [0x02, 0x02, 0x00, 0x01, 0xC8, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00]
+)
+PMD_ACC_STREAM_TYPE = 0x02  # байт 0 в data-уведомлении PMD для ACC
+
+# ACC: частота сэмплов (Hz), используемая при парсинге PMD-фреймов
+ACC_SAMPLE_RATE_HZ = 200
+
+# Respiration: окно накопления ACC-сигнала для оценки дыхания (сек)
+RESP_WINDOW_SEC = 30
+
+# Respiration: полоса частот дыхательной волны (Hz) — 6..30 вдохов/мин
+RESP_BAND_HZ = (0.1, 0.5)
+
+# Respiration: минимальное расстояние между пиками дыхательной волны (сек)
+RESP_MIN_PEAK_DISTANCE_SEC = 1.5
+
+# Respiration: число точек волны, отдаваемых на фронт за один кадр
+RESP_WAVEFORM_POINTS = 50
+
 # Скользящее окно RR-интервалов для расчёта RMSSD (сек)
 RMSSD_WINDOW_SEC = 60
 
