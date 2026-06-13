@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from hrv_core.analysis import progress_session_analysis, session_analysis
 from hrv_core.constants import DB_PATH
 from hrv_core.db import delete_session, init_db, load_hour_baseline, wipe_all_history
 from hrv_core.summary import session_summary_dict
@@ -27,7 +28,7 @@ app = FastAPI(title="HRV Monitor")
 class StartSessionBody(BaseModel):
     participant: str = Field(..., min_length=1, max_length=200)
     tag: str
-    session_name: str | None = Field(None, max_length=500)
+    session_name: str | None = Field(None, max_length=4000)
     source: str = Field(..., description="mock | ble | ant | ble_ant_fallback")
     address: str | None = None
     minutes: float | None = Field(None, gt=0)
@@ -46,6 +47,10 @@ class PhraseLogBody(BaseModel):
 class PhraseLogPatchBody(BaseModel):
     rn_after_30s: float | None = None
     rmssd_after_30s: float | None = None
+
+
+class PatchSessionNotesBody(BaseModel):
+    session_name: str | None = Field(None, max_length=4000)
 
 
 class CreateSessionTypeBody(BaseModel):
@@ -230,6 +235,28 @@ def stop_session(session_id: int):
     return summary
 
 
+@app.patch("/api/sessions/{session_id}")
+def patch_session(session_id: int, body: PatchSessionNotesBody):
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT ended FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Сессия не найдена")
+        if row[0] is None:
+            raise HTTPException(400, "Заметки можно сохранить только после завершения сессии")
+        notes = (body.session_name or "").strip() or None
+        conn.execute(
+            "UPDATE sessions SET session_name = ? WHERE id = ?",
+            (notes, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "session_name": notes}
+
+
 @app.get("/api/sessions")
 def list_sessions(
     participant: str | None = None,
@@ -377,6 +404,85 @@ def get_session(session_id: int):
     summary = session_summary_dict(conn, session_id, baseline_at_start, int(drift_n or 0))
     conn.close()
     return summary
+
+
+@app.get("/api/sessions/{session_id}/analysis")
+def session_analysis_endpoint(session_id: int, max_points: int = 12_000):
+    max_points = max(100, min(max_points, 50_000))
+    conn = init_db()
+    row = conn.execute(
+        "SELECT started, ended FROM sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404)
+    started, ended = row
+    if ended is None:
+        conn.close()
+        raise HTTPException(400, "Сессия ещё не завершена — анализ после stop")
+    rows = conn.execute(
+        "SELECT ts, rr_ms, rmssd FROM hrv_points WHERE session_id = ? ORDER BY ts",
+        (session_id,),
+    ).fetchall()
+    conn.close()
+    rows = _decimate_rows(rows, max_points)
+    return session_analysis(rows, started, ended)
+
+
+@app.get("/api/progress/analysis")
+def progress_analysis(
+    tag: str | None = None,
+    participant: str | None = None,
+    started_after: str | None = None,
+    started_before: str | None = None,
+    max_sessions: int = 40,
+    max_points_per_session: int = 4000,
+):
+    max_sessions = max(1, min(max_sessions, 80))
+    max_points_per_session = max(100, min(max_points_per_session, 12_000))
+
+    conn = init_db()
+    filt, args = _session_filters(
+        participant=participant,
+        tag=tag,
+        started_after=started_after,
+        started_before=started_before,
+        ended_only=True,
+    )
+    q = (
+        "SELECT id, tag, started, ended"
+        + filt
+        + " ORDER BY started ASC LIMIT ?"
+    )
+    args.append(max_sessions)
+    sessions = conn.execute(q, args).fetchall()
+
+    out_sessions = []
+    for sid, stag, started, ended in sessions:
+        rows = conn.execute(
+            "SELECT ts, rr_ms, rmssd FROM hrv_points WHERE session_id = ? ORDER BY ts",
+            (sid,),
+        ).fetchall()
+        if not rows:
+            continue
+        rows_dec = _decimate_rows(rows, max_points_per_session)
+        stats = conn.execute(
+            "SELECT AVG(rmssd) FROM hrv_points WHERE session_id = ?",
+            (sid,),
+        ).fetchone()
+        rmssd_mean = float(stats[0]) if stats and stats[0] is not None else None
+        analysis = progress_session_analysis(rows_dec, started, ended, rmssd_mean)
+        out_sessions.append(
+            {
+                "id": sid,
+                "tag": stag,
+                "started": started,
+                **analysis,
+            }
+        )
+    conn.close()
+    return {"sessions": out_sessions}
 
 
 @app.get("/api/sessions/{session_id}/points")

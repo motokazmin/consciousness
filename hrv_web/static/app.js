@@ -3,12 +3,12 @@
 const $ = (id) => document.getElementById(id);
 
 let rrPlot = null;
-let rmPlot = null;
 let rrBuf  = [];
-let rmBuf  = [];
 let ws     = null;
 let raf    = null;
 let currentSessionId = null;
+let _sessionEndHandled = false;
+let _notesModalSessionId = null;
 let _dirty = false;
 
 let liveMode   = "window";
@@ -229,6 +229,7 @@ function switchTab(name) {
   const sec = document.getElementById(`tab-${name}`);
   if (btn) btn.classList.add("active");
   if (sec) sec.classList.add("visible");
+  if (name === "live") requestAnimationFrame(resizePlots);
 }
 
 document.querySelectorAll("nav button").forEach((b) => {
@@ -350,33 +351,84 @@ $("tag")?.addEventListener("change", syncTagCustomVisibility);
 const xScaleLinear = { time: false, distr: 1 };
 
 function fmtAxisSec(u, splits) {
-  return splits.map(v => {
+  return splits.map((v) => {
     const n = Number(v);
     if (!Number.isFinite(n)) return "";
-    return Math.abs(n) >= 100 ? String(Math.round(n)) : n.toFixed(1);
+    return String(Math.round(n));
   });
 }
 
+const SEC_AXIS_INCRS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 1800, 3600];
+
+function liveRRPlotWidth(el) {
+  const grid = el?.closest(".live-view-grid");
+  if (!grid) return null;
+
+  const body = (el?.id === "rrPlot" ? el : null) || grid.querySelector("#rrPlot");
+  if (body?.clientWidth > 0) {
+    const st = getComputedStyle(body);
+    const pad = parseFloat(st.paddingLeft) + parseFloat(st.paddingRight);
+    return Math.max(200, Math.floor(body.clientWidth - pad - 4));
+  }
+
+  const plotCard = grid.querySelector(".plot-card");
+  const cardW = plotCard?.clientWidth;
+  if (cardW > 0) return Math.max(200, Math.floor(cardW - 16));
+
+  const gap = parseFloat(getComputedStyle(grid).columnGap) || 16;
+  const bio = grid.querySelector(".biofeedback-placeholder");
+  const bioW = bio ? (parseFloat(getComputedStyle(grid).gridTemplateColumns.split(" ")[1]) || 240) : 240;
+
+  const panel = grid.closest(".plots-panel");
+  const panelW = panel?.clientWidth;
+  if (panelW > 0) return Math.max(200, Math.floor(panelW - bioW - gap - 16));
+
+  const mainGrid = grid.closest(".grid-2");
+  if (mainGrid?.clientWidth > 0) {
+    const g2 = getComputedStyle(mainGrid);
+    const g2Gap = parseFloat(g2.columnGap) || 16;
+    const cols = g2.gridTemplateColumns.split(" ").map(parseFloat).filter(Number.isFinite);
+    const rightCol = cols.length >= 2 ? cols[1] : Math.floor(mainGrid.clientWidth * 0.62);
+    return Math.max(200, Math.floor(rightCol - bioW - gap - 16));
+  }
+
+  return 400;
+}
+
 function plotWidth(el) {
-  const p = el.parentElement;
-  const w = el.clientWidth || (p ? p.clientWidth : 0) || window.innerWidth - 380;
-  return Math.max(720, Math.floor(w - 8));
+  const liveW = liveRRPlotWidth(el);
+  if (liveW != null) return liveW;
+
+  const wrap = el?.closest(".plot-wrap");
+  const card = el?.closest(".plot-card");
+  const measure = wrap || card;
+  let w = measure?.clientWidth || 0;
+  if (!w) w = Math.min(900, window.innerWidth - 380);
+  return Math.max(200, Math.floor(w - 8));
+}
+
+function syncLivePlotXScale() {
+  if (!rrPlot || liveMode !== "timed" || !(durationSec > 0)) return;
+  rrPlot.setScale("x", { min: 0, max: durationSec });
 }
 
 const LIVE_PLOT_H = 360;
-const ARCHIVE_PLOT_H = 300;
-const PROGRESS_PLOT_H = 380;
+const ARCHIVE_PLOT_H = 260;
+const PROGRESS_PLOT_H = 280;
+
+const AC = () => window.HrvAnalysisCharts;
 
 const RR_COLOR   = "#00d4ff";
-const RMSSD_COLOR = "#39e085";
-const BASE_COLOR  = "rgba(255,255,255,0.12)";
 
 function rrCfg(timed, w) {
+  const xRange = timed && durationSec > 0
+    ? (_u, _mn, _mx) => [0, durationSec]
+    : (_u, _mn, _mx) => [-60, 0];
   return {
     width: w, height: LIVE_PLOT_H,
-    padding: [8, 8, 0, 0],
+    padding: [8, 40, 4, 4],
     scales: {
-      x: { ...xScaleLinear, range: timed ? [0, durationSec] : [-60, 0] },
+      x: { ...xScaleLinear, range: xRange },
       y: { time: false, distr: 1, range: [350, 1300] },
     },
     series: [
@@ -390,6 +442,8 @@ function rrCfg(timed, w) {
         labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
         stroke: "#5a6478",
         values: fmtAxisSec,
+        incrs: SEC_AXIS_INCRS,
+        gap: 4,
       },
       {
         stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
@@ -404,71 +458,47 @@ function rrCfg(timed, w) {
   };
 }
 
-function rmssdCfg(timed, w, yMax) {
-  return {
-    width: w, height: LIVE_PLOT_H,
-    padding: [8, 8, 0, 0],
-    scales: {
-      x: { ...xScaleLinear, range: timed ? [0, durationSec] : [-300, 0] },
-      y: { time: false, distr: 1, range: [0, yMax || 120] },
-    },
-    series: [
-      {},
-      {
-        stroke: RMSSD_COLOR,
-        width: 2,
-        fill: "rgba(57,224,133,0.07)",
-      },
-      // baseline series
-      {
-        stroke: BASE_COLOR,
-        width: 1,
-        dash: [4, 4],
-      },
-    ],
-    axes: [
-      {
-        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
-        label: timed ? "с от начала" : "с от сейчас",
-        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
-        stroke: "#5a6478",
-        values: fmtAxisSec,
-      },
-      {
-        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
-        label: "RMSSD, ms",
-        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
-        stroke: "#5a6478",
-        size: 52,
-      },
-    ],
-    cursor: { show: true, x: true, y: false },
-    legend: { show: false },
-  };
-}
-
 function makeRRPlot(el, timed) {
   if (rrPlot) { rrPlot.destroy(); rrPlot = null; }
   el.innerHTML = "";
   rrPlot = new uPlot(rrCfg(timed, plotWidth(el)), [[], []], el);
+  syncLivePlotXScale();
   return rrPlot;
 }
 
-function makeRMPlot(el, timed) {
-  if (rmPlot) { rmPlot.destroy(); rmPlot = null; }
-  el.innerHTML = "";
-  rmPlot = new uPlot(rmssdCfg(timed, plotWidth(el)), [[], [], []], el);
-  return rmPlot;
+function setLiveEmptyState(mode) {
+  const empty = $("live_rr_empty");
+  if (!empty) return;
+  if (mode === "idle") {
+    empty.textContent = "Служба готова к запуску";
+    empty.classList.remove("hidden");
+  } else if (mode === "waiting") {
+    empty.textContent = "Ожидание данных";
+    empty.classList.remove("hidden");
+  } else {
+    empty.classList.add("hidden");
+  }
 }
 
 // ── RESIZE ────────────────────────────────────────────────────────────────
 let _resizeT = null;
 function resizePlots() {
-  if (rrPlot && $("rrPlot")) rrPlot.setSize({ width: plotWidth($("rrPlot")), height: LIVE_PLOT_H });
-  if (rmPlot && $("rmPlot")) rmPlot.setSize({ width: plotWidth($("rmPlot")), height: LIVE_PLOT_H });
-  if (archRR  && $("arch_rr"))  archRR.setSize({ width: plotWidth($("arch_rr")),  height: ARCHIVE_PLOT_H });
-  if (archRM  && $("arch_rm"))  archRM.setSize({ width: plotWidth($("arch_rm")),  height: ARCHIVE_PLOT_H });
-  if (progPlot && $("progPlot")) progPlot.setSize({ width: plotWidth($("progPlot")), height: PROGRESS_PLOT_H });
+  const rrEl = $("rrPlot");
+  if (rrPlot && rrEl && $("tab-live")?.classList.contains("visible")) {
+    rrPlot.setSize({ width: plotWidth(rrEl), height: LIVE_PLOT_H });
+    syncLivePlotXScale();
+  }
+  if (archRR && $("arch_rr")) archRR.setSize({ width: plotWidth($("arch_rr")), height: ARCHIVE_PLOT_H });
+  if (archPoincare && $("arch_poincare")) archPoincare.setSize({ width: plotWidth($("arch_poincare")), height: ARCHIVE_PLOT_H });
+  if (archSpectrum?.plot && $("arch_spectrum")) {
+    archSpectrum.plot.setSize({ width: plotWidth($("arch_spectrum")), height: ARCHIVE_PLOT_H });
+    AC()?.positionPeakMarker(archSpectrum.plot, $("arch_spectrum")?.parentElement, archSpectrum.peakFreq);
+  }
+  if (archSdnn && $("arch_sdnn")) archSdnn.setSize({ width: plotWidth($("arch_sdnn")), height: ARCHIVE_PLOT_H });
+  if (archRM && $("arch_rm")) archRM.setSize({ width: plotWidth($("arch_rm")), height: ARCHIVE_PLOT_H });
+  if (progPoincare && $("prog_poincare")) progPoincare.setSize({ width: plotWidth($("prog_poincare")), height: PROGRESS_PLOT_H });
+  if (progSpectrum && $("prog_spectrum")) progSpectrum.setSize({ width: plotWidth($("prog_spectrum")), height: PROGRESS_PLOT_H });
+  if (progSdnn && $("prog_sdnn")) progSdnn.setSize({ width: plotWidth($("prog_sdnn")), height: PROGRESS_PLOT_H });
 }
 window.addEventListener("resize", () => {
   clearTimeout(_resizeT);
@@ -517,45 +547,27 @@ function redrawLive() {
   if (liveMode === "timed") {
     const xsR = rrBuf.map(p => Math.max(0, p[0] - sessionT0));
     const ysR = rrBuf.map(p => p[1]);
-    const xsM = rmBuf.map(p => Math.max(0, p[0] - sessionT0));
-    const ysM = rmBuf.map(p => p[1]);
 
     if (rrPlot && xsR.length) {
+      setLiveEmptyState("hidden");
       rrPlot.setData([xsR, ysR]);
+      syncLivePlotXScale();
       const mn = ysR.reduce((a, b) => a < b ? a : b, Infinity);
       const mx = ysR.reduce((a, b) => a > b ? a : b, -Infinity);
       rrPlot.setScale("y", { min: Math.max(300, mn - 40), max: mx + 40 });
     }
-    if (rmPlot && xsM.length) {
-      const bl = sessionBaseline;
-      const blXs = xsM.length ? [xsM[0], xsM[xsM.length - 1]] : [];
-      const blYs = bl !== null ? [bl, bl] : [];
-      rmPlot.setData([xsM, ysM, blXs.length ? blXs : [], blYs.length ? blYs : []]);
-      const mx = ysM.reduce((a, b) => a > b ? a : b, 40) * 1.15;
-      rmPlot.setScale("y", { min: 0, max: mx });
-    }
   } else {
     const now = Date.now() / 1000;
     trimBuf(rrBuf, 65);
-    trimBuf(rmBuf, 310);
 
     const xsR = rrBuf.map(p => p[0] - now);
     const ysR = rrBuf.map(p => p[1]);
-    const xsM = rmBuf.map(p => p[0] - now);
-    const ysM = rmBuf.map(p => p[1]);
 
     if (rrPlot && xsR.length) {
+      setLiveEmptyState("hidden");
       rrPlot.setData([xsR, ysR]);
       const mx = ysR.reduce((a, b) => a > b ? a : b, 400);
       rrPlot.setScale("y", { min: Math.max(300, mx - 500), max: mx + 100 });
-    }
-    if (rmPlot && xsM.length) {
-      const bl = sessionBaseline;
-      const blXs = xsM.length ? [xsM[0], xsM[xsM.length - 1]] : [];
-      const blYs = bl !== null ? [bl, bl] : [];
-      rmPlot.setData([xsM, ysM, blXs.length ? blXs : [], blYs.length ? blYs : []]);
-      const mx = ysM.reduce((a, b) => a > b ? a : b, 40) * 1.2;
-      rmPlot.setScale("y", { min: 0, max: mx });
     }
   }
   updateStats();
@@ -575,20 +587,13 @@ function onWsMessage(ev) {
     return;
   }
   if (msg.type === "ended") {
-    setStatus("Сессия завершена.");
-    $("btn_stop").disabled = true;
-    $("btn_start").disabled = false;
-    setBiofeedbackControlsEnabled(true);
-    if (ws) { ws.close(); ws = null; }
-    stopRaf();
-    stopBiofeedbackSession();
+    onSessionEnded("Сессия завершена.");
     return;
   }
   if (msg.type === "beat" && msg.t?.length) {
     _dirty = true;
     for (let i = 0; i < msg.t.length; i++) {
       rrBuf.push([msg.t[i], msg.r[i]]);
-      rmBuf.push([msg.t[i], msg.m[i]]);
       lastRmssd = msg.m[i];
       if (msg.rn?.[i] != null) lastRmssdNormalized = msg.rn[i];
       if (msg.sr?.[i] != null) lastSmoothedRr = msg.sr[i];
@@ -600,6 +605,71 @@ function onWsMessage(ev) {
     syncBiofeedbackStats();
   }
 }
+
+function finalizeLiveSession() {
+  $("btn_stop").disabled = true;
+  $("btn_start").disabled = false;
+  setBiofeedbackControlsEnabled(true);
+  if (ws) { ws.close(); ws = null; }
+  stopRaf();
+  stopBiofeedbackSession();
+}
+
+function onSessionEnded(statusText) {
+  if (_sessionEndHandled) return;
+  _sessionEndHandled = true;
+  setStatus(statusText);
+  finalizeLiveSession();
+  const sid = currentSessionId;
+  if (sid) showSessionNotesModal(sid);
+}
+
+function closeSessionNotesModal() {
+  const modal = $("session_notes_modal");
+  if (modal) modal.classList.remove("visible");
+  _notesModalSessionId = null;
+}
+
+function showSessionNotesModal(sessionId) {
+  const modal = $("session_notes_modal");
+  const input = $("session_notes_input");
+  const idEl = $("session_notes_id");
+  if (!modal || !input) return;
+  _notesModalSessionId = sessionId;
+  if (idEl) idEl.textContent = String(sessionId);
+  input.value = $("session_name")?.value?.trim() || "";
+  modal.classList.add("visible");
+  input.focus();
+}
+
+async function saveSessionNotes() {
+  const sessionId = _notesModalSessionId;
+  if (!sessionId) {
+    closeSessionNotesModal();
+    return;
+  }
+  const text = ($("session_notes_input")?.value || "").trim();
+  try {
+    await api(`/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ session_name: text || null }),
+    });
+    if ($("session_name")) $("session_name").value = text;
+    if (text) {
+      setStatus(`Заметки к сессии #${sessionId} сохранены.`);
+    }
+  } catch (e) {
+    setErr(String(e.message || e));
+    return;
+  }
+  closeSessionNotesModal();
+}
+
+$("session_notes_save")?.addEventListener("click", () => { saveSessionNotes(); });
+$("session_notes_skip")?.addEventListener("click", () => { closeSessionNotesModal(); });
+$("session_notes_modal")?.addEventListener("click", (e) => {
+  if (e.target === $("session_notes_modal")) closeSessionNotesModal();
+});
 
 // ── START / STOP ──────────────────────────────────────────────────────────
 function setStatus(txt) {
@@ -651,6 +721,7 @@ async function startLive() {
 
     const res = await api("/api/sessions", { method: "POST", body: JSON.stringify(body) });
     currentSessionId = res.id;
+    _sessionEndHandled = false;
     const timed = body.minutes != null && body.minutes > 0;
     liveMode    = timed ? "timed" : "window";
     sessionT0   = typeof res.started_at === "number" ? res.started_at : Date.now() / 1000;
@@ -668,19 +739,16 @@ async function startLive() {
     syncBiofeedbackStats();
 
     $("stats_strip").classList.add("visible");
-    $("live_plots").classList.add("visible");
 
     if (timed) {
       $("rr_plot_title").textContent = `RR — 0 … ${Math.round(durationSec)} с от старта`;
-      $("rm_plot_title").textContent = `RMSSD — 0 … ${Math.round(durationSec)} с от старта`;
     } else {
       $("rr_plot_title").textContent = "RR — последние 60 с";
-      $("rm_plot_title").textContent = "RMSSD — последние 5 мин";
     }
 
-    rrBuf = []; rmBuf = [];
+    rrBuf = [];
     makeRRPlot($("rrPlot"), timed);
-    makeRMPlot($("rmPlot"), timed);
+    setLiveEmptyState("waiting");
     requestAnimationFrame(resizePlots);
 
     setStatus(`Сессия #${currentSessionId} · ${tagLabel(body.tag)}${timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);
@@ -717,16 +785,11 @@ async function stopLive() {
   if (!currentSessionId) return;
   try {
     await api(`/api/sessions/${currentSessionId}/stop`, { method: "POST" });
-    setStatus("Сессия остановлена.");
+    onSessionEnded("Сессия остановлена.");
   } catch (e) {
     setErr(String(e.message || e));
+    finalizeLiveSession();
   }
-  $("btn_stop").disabled  = true;
-  $("btn_start").disabled = false;
-  setBiofeedbackControlsEnabled(true);
-  if (ws) { ws.close(); ws = null; }
-  stopRaf();
-  stopBiofeedbackSession();
 }
 
 $("btn_start").addEventListener("click", startLive);
@@ -775,7 +838,25 @@ async function loadArchive() {
 }
 
 let archRR = null;
+let archPoincare = null;
+let archSpectrum = null;
+let archSdnn = null;
 let archRM = null;
+let archAnalysisCache = null;
+
+function renderArchNotes(sum) {
+  const block = $("arch_notes_block");
+  const textEl = $("arch_notes_text");
+  if (!block || !textEl) return;
+  const notes = (sum?.session_name || "").trim();
+  if (!notes) {
+    block.hidden = true;
+    textEl.textContent = "";
+    return;
+  }
+  block.hidden = false;
+  textEl.textContent = notes;
+}
 
 function renderSummaryGrid(sum) {
   const grid = $("arch_summary_grid");
@@ -789,6 +870,8 @@ function renderSummaryGrid(sum) {
     ["RMSSD mean",  sum.rmssd_mean != null ? sum.rmssd_mean.toFixed(1) + " ms" : "—"],
     ["RMSSD min",   sum.rmssd_min  != null ? sum.rmssd_min.toFixed(1)  + " ms" : "—"],
     ["RMSSD max",   sum.rmssd_max  != null ? sum.rmssd_max.toFixed(1)  + " ms" : "—"],
+    ["Mean RR",     sum.mean_rr != null ? sum.mean_rr.toFixed(1) + " ms" : "—"],
+    ["Coherence",   sum.coherence_score != null ? sum.coherence_score.toFixed(1) : "—"],
     ["Длительность", durMin != null ? durMin.toFixed(1) + " мин" : "—"],
     ["vs baseline", vsBl],
     ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
@@ -799,6 +882,52 @@ function renderSummaryGrid(sum) {
     cell.innerHTML = `<div class="s-label">${label}</div><div class="s-value">${value}</div>`;
     grid.appendChild(cell);
   }
+
+  const metricsRow = $("arch_metrics_row");
+  if (metricsRow) {
+    metricsRow.innerHTML = "";
+    const metrics = [
+      ["Mean RR", sum.mean_rr != null ? sum.mean_rr.toFixed(1) + " ms" : "—"],
+      ["Coherence", sum.coherence_score != null ? sum.coherence_score.toFixed(1) : "—"],
+      ["SD1", archAnalysisCache?.poincare?.sd1 != null ? archAnalysisCache.poincare.sd1 + " ms" : "—"],
+      ["Peak Hz", archAnalysisCache?.spectrum?.peak_freq != null ? archAnalysisCache.spectrum.peak_freq + " Гц" : "—"],
+    ];
+    for (const [label, value] of metrics) {
+      const cell = document.createElement("div");
+      cell.innerHTML = `<div class="s-label">${label}</div><div class="s-value">${value}</div>`;
+      metricsRow.appendChild(cell);
+    }
+  }
+}
+
+function destroyArchPlots() {
+  if (archRR) { archRR.destroy(); archRR = null; }
+  if (archPoincare) { archPoincare.destroy(); archPoincare = null; }
+  if (archSpectrum?.plot) { archSpectrum.plot.destroy(); archSpectrum = null; }
+  if (archSdnn) { archSdnn.destroy(); archSdnn = null; }
+  if (archRM) { archRM.destroy(); archRM = null; }
+}
+
+function renderArchRmssd(analysis) {
+  const panel = $("arch_rmssd_panel");
+  const mode = $("arch_rmssd_mode")?.value || "hidden";
+  if (!panel) return;
+  if (mode !== "show") {
+    panel.classList.remove("visible");
+    if (archRM) { archRM.destroy(); archRM = null; }
+    return;
+  }
+  panel.classList.add("visible");
+  const el = $("arch_rm");
+  if (!el) return;
+  el.innerHTML = "";
+  if (archRM) { archRM.destroy(); archRM = null; }
+  const charts = AC();
+  if (!charts || !analysis?.rmssd_trend?.length) {
+    charts?.setChartEmpty(el, "Недостаточно данных");
+    return;
+  }
+  archRM = charts.makeRmssdPlot(el, analysis.rmssd_trend, analysis.duration_sec, ARCHIVE_PLOT_H);
 }
 
 async function openArchiveSession(id) {
@@ -811,59 +940,84 @@ async function openArchiveSession(id) {
     delBtn.onclick = () => deleteSession(id);
   }
 
+  destroyArchPlots();
+  archAnalysisCache = null;
+
+  let sum = null;
   try {
-    const sum = await api(`/api/sessions/${id}`);
-    renderSummaryGrid(sum);
+    sum = await api(`/api/sessions/${id}`);
   } catch {
     $("arch_summary_grid").innerHTML = "<p style='color:var(--text-dim);font-size:.8rem'>Сводка недоступна (сессия ещё идёт?)</p>";
   }
 
-  const { points } = await api(`/api/sessions/${id}/points?max_points=12000`);
-  if (!points.length) return;
+  let analysis = null;
+  try {
+    analysis = await api(`/api/sessions/${id}/analysis`);
+    archAnalysisCache = analysis;
+  } catch (e) {
+    setErr(String(e.message || e));
+  }
 
-  const t0   = points[0].ts;
-  const xs   = points.map(p => p.ts - t0);
-  const rr   = points.map(p => p.rr_ms);
-  const rm   = points.map(p => p.rmssd);
-  const xMax = xs.reduce((a, b) => a > b ? a : b, 1);
+  if (sum) {
+    renderSummaryGrid(sum);
+    renderArchNotes(sum);
+  }
 
-  // baseline for archive RMSSD
-  const blVal = rm.reduce((a, b) => a + b, 0) / rm.length;
-  const blXs  = [0, xMax];
-  const blYs  = [blVal, blVal];
+  const charts = AC();
+  if (!charts) return;
 
-  $("arch_rr").innerHTML = "";
-  $("arch_rm").innerHTML = "";
+  const rrEl = $("arch_rr");
+  const pEl = $("arch_poincare");
+  const sEl = $("arch_spectrum");
+  const dEl = $("arch_sdnn");
+  if (rrEl) rrEl.innerHTML = "";
+  if (pEl) pEl.innerHTML = "";
+  if (sEl) sEl.innerHTML = "";
+  if (dEl) dEl.innerHTML = "";
 
-  if (archRR) { archRR.destroy(); archRR = null; }
-  if (archRM) { archRM.destroy(); archRM = null; }
+  if (analysis?.raw_rr?.length && analysis?.raw_rr_x?.length) {
+    archRR = charts.makeRawRrPlot(rrEl, analysis.raw_rr_x, analysis.raw_rr, analysis.duration_sec, ARCHIVE_PLOT_H);
+  } else if (rrEl) {
+    charts.setChartEmpty(rrEl, "Нет данных RR");
+  }
 
-  const wR = plotWidth($("arch_rr"));
-  archRR = new uPlot(
-    {
-      ...rrCfg(true, wR),
-      height: ARCHIVE_PLOT_H,
-      scales: { x: { ...xScaleLinear, range: [0, xMax] }, y: { time:false, distr:1, range:[350,1300] } },
-    },
-    [xs, rr],
-    $("arch_rr")
-  );
+  const hasRawPoincare = analysis?.raw_rr?.length >= 2;
+  if (!hasRawPoincare && (analysis?.poincare?.insufficient_data || !analysis?.poincare?.points?.length)) {
+    charts.setChartEmpty(pEl, analysis?.poincare?.message || "Недостаточно данных");
+  } else {
+    archPoincare = charts.makePoincarePlot(
+      pEl,
+      analysis?.poincare?.points,
+      ARCHIVE_PLOT_H,
+      analysis?.poincare?.bounds,
+      analysis?.raw_rr
+    );
+  }
 
-  const rmax = rm.reduce((a, b) => a > b ? a : b, 50) * 1.15;
-  const wM   = plotWidth($("arch_rm"));
-  archRM = new uPlot(
-    {
-      ...rmssdCfg(true, wM, rmax),
-      height: ARCHIVE_PLOT_H,
-      scales: { x: { ...xScaleLinear, range: [0, xMax] }, y: { time:false, distr:1, range:[0, rmax] } },
-    },
-    [xs, rm, blXs, blYs],
-    $("arch_rm")
-  );
+  if (analysis?.spectrum?.insufficient_data || !analysis?.spectrum?.freqs?.length) {
+    charts.setChartEmpty(sEl, analysis?.spectrum?.message || "Недостаточно данных");
+    const marker = $("arch_peak_marker");
+    if (marker) marker.style.display = "none";
+  } else {
+    archSpectrum = charts.makeSpectrumPlot(sEl, analysis.spectrum, ARCHIVE_PLOT_H);
+    charts.positionPeakMarker(archSpectrum.plot, sEl.parentElement, archSpectrum.peakFreq);
+  }
 
+  if (!analysis?.sdnn_trend?.length) {
+    charts.setChartEmpty(dEl, "Недостаточно данных");
+  } else {
+    archSdnn = charts.makeSdnnPlot(dEl, analysis.sdnn_trend, analysis.duration_sec, ARCHIVE_PLOT_H);
+  }
+
+  renderArchRmssd(analysis);
   requestAnimationFrame(resizePlots);
   detail.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+$("arch_rmssd_mode")?.addEventListener("change", () => {
+  renderArchRmssd(archAnalysisCache);
+  requestAnimationFrame(resizePlots);
+});
 
 $("btn_reload").addEventListener("click", loadArchive);
 
@@ -874,8 +1028,11 @@ const PROG_COLORS = [
   "#10ac84", "#ee5a24", "#2e86de", "#8395a7", "#222f3e",
 ];
 
-let progPlot = null;
+let progPoincare = null;
+let progSpectrum = null;
+let progSdnn = null;
 let progSessionsRaw = [];
+let progVisible = new Set();
 
 function setProgErr(txt) {
   const el = $("prog_err");
@@ -884,168 +1041,79 @@ function setProgErr(txt) {
   el.classList.toggle("visible", !!txt);
 }
 
-function smoothSessionRr(points, windowSec = 15) {
-  if (!points.length) return [];
-  let lo = 0;
-  return points.map((p, i) => {
-    const xi = p.x;
-    // advance lo so window starts within windowSec of xi
-    while (lo < i && xi - points[lo].x > windowSec) lo++;
-    let sum = 0, n = 0;
-    for (let j = lo; j <= i; j++) { sum += points[j].rr; n++; }
-    return { x: xi, rr: n ? sum / n : p.rr };
-  });
-}
-
-function alignProgressSessions(sessions) {
-  // p.x is already seconds-from-start (0..duration_sec) for each session.
-  // We build a common uniform grid [0, maxDuration] and resample each session
-  // onto it with nearest-neighbor. Points outside a session's own duration
-  // become null (natural end-of-line, not a mid-curve gap).
-  const cap = 3500;
-
-  const maxDuration = sessions.reduce((a, s) => {
-    const last = s.points.length ? s.points[s.points.length - 1].x : 0;
-    return last > a ? last : a;
-  }, 1);
-
-  // Grid density: ~1 point per second up to cap
-  const gridN = Math.min(cap, Math.ceil(maxDuration) + 1);
-  const step  = maxDuration / (gridN - 1);
-  const xs    = Array.from({ length: gridN }, (_, i) => i * step);
-
-  const ysList = sessions.map((s) => {
-    const pts = s.points; // sorted ascending by x, x starts at 0
-    if (!pts.length) return xs.map(() => null);
-
-    // median gap between points — used to detect true end-of-data
-    const medianGap = pts.length > 1
-      ? (pts[pts.length - 1].x - pts[0].x) / (pts.length - 1)
-      : step;
-    const tolerance = medianGap * 2.5;
-
-    return xs.map((x) => {
-      // x beyond this session's range → null (end of line)
-      if (x > pts[pts.length - 1].x + tolerance) return null;
-
-      // binary search for nearest point
-      let lo = 0, hi = pts.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (pts[mid].x < x) lo = mid + 1; else hi = mid;
-      }
-      if (lo > 0 && Math.abs(pts[lo - 1].x - x) < Math.abs(pts[lo].x - x)) lo--;
-      return Math.abs(pts[lo].x - x) <= tolerance ? pts[lo].rr : null;
-    });
-  });
-
-  return { xs, ysList };
+function destroyProgPlots() {
+  if (progPoincare) { progPoincare.destroy(); progPoincare = null; }
+  if (progSpectrum) { progSpectrum.destroy(); progSpectrum = null; }
+  if (progSdnn) { progSdnn.destroy(); progSdnn = null; }
 }
 
 function fmtShortDate(ts) {
   return new Date(ts * 1000).toLocaleDateString("ru-RU");
 }
 
-function destroyProgPlot() {
-  if (progPlot) {
-    progPlot.destroy();
-    progPlot = null;
-  }
-  const el = $("progPlot");
-  if (el) el.innerHTML = "";
-}
+function renderProgCompareTable(sessions) {
+  const tb = $("prog_compare_rows");
+  if (!tb) return;
+  tb.innerHTML = "";
+  progVisible = new Set(sessions.map((s) => s.id));
 
-function renderProgLegend(sessions) {
-  const leg = $("prog_legend");
-  if (!leg) return;
-  leg.innerHTML = "";
   sessions.forEach((s, i) => {
-    const item = document.createElement("div");
-    item.className = "prog-legend-item";
-    const sw = document.createElement("span");
-    sw.className = "prog-legend-swatch";
-    sw.style.background = PROG_COLORS[i % PROG_COLORS.length];
-    item.appendChild(sw);
-    item.appendChild(
-      document.createTextNode(
-        `#${s.id} · ${tagLabel(s.tag)} · ${fmtShortDate(s.started)} · ${Math.round(s.duration_sec)} с`
-      )
-    );
-    leg.appendChild(item);
+    const color = PROG_COLORS[i % PROG_COLORS.length];
+    const tr = document.createElement("tr");
+    const checked = progVisible.has(s.id);
+    tr.innerHTML =
+      `<td><input type="checkbox" class="prog-session-cb" data-id="${s.id}" ${checked ? "checked" : ""} /></td>` +
+      `<td><span class="compare-swatch" style="background:${color}"></span>#${s.id}</td>` +
+      `<td>${fmtShortDate(s.started)}</td>` +
+      `<td>${s.mean_rr != null ? s.mean_rr.toFixed(1) : "—"}</td>` +
+      `<td>${s.rmssd_mean != null ? s.rmssd_mean.toFixed(1) : "—"}</td>` +
+      `<td>${s.coherence_score != null ? s.coherence_score.toFixed(1) : "—"}</td>`;
+    tr.querySelector(".prog-session-cb")?.addEventListener("change", (ev) => {
+      const sid = Number(ev.target.dataset.id);
+      if (ev.target.checked) progVisible.add(sid);
+      else progVisible.delete(sid);
+      buildProgressPlots();
+    });
+    tb.appendChild(tr);
   });
 }
 
-function buildProgressPlot(sessions) {
-  destroyProgPlot();
+function buildProgressPlots() {
+  destroyProgPlots();
+  const charts = AC();
   const emptyEl = $("prog_empty");
+  const sessions = progSessionsRaw;
   if (!sessions.length) {
     if (emptyEl) emptyEl.hidden = false;
-    renderProgLegend([]);
     return;
   }
   if (emptyEl) emptyEl.hidden = true;
+  if (!charts) return;
 
-  const { xs, ysList } = alignProgressSessions(sessions);
-  const xMax = Math.max(
-    sessions.reduce((a, s) => Math.max(a, s.duration_sec || 0), 0),
-    xs.length ? xs[xs.length - 1] : 1,
-    1
-  );
-  const allY = ysList.flat().filter((v) => v != null);
-  const yMin = allY.length ? Math.max(300, allY.reduce((a, b) => a < b ? a : b, Infinity) - 40) : 350;
-  const yMax = allY.length ? allY.reduce((a, b) => a > b ? a : b, -Infinity) + 40 : 1300;
+  const pEl = $("prog_poincare");
+  const sEl = $("prog_spectrum");
+  const dEl = $("prog_sdnn");
+  if (pEl) pEl.innerHTML = "";
+  if (sEl) sEl.innerHTML = "";
+  if (dEl) dEl.innerHTML = "";
 
-  const series = [{}];
-  const data = [xs];
-  for (let i = 0; i < ysList.length; i++) {
-    series.push({
-      stroke: PROG_COLORS[i % PROG_COLORS.length],
-      width: 1.5,
-      spanGaps: false,
-    });
-    data.push(ysList[i]);
+  const visible = progVisible;
+  if (!visible.size) {
+    charts.setChartEmpty(pEl, "Выберите сессии в таблице");
+    charts.setChartEmpty(sEl, "Выберите сессии в таблице");
+    charts.setChartEmpty(dEl, "Выберите сессии в таблице");
+    return;
   }
 
-  const w = plotWidth($("progPlot"));
-  progPlot = new uPlot(
-    {
-      width: w,
-      height: PROGRESS_PLOT_H,
-      padding: [8, 8, 0, 0],
-      scales: {
-        x: { ...xScaleLinear, range: [0, xMax] },
-        y: { time: false, distr: 1, range: [yMin, yMax] },
-      },
-      series,
-      axes: [
-        {
-          stroke: "#3a4050",
-          ticks: { stroke: "#3a4050" },
-          grid: { stroke: "#1e242d", width: 1 },
-          label: "с от начала",
-          labelFont: "11px 'DM Sans'",
-          font: "11px 'Space Mono'",
-          stroke: "#5a6478",
-          values: fmtAxisSec,
-        },
-        {
-          stroke: "#3a4050",
-          ticks: { stroke: "#3a4050" },
-          grid: { stroke: "#1e242d", width: 1 },
-          label: "RR, ms",
-          labelFont: "11px 'DM Sans'",
-          font: "11px 'Space Mono'",
-          stroke: "#5a6478",
-          size: 52,
-        },
-      ],
-      cursor: { show: true, x: true, y: false },
-      legend: { show: false },
-    },
-    data,
-    $("progPlot")
-  );
-  renderProgLegend(sessions);
+  progPoincare = charts.buildProgressPoincarePlot(pEl, sessions, visible, PROG_COLORS, PROGRESS_PLOT_H);
+  if (!progPoincare) charts.setChartEmpty(pEl, "Нет данных Poincaré");
+
+  progSpectrum = charts.buildProgressSpectrumPlot(sEl, sessions, visible, PROG_COLORS, PROGRESS_PLOT_H);
+  if (!progSpectrum) charts.setChartEmpty(sEl, "Нет спектральных данных");
+
+  progSdnn = charts.buildProgressSdnnPlot(dEl, sessions, visible, PROG_COLORS, PROGRESS_PLOT_H);
+  if (!progSdnn) charts.setChartEmpty(dEl, "Нет тренда SDNN");
+
   requestAnimationFrame(resizePlots);
 }
 
@@ -1054,32 +1122,25 @@ async function loadProgress() {
   const tag = $("prog_tag")?.value || "";
   const from = $("prog_from")?.value || "";
   const to = $("prog_to")?.value || "";
-  let url = "/api/progress?max_sessions=40";
+  const participant = $("prog_participant")?.value?.trim() || "";
+  let url = "/api/progress/analysis?max_sessions=40";
   if (tag) url += `&tag=${encodeURIComponent(tag)}`;
   if (from) url += `&started_after=${encodeURIComponent(from)}`;
   if (to) url += `&started_before=${encodeURIComponent(to)}`;
+  if (participant) url += `&participant=${encodeURIComponent(participant)}`;
 
   try {
     const { sessions } = await api(url);
     progSessionsRaw = sessions;
-    applyProgressSmooth();
+    renderProgCompareTable(sessions);
+    buildProgressPlots();
   } catch (e) {
     setProgErr(String(e.message || e));
-    destroyProgPlot();
+    destroyProgPlots();
   }
 }
 
-function applyProgressSmooth() {
-  const smooth = $("prog_smooth")?.checked;
-  const plotted = progSessionsRaw.map((s) => ({
-    ...s,
-    points: smooth ? smoothSessionRr(s.points) : s.points,
-  }));
-  buildProgressPlot(plotted);
-}
-
 $("btn_prog_build")?.addEventListener("click", loadProgress);
-$("prog_smooth")?.addEventListener("change", applyProgressSmooth);
 
 // ── DELETE SESSION ────────────────────────────────────────────────────────
 async function deleteSession(id) {
@@ -1091,8 +1152,8 @@ async function deleteSession(id) {
     if (openId && String(id) === openId) {
       $("arch_detail")?.classList.remove("visible");
       $("btn_delete_arch_session")?.setAttribute("hidden", "");
-      if (archRR) { archRR.destroy(); archRR = null; }
-      if (archRM) { archRM.destroy(); archRM = null; }
+      destroyArchPlots();
+      archAnalysisCache = null;
     }
     await loadArchive();
     if ($("tab-progress")?.classList.contains("active")) {
@@ -1113,7 +1174,7 @@ async function wipeHistory() {
   try {
     await api("/api/history", { method: "DELETE" });
     progSessionsRaw = [];
-    destroyProgPlot();
+    destroyProgPlots();
     $("arch_detail")?.classList.remove("visible");
     $("btn_delete_arch_session")?.setAttribute("hidden", "");
     $("arch_rows").innerHTML = "";
@@ -1133,3 +1194,4 @@ $("btn_wipe_history_prog")?.addEventListener("click", wipeHistory);
 
 loadSessionTypes().catch(e => setErr(String(e)));
 syncGuidedPhraseOptionsVisibility();
+setLiveEmptyState("idle");

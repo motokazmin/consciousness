@@ -5,6 +5,11 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+import numpy as np
+
+from hrv_core.analysis import coherence_score, compute_spectrum, mean_rr
+from hrv_core.preprocessing import preprocess_rr_session
+
 
 def session_summary_dict(
     conn: sqlite3.Connection,
@@ -55,5 +60,30 @@ def session_summary_dict(
         out["vs_baseline_pct"] = (mean_rmssd - baseline_at_start) / baseline_at_start * 100.0
     else:
         out["vs_baseline_pct"] = None
+
+    rr_rows = conn.execute(
+        "SELECT ts, rr_ms FROM hrv_points WHERE session_id = ? ORDER BY ts",
+        (session_id,),
+    ).fetchall()
+    if rr_rows:
+        rr_arr = np.array([r[1] for r in rr_rows], dtype=float)
+        ts_arr = np.array([r[0] for r in rr_rows], dtype=float)
+        preprocessed = preprocess_rr_session(rr_arr)
+        raw_rr = np.array(preprocessed["raw_rr"], dtype=float)
+        fft_rr = np.array(preprocessed["fft_input_rr"], dtype=float)
+        m_rr = mean_rr(raw_rr)
+        out["mean_rr"] = round(m_rr, 1) if m_rr is not None else None
+        spec = compute_spectrum(ts_arr, raw_rr, fft_rr=fft_rr)
+        if not spec.get("insufficient_data") and spec["freqs"]:
+            coherence = coherence_score(
+                np.array(spec["freqs"]),
+                np.array(spec["power"]),
+            )
+            out["coherence_score"] = coherence
+        else:
+            out["coherence_score"] = None
+    else:
+        out["mean_rr"] = None
+        out["coherence_score"] = None
 
     return out
