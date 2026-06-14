@@ -45,8 +45,15 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
             phrase_prefix  TEXT,
             mock_profile   TEXT NOT NULL DEFAULT 'default',
             cluster_marker TEXT NOT NULL DEFAULT 'o,40',
+            chart_profile  TEXT NOT NULL DEFAULT 'default',
             is_custom      INTEGER NOT NULL DEFAULT 0
         )""")
+    st_cols = {row[1] for row in conn.execute("PRAGMA table_info(session_types)")}
+    chart_profile_added = "chart_profile" not in st_cols
+    if chart_profile_added:
+        conn.execute(
+            "ALTER TABLE session_types ADD COLUMN chart_profile TEXT NOT NULL DEFAULT 'default'"
+        )
     # seed из session_types.py, если таблица пустая
     from hrv_core.session_types import SESSION_TYPES as _ST
     if not conn.execute("SELECT 1 FROM session_types LIMIT 1").fetchone():
@@ -54,9 +61,19 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
             marker_str = f"{st.cluster_marker[0]},{st.cluster_marker[1]}"
             conn.execute(
                 "INSERT OR IGNORE INTO session_types "
-                "(slug, label, phrase_prefix, mock_profile, cluster_marker, is_custom) "
-                "VALUES (?, ?, ?, ?, ?, 0)",
-                (st.slug, st.label, st.phrase_prefix, st.mock_profile, marker_str),
+                "(slug, label, phrase_prefix, mock_profile, cluster_marker, chart_profile, is_custom) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (st.slug, st.label, st.phrase_prefix, st.mock_profile, marker_str, st.chart_profile),
+            )
+        conn.commit()
+    elif chart_profile_added:
+        # Существующая БД, миграция только что добавила колонку: заполнить
+        # chart_profile для встроенных типов из session_types.py.
+        for st in _ST.values():
+            conn.execute(
+                "UPDATE session_types SET chart_profile = ? "
+                "WHERE slug = ? AND is_custom = 0",
+                (st.chart_profile, st.slug),
             )
         conn.commit()
     cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}

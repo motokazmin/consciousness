@@ -229,7 +229,7 @@ function switchTab(name) {
   const sec = document.getElementById(`tab-${name}`);
   if (btn) btn.classList.add("active");
   if (sec) sec.classList.add("visible");
-  if (name === "live") requestAnimationFrame(resizePlots);
+  nextFrame(resizePlots);
 }
 
 document.querySelectorAll("nav button").forEach((b) => {
@@ -261,6 +261,7 @@ function api(path, opts = {}) {
 // Кастомные теги создаются через POST /api/session-types и сразу сохраняются в БД.
 let TAG_LABELS = {};
 let TAG_PRESETS = [];   // системные slugs (is_custom=false)
+let CHART_PROFILE_BY_TAG = {};   // slug → chart_profile (см. CHART_PROFILES)
 const TAG_CUSTOM_VALUE = "__custom__";
 
 function tagLabel(slug) {
@@ -332,10 +333,12 @@ async function loadSessionTypes() {
     TAG_LABELS = {};
     TAG_PRESETS = [];
     GUIDED_PHRASE_TAGS = {};
+    CHART_PROFILE_BY_TAG = {};
     for (const st of session_types) {
       TAG_LABELS[st.slug] = st.label;
       if (!st.is_custom) TAG_PRESETS.push(st.slug);
       if (st.phrase_prefix) GUIDED_PHRASE_TAGS[st.slug] = st.phrase_prefix;
+      CHART_PROFILE_BY_TAG[st.slug] = st.chart_profile || "default";
     }
     fillTagSelect(session_types);
     fillFilterSelect($("flt_tag"), session_types);
@@ -420,6 +423,42 @@ const AC = () => window.HrvAnalysisCharts;
 
 const RR_COLOR   = "#00d4ff";
 
+// ── ARCHIVE CHART PROFILES ──────────────────────────────────────────────
+// Профиль определяет, какие панели архива показывать (состав) и какие
+// опции передать в фабрики графиков (analysis_charts.js).
+// Тип сессии → профиль задаётся полем chart_profile в session_types
+// (см. CHART_PROFILE_BY_TAG, заполняется из /api/session-types).
+//
+// panels — подмножество ключей ARCHIVE_PANEL_IDS (порядок в массиве не
+// влияет на расположение в DOM — компоновка фиксирована в index.html).
+// options[panelKey] передаётся как доп. аргумент opts в соответствующую
+// фабрику make*Plot — конкретные поля см. в analysis_charts.js.
+const ARCHIVE_PANEL_IDS = {
+  rr: "arch_rr",
+  sdnn: "arch_sdnn",
+  poincare: "arch_poincare",
+  spectrum: "arch_spectrum",
+};
+
+const CHART_PROFILES = {
+  default: {
+    panels: ["rr", "sdnn", "poincare", "spectrum"],
+    options: {},
+  },
+  // Пример кастомного профиля (привязка: chart_profile="my_profile" в SESSION_TYPES):
+  // my_profile: {
+  //   panels: ["rr", "sdnn", "poincare"],   // без спектра, порядок панелей не меняется
+  //   options: {
+  //     rr:       { stroke: "#39e085", fillAlpha: 0.08 },
+  //     poincare: { pointRadius: 3 },
+  //   },
+  // },
+};
+
+function chartProfileFor(tag) {
+  return CHART_PROFILES[CHART_PROFILE_BY_TAG[tag]] || CHART_PROFILES.default;
+}
+
 function rrCfg(timed, w) {
   const xRange = timed && durationSec > 0
     ? (_u, _mn, _mx) => [0, durationSec]
@@ -482,23 +521,40 @@ function setLiveEmptyState(mode) {
 
 // ── RESIZE ────────────────────────────────────────────────────────────────
 let _resizeT = null;
+
+// Двойной RAF: ждём, пока браузер завершит layout после показа секции
+// (display:none → visible), иначе clientWidth может быть устаревшим —
+// из-за этого графики обрезались справа и/или сжимались при возврате
+// на вкладку без повторного открытия сессии.
+function nextFrame(fn) {
+  requestAnimationFrame(() => requestAnimationFrame(fn));
+}
+
 function resizePlots() {
+  const liveVisible = $("tab-live")?.classList.contains("visible");
+  const archiveVisible = $("tab-archive")?.classList.contains("visible");
+  const progressVisible = $("tab-progress")?.classList.contains("visible");
+
   const rrEl = $("rrPlot");
-  if (rrPlot && rrEl && $("tab-live")?.classList.contains("visible")) {
+  if (liveVisible && rrPlot && rrEl) {
     rrPlot.setSize({ width: plotWidth(rrEl), height: LIVE_PLOT_H });
     syncLivePlotXScale();
   }
-  if (archRR && $("arch_rr")) archRR.setSize({ width: plotWidth($("arch_rr")), height: ARCHIVE_PLOT_H });
-  if (archPoincare && $("arch_poincare")) archPoincare.setSize({ width: plotWidth($("arch_poincare")), height: ARCHIVE_PLOT_H });
-  if (archSpectrum?.plot && $("arch_spectrum")) {
-    archSpectrum.plot.setSize({ width: plotWidth($("arch_spectrum")), height: ARCHIVE_PLOT_H });
-    AC()?.positionPeakMarker(archSpectrum.plot, $("arch_spectrum")?.parentElement, archSpectrum.peakFreq);
+  if (archiveVisible) {
+    if (archRR && $("arch_rr")) archRR.setSize({ width: plotWidth($("arch_rr")), height: ARCHIVE_PLOT_H });
+    if (archPoincare && $("arch_poincare")) archPoincare.setSize({ width: plotWidth($("arch_poincare")), height: ARCHIVE_PLOT_H });
+    if (archSpectrum?.plot && $("arch_spectrum")) {
+      archSpectrum.plot.setSize({ width: plotWidth($("arch_spectrum")), height: ARCHIVE_PLOT_H });
+      AC()?.positionPeakMarker(archSpectrum.plot, $("arch_spectrum")?.parentElement, archSpectrum.peakFreq);
+    }
+    if (archSdnn && $("arch_sdnn")) archSdnn.setSize({ width: plotWidth($("arch_sdnn")), height: ARCHIVE_PLOT_H });
+    if (archRM && $("arch_rm")) archRM.setSize({ width: plotWidth($("arch_rm")), height: ARCHIVE_PLOT_H });
   }
-  if (archSdnn && $("arch_sdnn")) archSdnn.setSize({ width: plotWidth($("arch_sdnn")), height: ARCHIVE_PLOT_H });
-  if (archRM && $("arch_rm")) archRM.setSize({ width: plotWidth($("arch_rm")), height: ARCHIVE_PLOT_H });
-  if (progPoincare && $("prog_poincare")) progPoincare.setSize({ width: plotWidth($("prog_poincare")), height: PROGRESS_PLOT_H });
-  if (progSpectrum && $("prog_spectrum")) progSpectrum.setSize({ width: plotWidth($("prog_spectrum")), height: PROGRESS_PLOT_H });
-  if (progSdnn && $("prog_sdnn")) progSdnn.setSize({ width: plotWidth($("prog_sdnn")), height: PROGRESS_PLOT_H });
+  if (progressVisible) {
+    if (progPoincare && $("prog_poincare")) progPoincare.setSize({ width: plotWidth($("prog_poincare")), height: PROGRESS_PLOT_H });
+    if (progSpectrum && $("prog_spectrum")) progSpectrum.setSize({ width: plotWidth($("prog_spectrum")), height: PROGRESS_PLOT_H });
+    if (progSdnn && $("prog_sdnn")) progSdnn.setSize({ width: plotWidth($("prog_sdnn")), height: PROGRESS_PLOT_H });
+  }
 }
 window.addEventListener("resize", () => {
   clearTimeout(_resizeT);
@@ -762,7 +818,7 @@ async function startLive() {
     rrBuf = [];
     makeRRPlot($("rrPlot"), timed);
     setLiveEmptyState("waiting");
-    requestAnimationFrame(resizePlots);
+    nextFrame(resizePlots);
 
     setStatus(`Сессия #${currentSessionId} · ${tagLabel(body.tag)}${timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);
     loadSessionTypes().catch(() => {});
@@ -981,57 +1037,76 @@ async function openArchiveSession(id) {
   const charts = AC();
   if (!charts) return;
 
+  const profile = chartProfileFor(sum?.tag);
+  const activePanels = new Set(profile.panels);
+
   const rrEl = $("arch_rr");
   const pEl = $("arch_poincare");
   const sEl = $("arch_spectrum");
   const dEl = $("arch_sdnn");
-  if (rrEl) rrEl.innerHTML = "";
-  if (pEl) pEl.innerHTML = "";
-  if (sEl) sEl.innerHTML = "";
-  if (dEl) dEl.innerHTML = "";
+  const panelEls = { rr: rrEl, sdnn: dEl, poincare: pEl, spectrum: sEl };
 
-  if (analysis?.raw_rr?.length && analysis?.raw_rr_x?.length) {
-    archRR = charts.makeRawRrPlot(rrEl, analysis.raw_rr_x, analysis.raw_rr, analysis.duration_sec, ARCHIVE_PLOT_H);
-  } else if (rrEl) {
-    charts.setChartEmpty(rrEl, "Нет данных RR");
+  for (const [panelKey, id] of Object.entries(ARCHIVE_PANEL_IDS)) {
+    const el = panelEls[panelKey] || $(id);
+    const card = el?.closest(".plot-card");
+    if (card) card.hidden = !activePanels.has(panelKey);
+    if (el) el.innerHTML = "";
   }
 
-  const hasRawPoincare = analysis?.raw_rr?.length >= 2;
-  if (!hasRawPoincare && (analysis?.poincare?.insufficient_data || !analysis?.poincare?.points?.length)) {
-    charts.setChartEmpty(pEl, analysis?.poincare?.message || "Недостаточно данных");
-  } else {
-    archPoincare = charts.makePoincarePlot(
-      pEl,
-      analysis?.poincare?.points,
-      ARCHIVE_PLOT_H,
-      analysis?.poincare?.bounds,
-      analysis?.raw_rr
-    );
+  if (activePanels.has("rr")) {
+    if (analysis?.raw_rr?.length && analysis?.raw_rr_x?.length) {
+      archRR = charts.makeRawRrPlot(
+        rrEl, analysis.raw_rr_x, analysis.raw_rr, analysis.duration_sec,
+        ARCHIVE_PLOT_H, profile.options.rr
+      );
+    } else if (rrEl) {
+      charts.setChartEmpty(rrEl, "Нет данных RR");
+    }
   }
 
-  if (analysis?.spectrum?.insufficient_data || !analysis?.spectrum?.freqs?.length) {
-    charts.setChartEmpty(sEl, analysis?.spectrum?.message || "Недостаточно данных");
-    const marker = $("arch_peak_marker");
-    if (marker) marker.style.display = "none";
-  } else {
-    archSpectrum = charts.makeSpectrumPlot(sEl, analysis.spectrum, ARCHIVE_PLOT_H);
-    charts.positionPeakMarker(archSpectrum.plot, sEl.parentElement, archSpectrum.peakFreq);
+  if (activePanels.has("poincare")) {
+    const hasRawPoincare = analysis?.raw_rr?.length >= 2;
+    if (!hasRawPoincare && (analysis?.poincare?.insufficient_data || !analysis?.poincare?.points?.length)) {
+      charts.setChartEmpty(pEl, analysis?.poincare?.message || "Недостаточно данных");
+    } else {
+      archPoincare = charts.makePoincarePlot(
+        pEl,
+        analysis?.poincare?.points,
+        ARCHIVE_PLOT_H,
+        analysis?.poincare?.bounds,
+        analysis?.raw_rr,
+        profile.options.poincare
+      );
+    }
   }
 
-  if (!analysis?.sdnn_trend?.length) {
-    charts.setChartEmpty(dEl, "Недостаточно данных");
-  } else {
-    archSdnn = charts.makeSdnnPlot(dEl, analysis.sdnn_trend, analysis.duration_sec, ARCHIVE_PLOT_H);
+  if (activePanels.has("spectrum")) {
+    if (analysis?.spectrum?.insufficient_data || !analysis?.spectrum?.freqs?.length) {
+      charts.setChartEmpty(sEl, analysis?.spectrum?.message || "Недостаточно данных");
+      const marker = $("arch_peak_marker");
+      if (marker) marker.style.display = "none";
+    } else {
+      archSpectrum = charts.makeSpectrumPlot(sEl, analysis.spectrum, ARCHIVE_PLOT_H, profile.options.spectrum);
+      charts.positionPeakMarker(archSpectrum.plot, sEl.parentElement, archSpectrum.peakFreq);
+    }
+  }
+
+  if (activePanels.has("sdnn")) {
+    if (!analysis?.sdnn_trend?.length) {
+      charts.setChartEmpty(dEl, "Недостаточно данных");
+    } else {
+      archSdnn = charts.makeSdnnPlot(dEl, analysis.sdnn_trend, analysis.duration_sec, ARCHIVE_PLOT_H, profile.options.sdnn);
+    }
   }
 
   renderArchRmssd(analysis);
-  requestAnimationFrame(resizePlots);
+  nextFrame(resizePlots);
   detail.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 $("arch_rmssd_mode")?.addEventListener("change", () => {
   renderArchRmssd(archAnalysisCache);
-  requestAnimationFrame(resizePlots);
+  nextFrame(resizePlots);
 });
 
 $("btn_reload").addEventListener("click", loadArchive);
@@ -1129,7 +1204,7 @@ function buildProgressPlots() {
   progSdnn = charts.buildProgressSdnnPlot(dEl, sessions, visible, PROG_COLORS, PROGRESS_PLOT_H);
   if (!progSdnn) charts.setChartEmpty(dEl, "Нет тренда SDNN");
 
-  requestAnimationFrame(resizePlots);
+  nextFrame(resizePlots);
 }
 
 async function loadProgress() {

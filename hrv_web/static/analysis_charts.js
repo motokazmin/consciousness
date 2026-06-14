@@ -12,6 +12,9 @@
     stroke: "#5a6478",
   };
 
+  // Совпадает с rrCfg в app.js — правый отступ под последнюю подпись оси X.
+  const CHART_PADDING = [8, 40, 4, 4];
+
   const xScaleLinear = { time: false, distr: 1 };
 
   function fmtAxisSec(u, splits) {
@@ -65,7 +68,7 @@
     return { lo: mn - pad, hi: mx + pad };
   }
 
-  function poincareDrawPoints(u) {
+  function poincareDrawPoints(u, opts) {
     const { ctx } = u;
     const xdata = u.data[1];
     const ydata = u.data[2];
@@ -73,12 +76,14 @@
     const ox = u.bbox.left;
     const oy = u.bbox.top;
     const total = xdata.length;
+    const radius = opts?.pointRadius ?? 2.2;
+    const colorFn = opts?.pointColor || gradientPointColor;
     for (let i = 0; i < total; i++) {
       const x = u.valToPos(xdata[i], "x", true);
       const y = u.valToPos(ydata[i], "y", true);
       ctx.beginPath();
-      ctx.fillStyle = gradientPointColor(i, total);
-      ctx.arc(ox + x, oy + y, 2.2, 0, Math.PI * 2);
+      ctx.fillStyle = colorFn(i, total);
+      ctx.arc(ox + x, oy + y, radius, 0, Math.PI * 2);
       ctx.fill();
     }
     const lo = u.scales.x.min;
@@ -97,29 +102,6 @@
     ctx.setLineDash([]);
   }
 
-  function overlayScatterDraw(u, seriesIdx, color, alpha) {
-    const { ctx } = u;
-    const xdata = u.data[seriesIdx * 2];
-    const ydata = u.data[seriesIdx * 2 + 1];
-    if (!xdata?.length) return;
-    const ox = u.bbox.left;
-    const oy = u.bbox.top;
-    ctx.fillStyle = color.replace(")", `, ${alpha})`).replace("rgb", "rgba").replace("#", "");
-    if (color.startsWith("#")) {
-      const r = parseInt(color.slice(1, 3), 16);
-      const g = parseInt(color.slice(3, 5), 16);
-      const b = parseInt(color.slice(5, 7), 16);
-      ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
-    }
-    for (let i = 0; i < xdata.length; i++) {
-      const x = u.valToPos(xdata[i], "x", true);
-      const y = u.valToPos(ydata[i], "y", true);
-      ctx.beginPath();
-      ctx.arc(ox + x, oy + y, 1.8, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
   function hexToRgba(hex, alpha) {
     const r = parseInt(hex.slice(1, 3), 16);
     const g = parseInt(hex.slice(3, 5), 16);
@@ -127,7 +109,25 @@
     return `rgba(${r},${g},${b},${alpha})`;
   }
 
-  function makePoincarePlot(el, points, height, bounds, rawRr) {
+  // opts для фабрик make*Plot (передаётся из CHART_PROFILES.options в app.js):
+  //   makeRawRrPlot / makeSpectrumPlot / makeSdnnPlot:
+  //     stroke, fillAlpha, yMax, series (поля uPlot series)
+  //   makePoincarePlot:
+  //     pointRadius, pointColor(i, total) → CSS color
+  function applySeriesOpts(baseSeries, opts) {
+    if (!opts) return baseSeries;
+    const series = { ...baseSeries, ...(opts.series || {}) };
+    if (opts.stroke) {
+      series.stroke = opts.stroke;
+      if (series.fill) {
+        const alpha = opts.fillAlpha ?? 0.06;
+        series.fill = hexToRgba(opts.stroke, alpha);
+      }
+    }
+    return series;
+  }
+
+  function makePoincarePlot(el, points, height, bounds, rawRr, opts) {
     const plotPoints = rawRr?.length >= 2 ? poincarePointsFromRawRr(rawRr) : (points || []);
     if (!plotPoints.length) return null;
     const xs = plotPoints.map((p) => p.x);
@@ -139,7 +139,7 @@
       {
         width: w,
         height: height || 260,
-        padding: [8, 8, 0, 0],
+        padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [lo, hi] },
           y: { time: false, distr: 1, range: [lo, hi] },
@@ -153,7 +153,7 @@
           { ...AXIS_STYLE, label: "RRₙ₊₁, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
         ],
         hooks: {
-          draw: [poincareDrawPoints],
+          draw: [(u) => poincareDrawPoints(u, opts)],
         },
         cursor: { show: true, x: true, y: true },
         legend: { show: false },
@@ -163,30 +163,28 @@
     );
   }
 
-  function makeRawRrPlot(el, rawRrX, rawRr, durationSec, height) {
+  function makeRawRrPlot(el, rawRrX, rawRr, durationSec, height, opts) {
     if (!rawRr?.length || !rawRrX?.length) return null;
     const xMax = durationSec || rawRrX[rawRrX.length - 1] || 1;
     const yMin = Math.max(300, rawRr.reduce((a, b) => (a < b ? a : b), Infinity) - 40);
-    const yMax = rawRr.reduce((a, b) => (a > b ? a : b), -Infinity) + 40;
+    const yMax = opts?.yMax ?? (rawRr.reduce((a, b) => (a > b ? a : b), -Infinity) + 40);
     const w = plotWidth(el);
 
     return new uPlot(
       {
         width: w,
         height: height || 260,
-        padding: [8, 8, 0, 0],
+        padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
           y: { time: false, distr: 1, range: [yMin, yMax] },
         },
         series: [
           {},
-          {
-            stroke: "#00d4ff",
-            width: 1.5,
-            fill: "rgba(0,212,255,0.04)",
-            points: { show: false },
-          },
+          applySeriesOpts(
+            { stroke: "#00d4ff", width: 1.5, fill: "rgba(0,212,255,0.04)", points: { show: false } },
+            opts
+          ),
         ],
         axes: [
           { ...AXIS_STYLE, label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
@@ -200,30 +198,28 @@
     );
   }
 
-  function makeSpectrumPlot(el, spectrum, height) {
+  function makeSpectrumPlot(el, spectrum, height, opts) {
     const freqs = spectrum?.freqs || [];
     const power = spectrum?.power || [];
     if (!freqs.length) return null;
     const w = plotWidth(el);
-    const yMax = power.reduce((a, b) => (a > b ? a : b), 0) * 1.2 || 1;
+    const yMax = opts?.yMax ?? (power.reduce((a, b) => (a > b ? a : b), 0) * 1.2 || 1);
 
     const plot = new uPlot(
       {
         width: w,
         height: height || 260,
-        padding: [8, 8, 0, 0],
+        padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, 0.5] },
           y: { time: false, distr: 1, range: [0, yMax] },
         },
         series: [
           {},
-          {
-            stroke: "#00d4ff",
-            width: 2,
-            fill: "rgba(0,212,255,0.08)",
-            points: { show: false },
-          },
+          applySeriesOpts(
+            { stroke: "#00d4ff", width: 2, fill: "rgba(0,212,255,0.08)", points: { show: false } },
+            opts
+          ),
         ],
         axes: [
           { ...AXIS_STYLE, label: "Частота, Гц", values: fmtAxisHz },
@@ -249,31 +245,29 @@
     marker.textContent = `${peakFreq.toFixed(2)} Гц`;
   }
 
-  function makeSdnnPlot(el, trend, durationSec, height) {
+  function makeSdnnPlot(el, trend, durationSec, height, opts) {
     if (!trend?.length) return null;
     const xs = trend.map((p) => p.x);
     const ys = trend.map((p) => p.sdnn);
     const xMax = durationSec || xs[xs.length - 1] || 1;
-    const yMax = ys.reduce((a, b) => (a > b ? a : b), 10) * 1.15;
+    const yMax = opts?.yMax ?? (ys.reduce((a, b) => (a > b ? a : b), 10) * 1.15);
     const w = plotWidth(el);
 
     return new uPlot(
       {
         width: w,
         height: height || 260,
-        padding: [8, 8, 0, 0],
+        padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
           y: { time: false, distr: 1, range: [0, yMax] },
         },
         series: [
           {},
-          {
-            stroke: "#9d8ef0",
-            width: 2,
-            fill: "rgba(157,142,240,0.08)",
-            points: { show: false },
-          },
+          applySeriesOpts(
+            { stroke: "#9d8ef0", width: 2, fill: "rgba(157,142,240,0.08)", points: { show: false } },
+            opts
+          ),
         ],
         axes: [
           { ...AXIS_STYLE, label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
@@ -299,7 +293,7 @@
       {
         width: w,
         height: height || 260,
-        padding: [8, 8, 0, 0],
+        padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
           y: { time: false, distr: 1, range: [0, yMax] },
@@ -403,7 +397,7 @@
       {
         width: w,
         height: height || 280,
-        padding: [8, 8, 0, 0],
+        padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [lo, hi] },
           y: { time: false, distr: 1, range: [lo, hi] },
@@ -468,7 +462,7 @@
       {
         width: w,
         height: height || 280,
-        padding: [8, 8, 0, 0],
+        padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, 0.5] },
           y: { time: false, distr: 1, range: [0, yMax * 1.2 || 1] },
@@ -486,45 +480,40 @@
     );
   }
 
+  function progressXMax(sessions, trendKey) {
+    let xMax = 1;
+    for (const s of sessions) {
+      xMax = Math.max(xMax, s.duration_sec || 0);
+      const trend = s[trendKey];
+      if (trend?.length) {
+        xMax = Math.max(xMax, trend[trend.length - 1].x || 0);
+      }
+    }
+    return xMax;
+  }
+
+  function clipPlotArea(ctx, bbox) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(bbox.left, bbox.top, bbox.width, bbox.height);
+    ctx.clip();
+  }
+
   function buildProgressSdnnPlot(el, sessions, visible, colors, height) {
     const active = sessions.filter((s) => visible.has(s.id) && s.sdnn_trend?.length);
     if (!active.length) return null;
 
-    const xMax = active.reduce((a, s) => Math.max(a, s.duration_sec || 0), 1);
+    const xMax = progressXMax(active, "sdnn_trend");
     let yMax = 0;
-    for (const s of active) {
-      for (const p of s.sdnn_trend) yMax = Math.max(yMax, p.sdnn);
-    }
-
-    const series = [{}];
-    const data = [[]];
-    const drawHooks = [];
+    const lines = [];
 
     active.forEach((s) => {
       const idx = sessions.indexOf(s);
       const color = colors[idx % colors.length];
       const xs = s.sdnn_trend.map((p) => p.x);
       const ys = s.sdnn_trend.map((p) => p.sdnn);
-      const xIdx = data.length;
-      data.push(xs);
-      data.push(ys);
-      series.push({ points: { show: false }, label: `#${s.id}` });
-      drawHooks.push((u) => {
-        const { ctx } = u;
-        const xdata = u.data[xIdx];
-        const ydata = u.data[xIdx + 1];
-        if (!xdata?.length) return;
-        const ox = u.bbox.left;
-        const oy = u.bbox.top;
-        ctx.beginPath();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        ctx.moveTo(ox + u.valToPos(xdata[0], "x", true), oy + u.valToPos(ydata[0], "y", true));
-        for (let i = 1; i < xdata.length; i++) {
-          ctx.lineTo(ox + u.valToPos(xdata[i], "x", true), oy + u.valToPos(ydata[i], "y", true));
-        }
-        ctx.stroke();
-      });
+      for (const p of s.sdnn_trend) yMax = Math.max(yMax, p.sdnn);
+      lines.push({ xs, ys, color });
     });
 
     const w = plotWidth(el);
@@ -532,21 +521,40 @@
       {
         width: w,
         height: height || 280,
-        padding: [8, 8, 0, 0],
+        padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
           y: { time: false, distr: 1, range: [0, yMax * 1.15 || 10] },
         },
-        series,
+        series: [{ show: false }],
         axes: [
           { ...AXIS_STYLE, label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...AXIS_STYLE, label: "SDNN, ms", size: 52 },
         ],
-        hooks: { draw: drawHooks },
+        hooks: {
+          draw: [(u) => {
+            const { ctx } = u;
+            clipPlotArea(ctx, u.bbox);
+            const ox = u.bbox.left;
+            const oy = u.bbox.top;
+            for (const { xs, ys, color } of lines) {
+              if (!xs.length) continue;
+              ctx.beginPath();
+              ctx.strokeStyle = color;
+              ctx.lineWidth = 2;
+              ctx.moveTo(ox + u.valToPos(xs[0], "x", true), oy + u.valToPos(ys[0], "y", true));
+              for (let i = 1; i < xs.length; i++) {
+                ctx.lineTo(ox + u.valToPos(xs[i], "x", true), oy + u.valToPos(ys[i], "y", true));
+              }
+              ctx.stroke();
+            }
+            ctx.restore();
+          }],
+        },
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
       },
-      data,
+      [[0], [0]],
       el
     );
   }

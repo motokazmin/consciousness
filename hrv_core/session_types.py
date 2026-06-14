@@ -3,7 +3,14 @@
 Чтобы добавить новый тип:
   1. Добавьте запись в SESSION_TYPES ниже.
   2. Положите mp3-фразы в static/phrases/ с нужным prefix (sit/lay/…).
-  3. Готово — всё остальное (mock-профиль, phrases-UI, cluster-маркеры) подтянется автоматически.
+  3. При необходимости укажите chart_profile — имя набора/настроек графиков
+     для архивного просмотра (см. CHART_PROFILES во static/app.js).
+     Если не указан — используется "default". Пример:
+       chart_profile="my_profile"
+     и в app.js:
+       my_profile: { panels: ["rr", "poincare"], options: { … } }
+  4. Готово — всё остальное (mock-профиль, phrases-UI, cluster-маркеры,
+     графики) подтянется автоматически.
 """
 
 from __future__ import annotations
@@ -21,6 +28,9 @@ class SessionType:
     phrase_prefix: str | None
     # (marker, size) для scatter-графика в cluster.py
     cluster_marker: tuple[str, int]
+    # Профиль набора/настроек графиков в архиве (CHART_PROFILES во app.js).
+    # "default", если для типа сессии достаточно стандартного набора графиков.
+    chart_profile: str = "default"
 
 
 # ── Базовые типы (не удалять) ──────────────────────────────────────────────

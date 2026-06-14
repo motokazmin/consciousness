@@ -133,12 +133,12 @@ def _decimate_rows(rows: list, max_points: int) -> list:
 
 def _all_session_types(conn) -> list[dict]:
     rows = conn.execute(
-        "SELECT slug, label, phrase_prefix, mock_profile, is_custom "
+        "SELECT slug, label, phrase_prefix, mock_profile, chart_profile, is_custom "
         "FROM session_types ORDER BY is_custom ASC, slug ASC"
     ).fetchall()
     return [
         {"slug": r[0], "label": r[1], "phrase_prefix": r[2],
-         "mock_profile": r[3], "is_custom": bool(r[4])}
+         "mock_profile": r[3], "chart_profile": r[4], "is_custom": bool(r[5])}
         for r in rows
     ]
 
@@ -168,8 +168,9 @@ def create_session_type(body: CreateSessionTypeBody):
         if existing:
             raise HTTPException(409, f"Тип '{body.slug}' уже существует")
         conn.execute(
-            "INSERT INTO session_types (slug, label, phrase_prefix, mock_profile, is_custom) "
-            "VALUES (?, ?, NULL, 'default', 1)",
+            "INSERT INTO session_types "
+            "(slug, label, phrase_prefix, mock_profile, chart_profile, is_custom) "
+            "VALUES (?, ?, NULL, 'default', 'default', 1)",
             (body.slug, body.label),
         )
         conn.commit()
