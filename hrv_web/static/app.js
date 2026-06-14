@@ -327,47 +327,207 @@ async function resolveSessionTag() {
   return slug;
 }
 
-function fillNoteTagChecklist(container, tags) {
-  if (!container) return;
-  const prev = new Set(
-    [...container.querySelectorAll(".note-tag-cb:checked")].map((cb) => cb.value)
-  );
-  container.innerHTML = "";
-  if (!tags.length) {
-    container.innerHTML = '<span class="note-tag-checklist-empty">нет тегов в заметках</span>';
-    return;
+// ── TAG CHIP INPUT (autocomplete + chips) ──────────────────────────────────
+// Generic component: a box with removable tag chips + text input with
+// autocomplete suggestions. Used for note-tag filters (archive/progress) and
+// for editing tags on a session's notes.
+function createTagChipInput(container, { onChange, allowCreate = true } = {}) {
+  if (!container) return null;
+  const box = container.querySelector(".tag-chip-box");
+  const input = container.querySelector("input");
+  const suggBox = container.querySelector(".tag-chip-suggestions");
+  let tags = [];
+  let allSuggestions = [];
+  let activeIndex = -1;
+
+  function emitChange() {
+    if (onChange) onChange([...tags]);
   }
-  for (const tag of tags) {
-    const label = document.createElement("label");
-    label.className = "check-label";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.value = tag;
-    cb.className = "note-tag-cb";
-    if (prev.has(tag)) cb.checked = true;
-    label.appendChild(cb);
-    label.appendChild(document.createTextNode(`#${tag}`));
-    container.appendChild(label);
+
+  function renderChips() {
+    [...box.querySelectorAll(".tag-chip")].forEach((el) => el.remove());
+    for (const tag of tags) {
+      const chip = document.createElement("span");
+      chip.className = "tag-chip";
+      chip.textContent = `#${tag}`;
+      const rm = document.createElement("span");
+      rm.className = "tag-chip-remove";
+      rm.textContent = "×";
+      rm.title = "Удалить тег";
+      rm.addEventListener("click", (e) => {
+        e.stopPropagation();
+        tags = tags.filter((t) => t !== tag);
+        renderChips();
+        emitChange();
+      });
+      chip.appendChild(rm);
+      box.insertBefore(chip, input);
+    }
+  }
+
+  function closeSuggestions() {
+    suggBox.hidden = true;
+    suggBox.innerHTML = "";
+    activeIndex = -1;
+  }
+
+  function currentMatches() {
+    const q = input.value.trim().toLowerCase();
+    let matches = allSuggestions.filter(
+      (t) => !tags.includes(t) && (!q || t.toLowerCase().includes(q))
+    );
+    const canCreate = allowCreate && q && !allSuggestions.includes(q) && !tags.includes(q);
+    return { matches, canCreate, q };
+  }
+
+  function renderSuggestions() {
+    const { matches, canCreate, q } = currentMatches();
+    suggBox.innerHTML = "";
+    if (!matches.length && !canCreate) {
+      closeSuggestions();
+      return;
+    }
+    for (const tag of matches) {
+      const item = document.createElement("div");
+      item.className = "tag-chip-suggestion";
+      item.textContent = `#${tag}`;
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        addTag(tag);
+      });
+      suggBox.appendChild(item);
+    }
+    if (canCreate) {
+      const item = document.createElement("div");
+      item.className = "tag-chip-suggestion tag-chip-suggestion-create";
+      item.textContent = `+ добавить «#${q}»`;
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        addTag(q);
+      });
+      suggBox.appendChild(item);
+    }
+    activeIndex = -1;
+    suggBox.hidden = false;
+  }
+
+  const TAG_CHAR_RE = /^[\w\-а-яА-ЯёЁ]+$/u;
+
+  function addTag(rawTag) {
+    const tag = (rawTag || "").trim().toLowerCase().replace(/^#/, "");
+    if (!tag || tags.includes(tag) || !TAG_CHAR_RE.test(tag)) {
+      input.value = "";
+      closeSuggestions();
+      return;
+    }
+    if (!allowCreate && !allSuggestions.includes(tag)) {
+      input.value = "";
+      closeSuggestions();
+      return;
+    }
+    tags.push(tag);
+    input.value = "";
+    renderChips();
+    closeSuggestions();
+    emitChange();
+    input.focus();
+  }
+
+  input.addEventListener("input", () => {
+    // Теги не могут содержать пробелы — допустимы только буквы, цифры, дефис и подчёркивание.
+    if (/\s/.test(input.value)) {
+      input.value = input.value.replace(/\s+/g, "");
+    }
+    renderSuggestions();
+  });
+  input.addEventListener("focus", renderSuggestions);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === " " || e.code === "Space") {
+      e.preventDefault();
+      return;
+    }
+    const items = [...suggBox.querySelectorAll(".tag-chip-suggestion")];
+    if (e.key === "ArrowDown" && items.length) {
+      e.preventDefault();
+      activeIndex = Math.min(activeIndex + 1, items.length - 1);
+      items.forEach((it, i) => it.classList.toggle("active", i === activeIndex));
+      items[activeIndex]?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "ArrowUp" && items.length) {
+      e.preventDefault();
+      activeIndex = Math.max(activeIndex - 1, 0);
+      items.forEach((it, i) => it.classList.toggle("active", i === activeIndex));
+      items[activeIndex]?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (activeIndex >= 0 && items[activeIndex]) {
+        items[activeIndex].dispatchEvent(new Event("mousedown"));
+      } else if (input.value.trim()) {
+        addTag(input.value);
+      }
+    } else if (e.key === "Backspace" && !input.value && tags.length) {
+      tags.pop();
+      renderChips();
+      closeSuggestions();
+      emitChange();
+    } else if (e.key === "Escape") {
+      closeSuggestions();
+    }
+  });
+  box.addEventListener("click", (e) => {
+    if (e.target === box) input.focus();
+  });
+  document.addEventListener("click", (e) => {
+    if (!container.contains(e.target)) closeSuggestions();
+  });
+
+  return {
+    setSuggestions(list) {
+      allSuggestions = list || [];
+      if (document.activeElement === input) renderSuggestions();
+    },
+    getTags() {
+      return [...tags];
+    },
+    setTags(list) {
+      tags = [...new Set((list || []).map((t) => String(t).toLowerCase()))];
+      renderChips();
+    },
+  };
+}
+
+let fltNoteTagsInput = null;
+let progNoteTagsInput = null;
+let sessionNotesTagsInput = null;
+
+function ensureTagChipInputs() {
+  if (!fltNoteTagsInput) {
+    fltNoteTagsInput = createTagChipInput($("flt_note_tags"), {
+      allowCreate: false,
+      onChange: () => loadArchive().catch((e) => setErr(String(e.message || e))),
+    });
+  }
+  if (!progNoteTagsInput) {
+    progNoteTagsInput = createTagChipInput($("prog_note_tags"), { allowCreate: false });
+  }
+  if (!sessionNotesTagsInput) {
+    sessionNotesTagsInput = createTagChipInput($("session_notes_tags"));
   }
 }
 
-function selectedNoteTags(container) {
-  if (!container) return [];
-  return [...container.querySelectorAll(".note-tag-cb:checked")].map((cb) => cb.value);
-}
-
-function appendNoteTagFilters(url, container) {
-  for (const tag of selectedNoteTags(container)) {
+function appendNoteTagFilters(url, chipInput) {
+  for (const tag of (chipInput?.getTags() || [])) {
     url += `&note_tag=${encodeURIComponent(tag)}`;
   }
   return url;
 }
 
 async function loadNoteTags() {
+  ensureTagChipInputs();
   try {
     const { tags } = await api("/api/note-tags");
-    fillNoteTagChecklist($("flt_note_tags"), tags);
-    fillNoteTagChecklist($("prog_note_tags"), tags);
+    fltNoteTagsInput?.setSuggestions(tags);
+    progNoteTagsInput?.setSuggestions(tags);
+    sessionNotesTagsInput?.setSuggestions(tags);
   } catch (e) {
     console.warn("loadNoteTags failed:", e);
   }
@@ -387,6 +547,15 @@ function parseNoteTagsClient(text) {
     }
   }
   return out;
+}
+
+// Объединяет свободный текст заметки с набором тегов из chip-инпута:
+// удаляет существующие #теги из текста и добавляет актуальный набор в конец.
+function mergeNotesWithTags(text, tags) {
+  const body = (text || "").replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "").replace(/\s+/g, " ").trim();
+  const tagsStr = (tags || []).map((t) => `#${t}`).join(" ");
+  if (body && tagsStr) return `${body} ${tagsStr}`;
+  return body || tagsStr;
 }
 
 function noteTagsHtml(tags) {
@@ -655,7 +824,10 @@ function resizePlots() {
   }
   if (progressVisible) {
     if (progPoincare && $("prog_poincare")) progPoincare.setSize({ width: plotWidth($("prog_poincare")), height: PROGRESS_PLOT_H });
-    if (progSpectrum && $("prog_spectrum")) progSpectrum.setSize({ width: plotWidth($("prog_spectrum")), height: PROGRESS_PLOT_H });
+    if (progSpectrum && $("prog_spectrum")) {
+      progSpectrum.setSize({ width: plotWidth($("prog_spectrum")), height: PROGRESS_PLOT_H });
+      AC()?.positionPeakMarker(progSpectrum, $("prog_spectrum")?.parentElement, progSpectrumPeakFreq);
+    }
     if (progSdnn && $("prog_sdnn")) progSdnn.setSize({ width: plotWidth($("prog_sdnn")), height: PROGRESS_PLOT_H });
   }
 }
@@ -794,9 +966,13 @@ function showSessionNotesModal(sessionId) {
   const input = $("session_notes_input");
   const idEl = $("session_notes_id");
   if (!modal || !input) return;
+  ensureTagChipInputs();
   _notesModalSessionId = sessionId;
   if (idEl) idEl.textContent = String(sessionId);
-  input.value = $("session_name")?.value?.trim() || "";
+  const rawText = $("session_name")?.value?.trim() || "";
+  const tags = parseNoteTagsClient(rawText);
+  input.value = rawText.replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "").replace(/\s+/g, " ").trim();
+  sessionNotesTagsInput?.setTags(tags);
   modal.classList.add("visible");
   input.focus();
 }
@@ -807,7 +983,9 @@ async function saveSessionNotes() {
     closeSessionNotesModal();
     return;
   }
-  const text = ($("session_notes_input")?.value || "").trim();
+  const rawText = ($("session_notes_input")?.value || "").trim();
+  const tags = sessionNotesTagsInput?.getTags() || [];
+  const text = mergeNotesWithTags(rawText, tags);
   try {
     await api(`/api/sessions/${sessionId}`, {
       method: "PATCH",
@@ -824,6 +1002,7 @@ async function saveSessionNotes() {
   }
   closeSessionNotesModal();
 }
+
 
 $("session_notes_save")?.addEventListener("click", () => { saveSessionNotes(); });
 $("session_notes_skip")?.addEventListener("click", () => { closeSessionNotesModal(); });
@@ -991,7 +1170,7 @@ async function loadArchive() {
   let url = "/api/sessions?limit=100";
   if (p) url += `&participant=${encodeURIComponent(p)}`;
   if (t) url += `&tag=${encodeURIComponent(t)}`;
-  url = appendNoteTagFilters(url, $("flt_note_tags"));
+  url = appendNoteTagFilters(url, fltNoteTagsInput);
   url = appendDateFilters(url, $("flt_period"));
   const { sessions } = await api(url);
   const tb = $("arch_rows");
@@ -1237,11 +1416,6 @@ $("btn_reload").addEventListener("click", loadArchive);
     });
   }
 });
-$("flt_note_tags")?.addEventListener("change", (e) => {
-  if (e.target.matches(".note-tag-cb")) {
-    loadArchive().catch((err) => setErr(String(err.message || err)));
-  }
-});
 
 // ── PROGRESS ──────────────────────────────────────────────────────────────
 const PROG_COLORS = [
@@ -1252,6 +1426,7 @@ const PROG_COLORS = [
 
 let progPoincare = null;
 let progSpectrum = null;
+let progSpectrumPeakFreq = null;
 let progSdnn = null;
 let progSessionsRaw = [];
 let progVisible = new Set();
@@ -1266,6 +1441,9 @@ function setProgErr(txt) {
 function destroyProgPlots() {
   if (progPoincare) { progPoincare.destroy(); progPoincare = null; }
   if (progSpectrum) { progSpectrum.destroy(); progSpectrum = null; }
+  progSpectrumPeakFreq = null;
+  const progMarker = $("prog_peak_marker");
+  if (progMarker) progMarker.style.display = "none";
   if (progSdnn) { progSdnn.destroy(); progSdnn = null; }
 }
 
@@ -1330,8 +1508,16 @@ function buildProgressPlots() {
   progPoincare = charts.buildProgressPoincarePlot(pEl, sessions, visible, PROG_COLORS, PROGRESS_PLOT_H);
   if (!progPoincare) charts.setChartEmpty(pEl, "Нет данных Poincaré");
 
-  progSpectrum = charts.buildProgressSpectrumPlot(sEl, sessions, visible, PROG_COLORS, PROGRESS_PLOT_H);
-  if (!progSpectrum) charts.setChartEmpty(sEl, "Нет спектральных данных");
+  const spectrumResult = charts.buildProgressSpectrumPlot(sEl, sessions, visible, PROG_COLORS, PROGRESS_PLOT_H);
+  if (!spectrumResult) {
+    charts.setChartEmpty(sEl, "Нет спектральных данных");
+    const marker = $("prog_peak_marker");
+    if (marker) marker.style.display = "none";
+  } else {
+    progSpectrum = spectrumResult.plot;
+    progSpectrumPeakFreq = spectrumResult.peakFreq ?? null;
+    charts.positionPeakMarker(progSpectrum, sEl.parentElement, progSpectrumPeakFreq);
+  }
 
   progSdnn = charts.buildProgressSdnnPlot(dEl, sessions, visible, PROG_COLORS, PROGRESS_PLOT_H);
   if (!progSdnn) charts.setChartEmpty(dEl, "Нет тренда SDNN");
@@ -1343,9 +1529,9 @@ async function loadProgress() {
   setProgErr("");
   const tag = $("prog_tag")?.value || "";
   const participant = $("prog_participant")?.value?.trim() || "";
-  let url = "/api/progress/analysis?max_sessions=40";
+  let url = "/api/progress/analysis?max_sessions=40&max_points_per_session=12000";
   if (tag) url += `&tag=${encodeURIComponent(tag)}`;
-  url = appendNoteTagFilters(url, $("prog_note_tags"));
+  url = appendNoteTagFilters(url, progNoteTagsInput);
   url = appendDateFilters(url, $("prog_period"));
   if (participant) url += `&participant=${encodeURIComponent(participant)}`;
 
@@ -1394,12 +1580,11 @@ async function wipeHistory() {
   try {
     await api("/api/history", { method: "DELETE" });
     progSessionsRaw = [];
-    destroyProgPlots();
+    renderProgCompareTable([]);
+    buildProgressPlots();
     $("arch_detail")?.classList.remove("visible");
     $("btn_delete_arch_session")?.setAttribute("hidden", "");
     $("arch_rows").innerHTML = "";
-    const emptyEl = $("prog_empty");
-    if (emptyEl) emptyEl.hidden = false;
     await loadSessionTypes();
     await loadArchive();
     setProgErr("");

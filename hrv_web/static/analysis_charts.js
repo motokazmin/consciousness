@@ -416,25 +416,40 @@
     );
   }
 
-  function resampleSpectrum(freqs, power, grid) {
+  function interpolateSpectrum(freqs, power, grid) {
     if (!freqs?.length) return grid.map(() => 0);
+    const n = freqs.length;
     return grid.map((f) => {
-      let best = 0;
-      let bestDist = Infinity;
-      for (let i = 0; i < freqs.length; i++) {
-        const d = Math.abs(freqs[i] - f);
-        if (d < bestDist) {
-          bestDist = d;
-          best = power[i];
-        }
+      if (f <= freqs[0]) return power[0];
+      if (f >= freqs[n - 1]) return power[n - 1];
+      let lo = 0;
+      let hi = n - 1;
+      while (lo + 1 < hi) {
+        const mid = (lo + hi) >> 1;
+        if (freqs[mid] <= f) lo = mid;
+        else hi = mid;
       }
-      return bestDist < 0.02 ? best : 0;
+      const f0 = freqs[lo];
+      const f1 = freqs[hi];
+      if (f1 === f0) return power[lo];
+      const t = (f - f0) / (f1 - f0);
+      return power[lo] + t * (power[hi] - power[lo]);
     });
   }
 
   function buildProgressSpectrumPlot(el, sessions, visible, colors, height) {
     const active = sessions.filter((s) => visible.has(s.id) && s.spectrum?.freqs?.length);
     if (!active.length) return null;
+
+    if (active.length === 1) {
+      const idx = sessions.indexOf(active[0]);
+      const color = colors[idx % colors.length];
+      return makeSpectrumPlot(el, active[0].spectrum, height, {
+        stroke: color,
+        fillAlpha: 0.08,
+        series: { width: 2 },
+      });
+    }
 
     const grid = [];
     for (let f = 0; f <= 0.5; f += 0.005) grid.push(Number(f.toFixed(3)));
@@ -446,19 +461,19 @@
     active.forEach((s) => {
       const idx = sessions.indexOf(s);
       const color = colors[idx % colors.length];
-      const resampled = resampleSpectrum(s.spectrum.freqs, s.spectrum.power, grid);
-      yMax = Math.max(yMax, ...resampled);
+      const resampled = interpolateSpectrum(s.spectrum.freqs, s.spectrum.power, grid);
+      for (const p of s.spectrum.power) yMax = Math.max(yMax, p);
       series.push({
         stroke: color,
-        width: 1.5,
-        fill: hexToRgba(color, 0.04),
+        width: 2,
+        fill: hexToRgba(color, 0.08),
         points: { show: false },
       });
       data.push(resampled);
     });
 
     const w = plotWidth(el);
-    return new uPlot(
+    const plot = new uPlot(
       {
         width: w,
         height: height || 280,
@@ -478,6 +493,7 @@
       data,
       el
     );
+    return { plot, peakFreq: null };
   }
 
   function progressXMax(sessions, trendKey) {
@@ -535,16 +551,14 @@
           draw: [(u) => {
             const { ctx } = u;
             clipPlotArea(ctx, u.bbox);
-            const ox = u.bbox.left;
-            const oy = u.bbox.top;
             for (const { xs, ys, color } of lines) {
               if (!xs.length) continue;
               ctx.beginPath();
               ctx.strokeStyle = color;
               ctx.lineWidth = 2;
-              ctx.moveTo(ox + u.valToPos(xs[0], "x", true), oy + u.valToPos(ys[0], "y", true));
+              ctx.moveTo(u.valToPos(xs[0], "x", true), u.valToPos(ys[0], "y", true));
               for (let i = 1; i < xs.length; i++) {
-                ctx.lineTo(ox + u.valToPos(xs[i], "x", true), oy + u.valToPos(ys[i], "y", true));
+                ctx.lineTo(u.valToPos(xs[i], "x", true), u.valToPos(ys[i], "y", true));
               }
               ctx.stroke();
             }

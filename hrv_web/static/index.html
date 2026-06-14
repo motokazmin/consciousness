@@ -787,30 +787,89 @@
       color: var(--text-muted);
       font-weight: normal;
     }
-    .note-tag-checklist {
-      max-height: 108px;
-      min-width: 168px;
+    /* ── TAG CHIP INPUT (autocomplete + chips) ── */
+    .tag-chip-input {
+      position: relative;
+      min-width: 200px;
+    }
+    .tag-chip-box {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 5px;
+      min-height: 34px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 5px 7px;
+      background: var(--surface2);
+      cursor: text;
+    }
+    .tag-chip-box:focus-within { border-color: var(--accent2); }
+    .tag-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: .75rem;
+      font-family: var(--mono);
+      padding: 2px 6px 2px 9px;
+      border-radius: 999px;
+      background: rgba(157, 142, 240, 0.18);
+      color: #b8a8f8;
+      white-space: nowrap;
+    }
+    .tag-chip-remove {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      cursor: pointer;
+      color: inherit;
+      opacity: .7;
+      font-size: .85em;
+      line-height: 1;
+    }
+    .tag-chip-remove:hover { opacity: 1; background: rgba(255,255,255,.12); }
+    .tag-chip-input input {
+      flex: 1 1 60px;
+      min-width: 60px;
+      border: none;
+      background: transparent;
+      outline: none;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: .8rem;
+      padding: 3px 2px;
+    }
+    .tag-chip-input input::placeholder { color: var(--text-muted); }
+    .tag-chip-suggestions {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      z-index: 20;
+      max-height: 160px;
       overflow-y: auto;
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 6px 8px;
-      background: var(--surface2);
+      background: var(--surface);
+      box-shadow: 0 12px 32px rgba(0,0,0,.45);
     }
-    .note-tag-checklist .check-label {
-      display: flex;
-      align-items: center;
-      gap: 6px;
+    .tag-chip-suggestions[hidden] { display: none; }
+    .tag-chip-suggestion {
+      padding: 7px 10px;
       font-size: .78rem;
-      margin: 3px 0;
-      cursor: pointer;
       font-family: var(--mono);
       color: var(--text-dim);
+      cursor: pointer;
     }
-    .note-tag-checklist-empty {
-      font-size: .75rem;
-      color: var(--text-muted);
-      line-height: 1.4;
+    .tag-chip-suggestion:hover,
+    .tag-chip-suggestion.active {
+      background: var(--surface2);
+      color: var(--text);
     }
+    .tag-chip-suggestion-create { color: var(--accent); }
 
     .table-wrap {
       overflow-x: auto;
@@ -1298,7 +1357,12 @@
           </div>
           <div class="field">
             <label>Теги заметок <span class="field-hint">(любой из выбранных)</span></label>
-            <div class="note-tag-checklist" id="flt_note_tags"></div>
+            <div class="tag-chip-input" id="flt_note_tags">
+              <div class="tag-chip-box">
+                <input type="text" placeholder="начните вводить тег…" />
+              </div>
+              <div class="tag-chip-suggestions" hidden></div>
+            </div>
           </div>
         </div>
         <div class="btn-row" style="margin-bottom:14px">
@@ -1423,7 +1487,12 @@
           </div>
           <div class="field">
             <label>Теги заметок <span class="field-hint">(любой из выбранных)</span></label>
-            <div class="note-tag-checklist" id="prog_note_tags"></div>
+            <div class="tag-chip-input" id="prog_note_tags">
+              <div class="tag-chip-box">
+                <input type="text" placeholder="начните вводить тег…" />
+              </div>
+              <div class="tag-chip-suggestions" hidden></div>
+            </div>
           </div>
           <div class="field">
             <label>Участник</label>
@@ -1447,7 +1516,10 @@
           </div>
           <div class="plot-card" style="margin-bottom:0">
             <div class="plot-header"><span class="plot-title">Spectrum Overlay</span></div>
-            <div class="plot-body" id="prog_spectrum"></div>
+            <div class="peak-marker-wrap">
+              <div class="plot-body" id="prog_spectrum"></div>
+              <span class="peak-marker" id="prog_peak_marker"></span>
+            </div>
           </div>
           <div class="plot-card" style="margin-bottom:0">
             <div class="plot-header"><span class="plot-title">SDNN Trend Overlay</span></div>
@@ -1484,8 +1556,17 @@
   <div class="modal-card">
     <div class="modal-title">Сессия #<span id="session_notes_id"></span></div>
     <h2 id="session_notes_title">Заметки к сессии</h2>
-    <p class="modal-desc">Опишите переживания и контекст. Добавьте теги через # — по ним можно фильтровать в архиве и прогрессе (например: #утро #глубоко).</p>
-    <textarea id="session_notes_input" placeholder="Глубокое расслабление после 10-й минуты #утро #спокойствие" maxlength="4000"></textarea>
+    <p class="modal-desc">Опишите переживания и контекст.</p>
+    <textarea id="session_notes_input" placeholder="Глубокое расслабление после 10-й минуты" maxlength="4000"></textarea>
+    <div class="field" style="margin-top:14px">
+      <label>Теги <span class="field-hint">(для фильтра в архиве и прогрессе)</span></label>
+      <div class="tag-chip-input" id="session_notes_tags">
+        <div class="tag-chip-box">
+          <input type="text" placeholder="добавить тег…" />
+        </div>
+        <div class="tag-chip-suggestions" hidden></div>
+      </div>
+    </div>
     <div class="modal-actions">
       <button type="button" class="btn" id="session_notes_skip">Пропустить</button>
       <button type="button" class="btn btn-primary" id="session_notes_save">Сохранить</button>
