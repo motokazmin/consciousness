@@ -114,6 +114,8 @@ class SessionManager:
         source_kind: str,
         address: str | None,
         minutes: float | None,
+        opt_guided_phrases: bool = False,
+        opt_audio_biofeedback: bool = False,
     ) -> RunningSession:
         if source_kind not in ("mock", "ble"):
             raise ValueError(f"неизвестный source: {source_kind}")
@@ -125,9 +127,19 @@ class SessionManager:
         label = _source_label(source_kind, address, mock_tag=tag if source_kind == "mock" else None)
         started = time.time()
         cur = conn.execute(
-            "INSERT INTO sessions (tag, source, session_name, participant, started, drift_events) "
-            "VALUES (?, ?, ?, ?, ?, 0)",
-            (tag, label, session_name, participant, started),
+            "INSERT INTO sessions "
+            "(tag, source, session_name, participant, started, drift_events, "
+            "opt_guided_phrases, opt_audio_biofeedback) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+            (
+                tag,
+                label,
+                session_name,
+                participant,
+                started,
+                int(opt_guided_phrases),
+                int(opt_audio_biofeedback),
+            ),
         )
         session_id = int(cur.lastrowid)
         conn.commit()

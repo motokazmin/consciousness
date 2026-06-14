@@ -43,7 +43,7 @@ function syncGuidedPhraseOptionsVisibility() {
 function guidedPhraseOptions() {
   const el = $("opt_guided_phrases");
   const intervalEl = $("guided_phrase_interval");
-  let phraseMinIntervalSec = 90;
+  let phraseMinIntervalSec = 20;
   if (intervalEl) {
     const raw = intervalEl.value.trim().replace(",", ".");
     const n = parseFloat(raw);
@@ -327,6 +327,108 @@ async function resolveSessionTag() {
   return slug;
 }
 
+function fillNoteTagChecklist(container, tags) {
+  if (!container) return;
+  const prev = new Set(
+    [...container.querySelectorAll(".note-tag-cb:checked")].map((cb) => cb.value)
+  );
+  container.innerHTML = "";
+  if (!tags.length) {
+    container.innerHTML = '<span class="note-tag-checklist-empty">нет тегов в заметках</span>';
+    return;
+  }
+  for (const tag of tags) {
+    const label = document.createElement("label");
+    label.className = "check-label";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = tag;
+    cb.className = "note-tag-cb";
+    if (prev.has(tag)) cb.checked = true;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(`#${tag}`));
+    container.appendChild(label);
+  }
+}
+
+function selectedNoteTags(container) {
+  if (!container) return [];
+  return [...container.querySelectorAll(".note-tag-cb:checked")].map((cb) => cb.value);
+}
+
+function appendNoteTagFilters(url, container) {
+  for (const tag of selectedNoteTags(container)) {
+    url += `&note_tag=${encodeURIComponent(tag)}`;
+  }
+  return url;
+}
+
+async function loadNoteTags() {
+  try {
+    const { tags } = await api("/api/note-tags");
+    fillNoteTagChecklist($("flt_note_tags"), tags);
+    fillNoteTagChecklist($("prog_note_tags"), tags);
+  } catch (e) {
+    console.warn("loadNoteTags failed:", e);
+  }
+}
+
+function parseNoteTagsClient(text) {
+  if (!text) return [];
+  const re = /#([\w\-а-яА-ЯёЁ]+)/gu;
+  const seen = new Set();
+  const out = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const tag = m[1].toLowerCase();
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      out.push(tag);
+    }
+  }
+  return out;
+}
+
+function noteTagsHtml(tags) {
+  if (!tags?.length) return '<span style="color:var(--text-muted)">—</span>';
+  return tags.map((t) => `<span class="note-tag-pill">#${escapeHtml(t)}</span>`).join("");
+}
+
+function isoLocalDate(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function dateRangeFromPreset(preset) {
+  if (!preset) return { started_after: "", started_before: "" };
+  const today = new Date();
+  const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  if (preset === "today") {
+    const iso = isoLocalDate(startOfDay);
+    return { started_after: iso, started_before: iso };
+  }
+  if (preset === "yesterday") {
+    const y = new Date(startOfDay);
+    y.setDate(y.getDate() - 1);
+    const iso = isoLocalDate(y);
+    return { started_after: iso, started_before: iso };
+  }
+  const days = parseInt(preset, 10);
+  if (Number.isFinite(days) && days > 0) {
+    const from = new Date(startOfDay);
+    from.setDate(from.getDate() - (days - 1));
+    return { started_after: isoLocalDate(from), started_before: isoLocalDate(startOfDay) };
+  }
+  return { started_after: "", started_before: "" };
+}
+
+function appendDateFilters(url, periodEl) {
+  const { started_after, started_before } = dateRangeFromPreset(periodEl?.value || "");
+  if (started_after) url += `&started_after=${encodeURIComponent(started_after)}`;
+  if (started_before) url += `&started_before=${encodeURIComponent(started_before)}`;
+  return url;
+}
+
 async function loadSessionTypes() {
   try {
     const { session_types } = await api("/api/session-types");
@@ -343,6 +445,7 @@ async function loadSessionTypes() {
     fillTagSelect(session_types);
     fillFilterSelect($("flt_tag"), session_types);
     fillFilterSelect($("prog_tag"), session_types);
+    await loadNoteTags();
   } catch (e) {
     console.warn("loadSessionTypes failed:", e);
   }
@@ -711,6 +814,7 @@ async function saveSessionNotes() {
       body: JSON.stringify({ session_name: text || null }),
     });
     if ($("session_name")) $("session_name").value = text;
+    await loadNoteTags();
     if (text) {
       setStatus(`Заметки к сессии #${sessionId} сохранены.`);
     }
@@ -775,6 +879,7 @@ async function startLive() {
     setErr(String(e.message || e));
     return;
   }
+  const opts = { ...audioOptions(), ...guidedPhraseOptions() };
   const body = {
     participant,
     tag,
@@ -782,10 +887,11 @@ async function startLive() {
     source,
     address: source === "ble" ? address : null,
     minutes: minutes != null && !Number.isNaN(minutes) && minutes > 0 ? minutes : null,
+    opt_guided_phrases: opts.guidedPhrases,
+    opt_audio_biofeedback: opts.audioBiofeedback,
   };
 
   try {
-    const opts = { ...audioOptions(), ...guidedPhraseOptions() };
     audioMode = currentAudioMode();
 
     const res = await api("/api/sessions", { method: "POST", body: JSON.stringify(body) });
@@ -885,16 +991,20 @@ async function loadArchive() {
   let url = "/api/sessions?limit=100";
   if (p) url += `&participant=${encodeURIComponent(p)}`;
   if (t) url += `&tag=${encodeURIComponent(t)}`;
+  url = appendNoteTagFilters(url, $("flt_note_tags"));
+  url = appendDateFilters(url, $("flt_period"));
   const { sessions } = await api(url);
   const tb = $("arch_rows");
   tb.innerHTML = "";
   for (const s of sessions) {
     const dur = s.ended ? Math.round((s.ended - s.started) / 60) : null;
+    const tags = s.note_tags?.length ? s.note_tags : parseNoteTagsClient(s.session_name);
     const tr = document.createElement("tr");
     tr.innerHTML =
       `<td style="color:var(--text-dim);font-family:var(--mono);font-size:.8rem">${s.id}</td>` +
       `<td>${escapeHtml(s.participant || "")}</td>` +
       `<td>${tagPill(s.tag)}</td>` +
+      `<td>${noteTagsHtml(tags)}</td>` +
       `<td style="color:var(--text-dim);font-size:.78rem">${escapeHtml(String(s.source).slice(0, 38))}</td>` +
       `<td style="font-size:.82rem">${fmtTime(s.started)}</td>` +
       `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--text-muted)'>…</span>"}</td>` +
@@ -920,13 +1030,17 @@ function renderArchNotes(sum) {
   const textEl = $("arch_notes_text");
   if (!block || !textEl) return;
   const notes = (sum?.session_name || "").trim();
+  const tags = sum?.note_tags?.length ? sum.note_tags : parseNoteTagsClient(notes);
   if (!notes) {
     block.hidden = true;
     textEl.textContent = "";
     return;
   }
   block.hidden = false;
-  textEl.textContent = notes;
+  const tagsRow = tags.length
+    ? `<div style="margin-bottom:8px">${noteTagsHtml(tags)}</div>`
+    : "";
+  textEl.innerHTML = tagsRow + escapeHtml(notes).replace(/\n/g, "<br>");
 }
 
 function renderSummaryGrid(sum) {
@@ -946,6 +1060,8 @@ function renderSummaryGrid(sum) {
     ["Длительность", durMin != null ? durMin.toFixed(1) + " мин" : "—"],
     ["vs baseline", vsBl],
     ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
+    ["Guided meditation", sum.opt_guided_phrases ? "да" : "нет"],
+    ["Аудио-биофидбек", sum.opt_audio_biofeedback ? "да" : "нет"],
   ];
   for (const [label, value] of fields) {
     const cell = document.createElement("div");
@@ -1110,6 +1226,22 @@ $("arch_rmssd_mode")?.addEventListener("change", () => {
 });
 
 $("btn_reload").addEventListener("click", loadArchive);
+["flt_participant", "flt_tag", "flt_period"].forEach((id) => {
+  $(id)?.addEventListener("change", () => { loadArchive().catch((e) => setErr(String(e.message || e))); });
+  if (id === "flt_participant") {
+    $(id)?.addEventListener("input", () => {
+      clearTimeout(window._fltArchT);
+      window._fltArchT = setTimeout(() => {
+        loadArchive().catch((e) => setErr(String(e.message || e)));
+      }, 350);
+    });
+  }
+});
+$("flt_note_tags")?.addEventListener("change", (e) => {
+  if (e.target.matches(".note-tag-cb")) {
+    loadArchive().catch((err) => setErr(String(err.message || err)));
+  }
+});
 
 // ── PROGRESS ──────────────────────────────────────────────────────────────
 const PROG_COLORS = [
@@ -1210,13 +1342,11 @@ function buildProgressPlots() {
 async function loadProgress() {
   setProgErr("");
   const tag = $("prog_tag")?.value || "";
-  const from = $("prog_from")?.value || "";
-  const to = $("prog_to")?.value || "";
   const participant = $("prog_participant")?.value?.trim() || "";
   let url = "/api/progress/analysis?max_sessions=40";
   if (tag) url += `&tag=${encodeURIComponent(tag)}`;
-  if (from) url += `&started_after=${encodeURIComponent(from)}`;
-  if (to) url += `&started_before=${encodeURIComponent(to)}`;
+  url = appendNoteTagFilters(url, $("prog_note_tags"));
+  url = appendDateFilters(url, $("prog_period"));
   if (participant) url += `&participant=${encodeURIComponent(participant)}`;
 
   try {

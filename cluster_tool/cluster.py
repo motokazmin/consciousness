@@ -1,37 +1,41 @@
 """
-cluster.py — HDBSCAN кластеризация накопленных HRV-данных
+Offline HDBSCAN-кластеризация накопленных HRV-данных.
+
+Отдельный инструмент — не часть веб-приложения hrv_web.
+Читает точки RMSSD из SQLite-базы HRV Monitor.
 
 Usage:
-    python cluster.py                        # все реальные сессии
-    python cluster.py --include-mock         # включить mock-данные
-    python cluster.py --min-cluster-size 10  # тюнинг HDBSCAN
+    python -m cluster_tool --db hrv_data.sqlite
+    python -m cluster_tool --db /path/to/hrv_data.sqlite --include-mock
+    python -m cluster_tool --db hrv_data.sqlite --min-cluster-size 10
 """
+
+from __future__ import annotations
 
 import argparse
 import sqlite3
 from pathlib import Path
 
-from hrv_core.constants import DB_PATH
-from hrv_core.session_types import TAG_MARKERS
-
-import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import numpy as np
 from sklearn.preprocessing import StandardScaler
+
+from cluster_tool.markers import marker_for_tag
 
 try:
     import hdbscan
-except ImportError:
-    raise SystemExit("pip install hdbscan")
+except ImportError as e:
+    raise SystemExit(
+        "Установите зависимости cluster_tool: pip install -r cluster_tool/requirements.txt"
+    ) from e
 
 
-# ─── Load ─────────────────────────────────────────────────────────────────────
+def load_points(db_path: Path, include_mock: bool) -> list[dict]:
+    if not db_path.is_file():
+        raise SystemExit(f"DB not found: {db_path}")
 
-def load_points(include_mock: bool) -> list[dict]:
-    if not DB_PATH.exists():
-        raise SystemExit(f"DB not found: {DB_PATH}")
-
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     source_filter = "" if include_mock else "AND s.source NOT LIKE 'mock%'"
 
     rows = conn.execute(f"""
@@ -49,25 +53,20 @@ def load_points(include_mock: bool) -> list[dict]:
 
     return [{"ts": r[0], "rmssd": r[1], "tag": r[2], "hour": r[3]} for r in rows]
 
-# ─── Cluster ──────────────────────────────────────────────────────────────────
 
 def run_clustering(points: list[dict], min_cluster_size: int):
     rmssd = np.array([p["rmssd"] for p in points]).reshape(-1, 1)
-
-    X = rmssd
-    X_scaled = StandardScaler().fit_transform(X)
+    X_scaled = StandardScaler().fit_transform(rmssd)
 
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
         min_samples=5,
         metric="euclidean",
     )
-    labels      = clusterer.fit_predict(X_scaled)
-    probs       = clusterer.probabilities_
+    labels = clusterer.fit_predict(X_scaled)
+    probs = clusterer.probabilities_
+    return labels, probs, rmssd
 
-    return labels, probs, X
-
-# ─── Summary ──────────────────────────────────────────────────────────────────
 
 def print_summary(points, labels):
     nonempty = [c for c in set(labels) if c != -1]
@@ -79,12 +78,12 @@ def print_summary(points, labels):
 
     for cid in sorted(set(labels)):
         mask = labels == cid
-        pts  = [p for p, m in zip(points, mask) if m]
+        pts = [p for p, m in zip(points, mask) if m]
         if not pts:
             continue
 
         rmssd_vals = [p["rmssd"] for p in pts]
-        tags = {}
+        tags: dict[str, int] = {}
         for p in pts:
             tags[p["tag"]] = tags.get(p["tag"], 0) + 1
         dominant = max(tags, key=tags.get)
@@ -98,61 +97,52 @@ def print_summary(points, labels):
 
     print(f"{'─'*50}\n")
 
-# ─── Plot ─────────────────────────────────────────────────────────────────────
 
-def plot_clusters(points, labels, probs, X):
+def plot_clusters(points, labels, probs):
     fig, (ax_main, ax_hour) = plt.subplots(1, 2, figsize=(14, 6))
     fig.patch.set_facecolor("#111")
     fig.suptitle("HRV Clustering", color="#ccc", fontsize=12)
 
     nonempty_c = sorted(c for c in set(labels) if c != -1)
     n_clusters = len(nonempty_c)
-    cmap       = plt.colormaps["tab10"].resampled(max(n_clusters, 1))
+    cmap = plt.colormaps["tab10"].resampled(max(n_clusters, 1))
 
-    # ── main: RMSSD vs hour, colored by cluster ──
     ax_main.set_facecolor("#1a1a1a")
     ax_main.tick_params(colors="#777")
     ax_main.spines[:].set_color("#2a2a2a")
     ax_main.set_xlabel("Hour of day", color="#999")
-    ax_main.set_ylabel("RMSSD (ms)",  color="#999")
+    ax_main.set_ylabel("RMSSD (ms)", color="#999")
     ax_main.set_title("Clusters", color="#bbb", fontsize=10)
 
-    # background: all points as noise (gray)
-    for i, (p, lbl, prob) in enumerate(zip(points, labels, probs)):
+    for p, lbl, prob in zip(points, labels, probs):
         color = "#333" if lbl == -1 else cmap(lbl)
         alpha = max(0.15, float(prob)) if lbl != -1 else 0.2
-        ax_main.scatter(p["hour"], p["rmssd"],
-                        c=[color], alpha=alpha, s=18, linewidths=0)
+        ax_main.scatter(p["hour"], p["rmssd"], c=[color], alpha=alpha, s=18, linewidths=0)
 
-    # foreground: tagged session points with distinct markers
     legend_handles = []
-    for tag, (marker, size) in TAG_MARKERS.items():
-        tagged = [p for p, lbl in zip(points, labels)
-                  if p["tag"] == tag and lbl != -1]
-        if not tagged:
+    seen_tags: set[str] = set()
+    for p, lbl in zip(points, labels):
+        tag = p["tag"]
+        if lbl == -1 or not tag or tag in seen_tags:
             continue
-        xs = [p["hour"]  for p in tagged]
-        ys = [p["rmssd"] for p in tagged]
-        cs = [cmap(lbl) for p, lbl in zip(points, labels)
-              if p["tag"] == tag and lbl != -1]
+        seen_tags.add(tag)
+        marker, size = marker_for_tag(tag)
+        tagged = [pt for pt, l in zip(points, labels) if pt["tag"] == tag and l != -1]
+        xs = [pt["hour"] for pt in tagged]
+        ys = [pt["rmssd"] for pt in tagged]
+        cs = [cmap(l) for pt, l in zip(points, labels) if pt["tag"] == tag and l != -1]
         ax_main.scatter(xs, ys, c=cs, marker=marker, s=size,
                         edgecolors="white", linewidths=0.5, zorder=5)
-        legend_handles.append(
-            mpatches.Patch(label=tag, facecolor="#888")
-        )
+        legend_handles.append(mpatches.Patch(label=tag, facecolor="#888"))
 
-    # cluster color legend
     for cid in nonempty_c:
         legend_handles.append(
             mpatches.Patch(color=cmap(cid), label=f"cluster {cid}")
         )
-    legend_handles.append(
-        mpatches.Patch(color="#333", label="noise")
-    )
+    legend_handles.append(mpatches.Patch(color="#333", label="noise"))
     ax_main.legend(handles=legend_handles, fontsize=8,
                    facecolor="#222", labelcolor="#bbb", framealpha=0.8)
 
-    # ── right: RMSSD distribution per cluster ──
     ax_hour.set_facecolor("#1a1a1a")
     ax_hour.tick_params(colors="#777")
     ax_hour.spines[:].set_color("#2a2a2a")
@@ -176,15 +166,24 @@ def plot_clusters(points, labels, probs, X):
     plt.tight_layout()
     plt.show()
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="HRV HDBSCAN clustering")
-    parser.add_argument("--include-mock",     action="store_true")
+    parser = argparse.ArgumentParser(description="HRV HDBSCAN clustering (offline)")
+    parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Путь к SQLite-базе HRV Monitor (sessions, hrv_points)",
+    )
+    parser.add_argument("--include-mock", action="store_true")
     parser.add_argument("--min-cluster-size", type=int, default=15)
     args = parser.parse_args()
 
-    points = load_points(args.include_mock)
+    db_path = args.db.expanduser().resolve()
+    print(f"Database: {db_path}")
+
+    points = load_points(db_path, args.include_mock)
     if len(points) < args.min_cluster_size * 2:
         raise SystemExit(
             f"Not enough data: {len(points)} points. "
@@ -192,9 +191,9 @@ def main():
         )
 
     print(f"Loaded {len(points)} points")
-    labels, probs, X = run_clustering(points, args.min_cluster_size)
+    labels, probs, _X = run_clustering(points, args.min_cluster_size)
     print_summary(points, labels)
-    plot_clusters(points, labels, probs, X)
+    plot_clusters(points, labels, probs)
 
 
 if __name__ == "__main__":

@@ -2,15 +2,11 @@
 
 ## Контекст и цель
 
-Система мониторинга осознанности в реальном времени на основе HRV (Heart Rate Variability).
-Цель MVP — проверить гипотезу: **можно ли по одному RMSSD-сигналу надёжно выделить
-кластеры состояний пользователя, соответствующие его субъективным ощущениям.**
+Система мониторинга HRV (Heart Rate Variability) в реальном времени.
+Цель MVP — **записывать тегированные сессии**, смотреть live-графики RMSSD, сравнивать практики в архиве и на вкладке «Прогресс».
 
-Пользователь проводит контролируемые эксперименты (медитация, фокусная работа, скроллинг)
-с тегированием сессий. После накопления данных — кластеризация HDBSCAN только по RMSSD,
-визуальная валидация: попадают ли tagged-сессии в ожидаемые кластеры.
-Час суток сохраняется в БД и используется на scatter-графике (ось X) для визуального
-анализа активности по времени, но в признаки алгоритма не включается.
+Пользователь проводит контролируемые эксперименты (медитация, работа, релаксация и т.д.)
+с типом активности и тегами в заметках (`#утро`, `#глубоко`). Данные накапливаются в SQLite для последующего анализа.
 
 ---
 
@@ -18,11 +14,9 @@
 
 - **Python 3.12**, Ubuntu
 - **bleak** (в `requirements.txt`: **0.22.x**, не 1.x+) — BLE к Polar H10; **bleak ≥1** требует **BlueZ ≥5.55**, на Ubuntu 20.04 часто **5.53** — тогда `pip install 'bleak>=0.22.3,<1'`
-- **numpy** — вычисления RMSSD и кластеризация
-- **matplotlib** — только offline-графики в `cluster.py`
+- **numpy** — вычисления RMSSD
 - **FastAPI + uvicorn** — единственный UI: форма сессии, WebSocket, архив; фронт: **uPlot** (CDN)
 - **SQLite** — локальное хранилище точек, сессий и персонального baseline по часу
-- **hdbscan + scikit-learn** — кластеризация по RMSSD (`cluster.py`)
 - **notify-send** — опционально в `HRVSessionState` (в веб-сессии отключён)
 
 Зависимости: файл **`requirements.txt`** в корне проекта. Установка:
@@ -102,24 +96,76 @@ def compute_rmssd(rr_list):
 ### SQLite-схема
 
 ```sql
-sessions        (id, tag, source, session_name, participant, started, ended, drift_events)
+sessions        (id, tag, source, session_name, participant, started, ended,
+                 drift_events, opt_guided_phrases, opt_audio_biofeedback)
 hrv_points      (id, session_id, ts, rr_ms, rmssd)
 baseline        (hour, rmssd_mean, n_samples, updated_at)  -- hour 0–23, локальное время
-session_types   (slug, label, phrase_prefix, mock_profile, cluster_marker, is_custom)
+session_types   (slug, label, phrase_prefix, mock_profile, chart_profile, is_custom)
 meditation_phrase_log (…)  -- лог guided mp3-фраз (meditation / relaxation)
 ```
 
-**`tag`** — slug типа активности в `sessions` (строка): системные — `meditation`, `relaxation`, `test`, `focus`, `scroll`, `untagged`. Справочник для UI и mock-профилей — таблица **`session_types`** (seed из `hrv_core/session_types.py` при первом создании БД). В веб-форме можно добавить свой тип («Новая активность…») — он сохраняется через `POST /api/session-types`. Старый slug **`rest`** переименован в **`relaxation`**.
+### Тегирование сессий
+
+Используются **два независимых механизма** — «тип активности» и «теги заметок».
+
+#### 1. Тип активности (`sessions.tag`)
+
+Slug из справочника **`session_types`**. Задаётся **до старта** в выпадающем списке «Тип активности».
+
+**Системные типы по умолчанию** (seed из [`hrv_core/session_types.py`](hrv_core/session_types.py)):
+
+| slug | label |
+|------|--------|
+| `relaxation` | Релаксация |
+| `meditation` | Медитация |
+| `test` | Тестирование |
+| `yoga` | Йога |
+| `sleep` | Сон |
+| `work` | Работа |
+| `mental_training` | Ментальная тренировка |
+
+Свой тип: «Новая активность…» в форме → `POST /api/session-types` (slug + label). Системные типы удалить нельзя; устаревшие встроенные slug-и при миграции БД убираются из `session_types`, но **старые сессии** с таким `tag` в таблице `sessions` остаются.
+
+Фильтрация: поле **«Тип активности»** на вкладках **Архив** и **Прогресс**.
+
+#### 2. Теги заметок (`#…` в `sessions.session_name`)
+
+Свободный текст заметки + **хештеги** для личной разметки контекста. Хранятся в поле **`session_name`** (в UI — «Заметка»; после «Стоп» можно дополнить в модальном окне).
+
+**Синтаксис:** `#` сразу перед словом, без пробела:
+
+```
+вечерняя практика #утро #глубоко
+#эксперимент дыхание 4-7-8, отвлекался
+```
+
+**Правила** (реализация: [`hrv_core/note_tags.py`](hrv_core/note_tags.py)):
+
+| Правило | Пример |
+|---------|--------|
+| Допустимые символы в теге | буквы (латиница и кириллица), цифры, `-`, `_` |
+| Максимальная длина одного тега | 32 символа |
+| Регистр | не важен; в фильтрах и API — нижний регистр (`#Утро` → `утро`) |
+| Пробел завершает тег | `#утро день` → один тег `утро`, слово «день» — обычный текст |
+| Повтор в одной заметке | дубликаты игнорируются |
+| Несколько тегов | `#утро #спокойствие #дома` |
+
+**Что не является тегом:** тип активности из списка (медитация, йога…) — это отдельное поле. Не нужно дублировать его в `#meditation`, если достаточно выбрать тип в форме.
+
+**Фильтрация:** на **Архиве** и **Прогрессе** — чекбоксы **«Теги заметок»** (список из `GET /api/note-tags`). Можно выбрать несколько: показываются сессии, где есть **хотя бы один** из отмеченных тегов. API: повторяющийся параметр `note_tag=утро&note_tag=глубоко`.
+
+**Когда писать теги:** до старта в поле «Заметка», после «Стоп» в модальном окне или позже через `PATCH /api/sessions/{id}` (`session_name`).
 
 **Веб: типы активности**
 
 | Действие | API |
 |----------|-----|
-| Список для формы и фильтров | `GET /api/session-types` → `{ session_types: [{ slug, label, phrase_prefix, mock_profile, is_custom }, …] }` |
+| Список для формы и фильтров | `GET /api/session-types` → `{ session_types: [{ slug, label, phrase_prefix, mock_profile, chart_profile, is_custom }, …] }` |
+| Список тегов заметок | `GET /api/note-tags` → `{ tags: ["утро", "глубоко", …] }` |
 | Новый пользовательский тип | `POST /api/session-types` — body `{ slug, label }` |
 | Удалить пользовательский | `DELETE /api/session-types/{slug}` (системные — 403) |
 
-При старте сессии `POST /api/sessions` принимает `tag` (slug), `participant`, `source`, опционально `session_name`, `address`, `minutes`. Полный список endpoint — [ARCHITECTURE.md § Веб-API](ARCHITECTURE.md#веб-api-кратко).
+При старте сессии `POST /api/sessions` принимает `tag` (slug), `participant`, `source`, опционально `session_name`, `address`, `minutes`, `opt_guided_phrases`, `opt_audio_biofeedback`. Полный список endpoint — [ARCHITECTURE.md § Веб-API](ARCHITECTURE.md#веб-api-кратко).
 `source` — строка источника, например: `"mock"`; `"Polar H10  AA:BB:…"` (BLE).
 
 ### MockHRVSource
@@ -237,11 +283,10 @@ masterGain
 - [x] `MockHRVSource` — AR(1), цикл состояний, профиль meditation (RSA)
 - [x] `PolarH10Source` — BLE, реконнект, `start_notify` с таймаутом/ретраями, watchdog по отсутствию RR
 - [x] RMSSD на скользящем окне 60 с
-- [x] **Веб-UI** (`python -m hrv_web`): live-графики RR + RMSSD (uPlot), архив, вкладка «Прогресс», guided mp3-фразы; типы активности в БД (`/api/session-types`)
-- [x] SQLite: `sessions`, `hrv_points`, `baseline`, `session_types`, `meditation_phrase_log`; обновление baseline при завершении сессии
+- [x] **Веб-UI** (`python -m hrv_web`): live-графики RR + RMSSD (uPlot), архив, вкладка «Прогресс», guided mp3-фразы; типы активности в БД; теги заметок `#…`; фильтры по периоду и тегам
+- [x] SQLite: `sessions`, `hrv_points`, `baseline`, `session_types`, `meditation_phrase_log`; опции сессии (`opt_guided_phrases`, `opt_audio_biofeedback`)
 - [x] Drift detection (флаг в WebSocket; `notify-send` в веб-сессии отключён)
-- [x] **Session summary** после «Стоп»: длительность, min/mean/max RMSSD, drift-события, **vs baseline**
-- [x] `cluster.py` — HDBSCAN по RMSSD, matplotlib-графики (scatter, boxplot)
+- [x] **Session summary** после «Стоп»: длительность, min/mean/max RMSSD, drift-события, **vs baseline**, включённые опции
 - [x] `requirements.txt`
 - [x] **Web Audio биофидбек** — `hrv_audio_engine.js`: пульс, фоновая текстура, трансовый pad по RMSSD (см. раздел *Веб-аудио*)
 - [x] `tests/` — unittest (pipeline, tags, delete_session)
@@ -264,7 +309,6 @@ hrv_web/          — FastAPI + статика (единственный UI за
   static/hrv_audio_engine.js — Web Audio: triggerBeat, текстуры, rmssd pad
   static/meditation_engine.js — guided mp3-фразы (meditation / relaxation)
   static/index.html          — UI режимов «Дышащий Эмбиент» / «Трансовый Порог»
-cluster.py        — offline-кластеризация + matplotlib-графики
 requirements.txt  — зависимости pip
 hrv_data.sqlite   — база данных (создаётся автоматически)
 ```
@@ -285,11 +329,6 @@ python -m hrv_web
 # mock без железа: в форме source = Mock, выберите тип активности, ▶ Старт
 
 # BLE: source = BLE Polar H10, укажите MAC (AA:BB:CC:DD:EE:FF)
-
-# кластеризация (после накопления данных)
-python cluster.py
-python cluster.py --include-mock
-python cluster.py --min-cluster-size 10
 ```
 
 После «Стоп» в вебе — **session summary** в архиве (кнопка «Сводка»).
@@ -298,28 +337,18 @@ python cluster.py --min-cluster-size 10
 
 ## Mock-данные в веб-UI
 
-Симулятор (`source = mock`) нужен, чтобы отладить пайплайн (графики, БД, кластеризацию) без Bluetooth.
+Симулятор (`source = mock`) нужен, чтобы отладить пайплайн (графики, БД) без Bluetooth.
 
 1. `python -m hrv_web` → http://127.0.0.1:8765/
 2. Укажите участника, тип активности, **Mock (без железа)**, при желании длительность.
 3. ▶ **Старт** — `MockHRVSource` пишет точки в `hrv_data.sqlite`; при **Стоп** обновляется baseline и доступна сводка.
-4. Для **`meditation`** — профиль RSA (спокойный ритм); для остальных тегов — цикл focused → drift → recovering.
-5. После нескольких mock-сессий: `python cluster.py --include-mock`.
-
-### `python cluster.py --include-mock`
-
-**Разведочный анализ уже сохранённых точек, включая mock-сессии.**
-
-- По умолчанию `cluster.py` **отфильтровывает** строки, где `source` выглядит как mock, чтобы не смешивать синтетику с реальными измерениями. Флаг **`--include-mock`** отключает этот фильтр.
-- Имеет смысл только если в базе есть mock-сессии, записанные через веб (`source = mock`).
-
-**Когда использовать:** проверить, что пайплайн кластеризации и графики `cluster.py` работают на накопленных тестовых данных.
+4. Для **`meditation`** — профиль RSA (спокойный ритм); для остальных типов — цикл focused → drift → recovering.
 
 ---
 
 ## Как читать live-графики (веб)
 
-Важно: **RMSSD — это один числовой признак вариабельности сердечного ритма**, а не готовый измеритель «уровня осознанности». В этом MVP **осознанность** вы проверяете **как гипотезу**: совпадают ли *ваши* субъективные метки сессий с участками графика и с кластерами после накопления данных.
+Важно: **RMSSD — это один числовой признак вариабельности сердечного ритма**, а не готовый измеритель «уровня осознанности». Сопоставляйте кривые с **своими метками** (тип активности, теги заметок) и субъективным опытом.
 
 ### RR (верхний график)
 
@@ -338,8 +367,7 @@ python cluster.py --min-cluster-size 10
 
 ### Практический порядок на mock
 
-1. Записать 2–3 сессии с разными тегами (`meditation`, `focus`, …) через **Mock** в вебе.
-2. Сравнить форму кривых на вкладке «Запись» и наложение на «Прогресс».
-3. `python cluster.py --include-mock` — группировка точек на scatter RMSSD × час.
+1. Записать 2–3 сессии с разными **типами активности** (`meditation`, `work`, …) и **тегами заметок** (`#утро`, `#эксперимент`) через **Mock** в вебе.
+2. Сравнить форму кривых на вкладке «Запись» и наложение на «Прогресс» (фильтры по типу, периоду, тегу заметки).
 
 После перехода на **реальный H10** смысл тот же: смотреть **дифференсы и устойчивые участки** относительно своих baseline и своих тегов сессий, а выводы об осознанности оставлять за **самонаблюдением и последующей разметкой**, а не за цветом линии один в один.

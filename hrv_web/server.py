@@ -8,7 +8,7 @@ import queue
 import re
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,7 @@ from hrv_core.analysis import progress_session_analysis, session_analysis
 from hrv_core.constants import DB_PATH
 from hrv_core.db import delete_session, init_db, load_hour_baseline, wipe_all_history
 from hrv_core.summary import session_summary_dict
+from hrv_core.note_tags import note_tag_sql_pattern, parse_note_tags
 from hrv_core.tags import normalize_tag
 from hrv_web.session_manager import MANAGER
 
@@ -32,6 +33,8 @@ class StartSessionBody(BaseModel):
     source: str = Field(..., description="mock | ble")
     address: str | None = None
     minutes: float | None = Field(None, gt=0)
+    opt_guided_phrases: bool = False
+    opt_audio_biofeedback: bool = False
 
 
 class PhraseLogBody(BaseModel):
@@ -85,6 +88,7 @@ def _session_filters(
     *,
     participant: str | None,
     tag: str | None,
+    note_tags: list[str] | None,
     started_after: str | None,
     started_before: str | None,
     ended_only: bool = False,
@@ -99,6 +103,16 @@ def _session_filters(
     if tag:
         q += " AND tag = ?"
         args.append(tag)
+    if note_tags:
+        like_parts: list[str] = []
+        for raw in note_tags:
+            try:
+                pattern = note_tag_sql_pattern(raw).lower()
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
+            like_parts.append("LOWER(session_name) LIKE ? ESCAPE '\\'")
+            args.append(pattern)
+        q += " AND (" + " OR ".join(like_parts) + ")"
     t0 = _parse_date_start(started_after)
     t1 = _parse_date_end(started_before)
     if t0 is not None:
@@ -146,6 +160,20 @@ def _all_session_types(conn) -> list[dict]:
 @app.get("/api/health")
 def health():
     return {"ok": True, "db": str(DB_PATH.resolve())}
+
+
+@app.get("/api/note-tags")
+def list_note_tags():
+    """Уникальные теги из заметок (#утро, #глубоко) для фильтров."""
+    conn = init_db()
+    rows = conn.execute(
+        "SELECT session_name FROM sessions WHERE session_name IS NOT NULL"
+    ).fetchall()
+    conn.close()
+    tags: set[str] = set()
+    for (text,) in rows:
+        tags.update(parse_note_tags(text))
+    return {"tags": sorted(tags)}
 
 
 @app.get("/api/session-types")
@@ -216,6 +244,8 @@ def start_session(body: StartSessionBody):
             source_kind=body.source,
             address=body.address,
             minutes=body.minutes,
+            opt_guided_phrases=body.opt_guided_phrases,
+            opt_audio_biofeedback=body.opt_audio_biofeedback,
         )
     except RuntimeError as e:
         if "already_running" in str(e):
@@ -264,6 +294,7 @@ def patch_session(session_id: int, body: PatchSessionNotesBody):
 def list_sessions(
     participant: str | None = None,
     tag: str | None = None,
+    note_tag: list[str] = Query(default=[]),
     started_after: str | None = None,
     started_before: str | None = None,
     limit: int = 200,
@@ -272,11 +303,13 @@ def list_sessions(
     filt, args = _session_filters(
         participant=participant,
         tag=tag,
+        note_tags=note_tag or None,
         started_after=started_after,
         started_before=started_before,
     )
     q = (
-        "SELECT id, tag, session_name, participant, source, started, ended, drift_events"
+        "SELECT id, tag, session_name, participant, source, started, ended, "
+        "drift_events, opt_guided_phrases, opt_audio_biofeedback"
         + filt
         + " ORDER BY id DESC LIMIT ?"
     )
@@ -294,6 +327,9 @@ def list_sessions(
                 "started": r[5],
                 "ended": r[6],
                 "drift_events": r[7],
+                "opt_guided_phrases": bool(r[8]),
+                "opt_audio_biofeedback": bool(r[9]),
+                "note_tags": parse_note_tags(r[2]),
             }
             for r in rows
         ]
@@ -303,6 +339,7 @@ def list_sessions(
 @app.get("/api/progress")
 def progress_data(
     tag: str | None = None,
+    note_tag: list[str] = Query(default=[]),
     started_after: str | None = None,
     started_before: str | None = None,
     max_sessions: int = 40,
@@ -315,6 +352,7 @@ def progress_data(
     filt, args = _session_filters(
         participant=None,
         tag=tag,
+        note_tags=note_tag or None,
         started_after=started_after,
         started_before=started_before,
         ended_only=True,
@@ -392,13 +430,24 @@ def delete_one_session(session_id: int):
 def get_session(session_id: int):
     conn = init_db()
     row = conn.execute(
-        "SELECT tag, session_name, participant, source, started, ended, drift_events FROM sessions WHERE id = ?",
+        "SELECT tag, session_name, participant, source, started, ended, drift_events, "
+        "opt_guided_phrases, opt_audio_biofeedback FROM sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
     if not row:
         conn.close()
         raise HTTPException(404)
-    tag, session_name, participant, source, started, ended, drift_n = row
+    (
+        tag,
+        session_name,
+        participant,
+        source,
+        started,
+        ended,
+        drift_n,
+        opt_guided,
+        opt_audio,
+    ) = row
     if ended is None:
         conn.close()
         raise HTTPException(400, "Сессия ещё не завершена — сводка после stop")
@@ -406,6 +455,10 @@ def get_session(session_id: int):
     baseline_at_start = load_hour_baseline(conn, hour)
     summary = session_summary_dict(conn, session_id, baseline_at_start, int(drift_n or 0))
     conn.close()
+    if summary is not None:
+        summary["opt_guided_phrases"] = bool(opt_guided)
+        summary["opt_audio_biofeedback"] = bool(opt_audio)
+        summary["note_tags"] = parse_note_tags(session_name)
     return summary
 
 
@@ -437,6 +490,7 @@ def session_analysis_endpoint(session_id: int, max_points: int = 12_000):
 def progress_analysis(
     tag: str | None = None,
     participant: str | None = None,
+    note_tag: list[str] = Query(default=[]),
     started_after: str | None = None,
     started_before: str | None = None,
     max_sessions: int = 40,
@@ -449,6 +503,7 @@ def progress_analysis(
     filt, args = _session_filters(
         participant=participant,
         tag=tag,
+        note_tags=note_tag or None,
         started_after=started_after,
         started_before=started_before,
         ended_only=True,

@@ -1,9 +1,6 @@
 # bleak 1.x+ требует BlueZ ≥5.55; на Ubuntu 20.04 (5.53) — bleak 0.22.x
 bleak>=0.22.3,<1.0
 numpy>=1.26
-matplotlib>=3.8
-hdbscan>=0.8
-scikit-learn>=1.3
 scipy>=1.11
 fastapi>=0.110
 uvicorn[standard]>=0.27
