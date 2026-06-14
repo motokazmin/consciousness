@@ -72,7 +72,7 @@ def bluez_too_old_message(bluez: tuple[int, int]) -> str:
         "Варианты:\n"
         "  1) Обновить BlueZ в системе (Ubuntu 22.04+ / свежий дистрибутив), или\n"
         "  2) В venv: pip install 'bleak>=0.22.3,<1'  (поддерживает BlueZ 5.34+, в т.ч. 5.53)\n"
-        "  3) Использовать ANT+: --ant-plus или --ant-fallback"
+        "  3) Укажите MAC датчика вручную в веб-форме"
     )
 
 

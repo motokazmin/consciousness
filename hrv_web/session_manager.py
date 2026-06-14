@@ -12,7 +12,7 @@ from typing import Any
 
 from hrv_core.db import init_db, load_hour_baseline, update_session_baseline
 from hrv_core.pipeline import HRVSessionState
-from hrv_core.sources import build_source, require_openant
+from hrv_core.sources import build_source
 from hrv_core.session_types import SESSION_TYPES
 from hrv_core.summary import session_summary_dict
 
@@ -25,10 +25,6 @@ def _source_label(kind: str, address: str | None, *, mock_tag: str | None = None
         return "mock"
     if kind == "ble":
         return f"Polar H10  {address}"
-    if kind == "ant":
-        return "Polar H10 ANT+"
-    if kind == "ble_ant_fallback":
-        return f"Polar H10 BLE {address} (+ANT fallback)"
     return kind
 
 
@@ -119,8 +115,8 @@ class SessionManager:
         address: str | None,
         minutes: float | None,
     ) -> RunningSession:
-        if source_kind in ("ant", "ble_ant_fallback"):
-            require_openant()
+        if source_kind not in ("mock", "ble"):
+            raise ValueError(f"неизвестный source: {source_kind}")
         with self._lock:
             if self._running is not None:
                 raise RuntimeError("already_running")
@@ -145,10 +141,7 @@ class SessionManager:
             source_kind,
             session_stop=stop_event,
             address=address,
-            conn=conn,
-            session_id=session_id,
             mock_tag=tag if source_kind == "mock" else None,
-            conn_lock=conn_lock,
         )
         rs = RunningSession(
             session_id=session_id,

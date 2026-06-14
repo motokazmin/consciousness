@@ -8,5 +8,3 @@ scipy>=1.11
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.0
-
-# Опционально (ANT+ через Garmin USB Stick): pip install 'openant>=1.3'

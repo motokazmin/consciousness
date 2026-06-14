@@ -24,14 +24,11 @@
 - **SQLite** — локальное хранилище точек, сессий и персонального baseline по часу
 - **hdbscan + scikit-learn** — кластеризация по RMSSD (`cluster.py`)
 - **notify-send** — опционально в `HRVSessionState` (в веб-сессии отключён)
-- **openant** (опционально) — ANT+ через USB ANT Stick; в веб-форме: `source = ant` или `ble_ant_fallback`
 
-Зависимости: файл **`requirements.txt`** в корне проекта (без обязательного `openant`; см. комментарий в файле). Установка:
+Зависимости: файл **`requirements.txt`** в корне проекта. Установка:
 
 ```bash
 pip install -r requirements.txt
-# при необходимости ANT+:
-pip install 'openant>=1.3'
 ```
 
 ---
@@ -52,17 +49,13 @@ class HRVSource(ABC):
 |---|---|
 | `MockHRVSource` | Симуляция RR через AR(1) процесс, цикл состояний focused→drift→recovering |
 | `PolarH10Source` | BLE-подключение к реальному Polar H10, парсинг GATT 0x2A37 |
-| `AntPlusHRVSource` | ANT+ Heart Rate (в т.ч. Polar H10 с включённым ANT+), USB-донгл, библиотека **openant** |
-| `FallbackBleAntSource` | Сначала BLE по MAC из формы; если за окно нет ни одного RR — переход на **`AntPlusHRVSource`** |
 
-Переключение — поле **`source`** в веб-форме: `mock`, `ble`, `ant`, `ble_ant_fallback`; для BLE/fallback — MAC в **`address`**.
-
-У **`PolarH10Source`** есть опциональный внешний **`extra_stop`** (`threading.Event`), чтобы составной режим мог оборвать BLE без завершения всей сессии.
+Переключение — поле **`source`** в веб-форме: `mock`, `ble`; для BLE — MAC в **`address`**.
 
 ### Поток данных (веб)
 
 ```
-HRVSource (BLE asyncio thread / mock thread / ANT+ openant thread)
+HRVSource (BLE asyncio thread / mock thread)
     ↓  callback(rr_ms, ts)  — per beat
 SessionManager.on_beat() → HRVSessionState.process_beat()
     ├── compute_rmssd(), drift check
@@ -76,7 +69,7 @@ FastAPI + браузер (app.js)
     — guided mp3-фразы (meditation / relaxation)
 ```
 
-BLE asyncio loop живёт в daemon-треде; поток ANT+ — отдельный daemon-тред (**openant** `Node`). Обмен с UI — через `queue.Queue` (WebSocket) и SQLite (`check_same_thread=False`).
+BLE asyncio loop живёт в daemon-треде. Обмен с UI — через `queue.Queue` (WebSocket) и SQLite (`check_same_thread=False`).
 
 ### Аудио-биофидбек (веб)
 
@@ -127,7 +120,7 @@ meditation_phrase_log (…)  -- лог guided mp3-фраз (meditation / relaxat
 | Удалить пользовательский | `DELETE /api/session-types/{slug}` (системные — 403) |
 
 При старте сессии `POST /api/sessions` принимает `tag` (slug), `participant`, `source`, опционально `session_name`, `address`, `minutes`. Полный список endpoint — [ARCHITECTURE.md § Веб-API](ARCHITECTURE.md#веб-api-кратко).
-`source` — строка источника, например: `"mock"`; `"Polar H10  AA:BB:…"` (BLE); **`Polar H10 ANT+`** (только ANT+); **`Polar H10 BLE … (+ANT fallback)`** при старте с **`--ant-fallback`**; при фактическом переключении на ANT+ запись может обновиться на **`Polar H10 ANT+ fallback (BLE …)`**.
+`source` — строка источника, например: `"mock"`; `"Polar H10  AA:BB:…"` (BLE).
 
 ### MockHRVSource
 
@@ -158,15 +151,6 @@ RR в пакете: `rr_ms = raw * 1000 / 1024` (единицы 1/1024 с).
 - При типичных текстах ошибок подключения выводится та же подсказка про «занятый» H10.
 
 Полностью устранить конфликт с другим BLE-клиентом программно нельзя — только быстрый fail и понятные сообщения.
-
-### ANT+ (опционально)
-
-Профиль **ANT+ Heart Rate**, RR из разницы времени удара (**1/1024 с**, как в BLE-пакете HR). Нужны USB ANT Stick, установленный **`openant`**, права на USB (часто udev-правила из документации **openant**), на Polar H10 — включённая передача по ANT+ (настройки в Polar Flow и т.п.).
-
-- **`AntPlusHRVSource`**: поиск первого HRM в эфире (`device_id=0`), watchdog по отсутствию RR (те же пороги по смыслу, что у BLE: первые **15 с**, затем **12 с** без RR — сообщения в терминал).
-- **`FallbackBleAntSource`**: **30 с** ожидания **первого** RR по BLE; затем пауза **1,5 с**; если RR так и не было — остановка BLE и старт ANT+. При переключении на ANT+ обновляется поле **`sessions.source`** в SQLite.
-
-В веб-форме: **`source = ant`** (только ANT+) или **`ble_ant_fallback`** (MAC в `address`).
 
 ---
 
@@ -249,10 +233,9 @@ masterGain
 
 ## Что реализовано
 
-- [x] Абстракция `HRVSource` — mock, BLE и опционально ANT+ за единым интерфейсом
+- [x] Абстракция `HRVSource` — mock и BLE за единым интерфейсом
 - [x] `MockHRVSource` — AR(1), цикл состояний, профиль meditation (RSA)
-- [x] `PolarH10Source` — BLE, реконнект, `start_notify` с таймаутом/ретраями, watchdog по отсутствию RR; опциональный **`extra_stop`** для fallback
-- [x] **`AntPlusHRVSource`** / **`FallbackBleAntSource`** — ANT+ и BLE→ANT fallback (**openant** по желанию)
+- [x] `PolarH10Source` — BLE, реконнект, `start_notify` с таймаутом/ретраями, watchdog по отсутствию RR
 - [x] RMSSD на скользящем окне 60 с
 - [x] **Веб-UI** (`python -m hrv_web`): live-графики RR + RMSSD (uPlot), архив, вкладка «Прогресс», guided mp3-фразы; типы активности в БД (`/api/session-types`)
 - [x] SQLite: `sessions`, `hrv_points`, `baseline`, `session_types`, `meditation_phrase_log`; обновление baseline при завершении сессии
@@ -267,7 +250,7 @@ masterGain
 
 ## Что осталось (опционально)
 
-Идеи на будущее: BLE-сканирование из веб-UI, настраиваемые таймауты fallback, повторная попытка BLE после потери ANT+, поддержка выбора конкретного ANT device ID.
+Идеи на будущее: BLE-сканирование из веб-UI, настраиваемые таймауты reconnect/watchdog.
 
 ---
 
@@ -302,9 +285,6 @@ python -m hrv_web
 # mock без железа: в форме source = Mock, выберите тип активности, ▶ Старт
 
 # BLE: source = BLE Polar H10, укажите MAC (AA:BB:CC:DD:EE:FF)
-
-# ANT+ (после pip install 'openant>=1.3', USB ANT Stick; Polar H10 с ANT+)
-# source = ANT+ (USB stick)  или  BLE → ANT fallback + MAC
 
 # кластеризация (после накопления данных)
 python cluster.py

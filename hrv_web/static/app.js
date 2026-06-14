@@ -692,10 +692,23 @@ function setBiofeedbackControlsEnabled(on) {
   if (intervalEl) intervalEl.disabled = !on;
 }
 
+function syncSourceFields() {
+  const isBle = $("source")?.value === "ble";
+  const wrap = $("address_wrap");
+  if (wrap) wrap.hidden = !isBle;
+}
+
 async function startLive() {
   setErr("");
   const participant = $("participant").value.trim();
   if (!participant) { setErr("Укажите участника"); return; }
+
+  const source = $("source").value;
+  const address = $("address").value.trim() || null;
+  if (source === "ble" && !address) {
+    setErr("Укажите MAC адрес для BLE Polar H10");
+    return;
+  }
 
   const rawMin = $("minutes").value.trim();
   const minutes = rawMin ? parseFloat(rawMin.replace(",", ".")) : null;
@@ -710,8 +723,8 @@ async function startLive() {
     participant,
     tag,
     session_name: $("session_name").value.trim() || null,
-    source: $("source").value,
-    address: $("address").value.trim() || null,
+    source,
+    address: source === "ble" ? address : null,
     minutes: minutes != null && !Number.isNaN(minutes) && minutes > 0 ? minutes : null,
   };
 
@@ -791,6 +804,8 @@ async function stopLive() {
     finalizeLiveSession();
   }
 }
+
+$("source")?.addEventListener("change", syncSourceFields);
 
 $("btn_start").addEventListener("click", startLive);
 $("btn_stop").addEventListener("click",  stopLive);
@@ -1193,5 +1208,6 @@ $("btn_wipe_history")?.addEventListener("click", wipeHistory);
 $("btn_wipe_history_prog")?.addEventListener("click", wipeHistory);
 
 loadSessionTypes().catch(e => setErr(String(e)));
+syncSourceFields();
 syncGuidedPhraseOptionsVisibility();
 setLiveEmptyState("idle");

@@ -4,21 +4,16 @@ from hrv_core.constants import DB_PATH, SESSION_TAGS
 from hrv_core.db import init_db, load_hour_baseline, update_session_baseline
 from hrv_core.pipeline import HRVSessionState, compute_rmssd
 from hrv_core.sources import (
-    AntPlusHRVSource,
-    FallbackBleAntSource,
     HRVSource,
     MockHRVSource,
     PolarH10Source,
     build_source,
-    require_openant,
 )
 from hrv_core.summary import session_summary_dict
 
 __all__ = [
     "DB_PATH",
     "SESSION_TAGS",
-    "AntPlusHRVSource",
-    "FallbackBleAntSource",
     "HRVSessionState",
     "HRVSource",
     "MockHRVSource",
@@ -27,7 +22,6 @@ __all__ = [
     "compute_rmssd",
     "init_db",
     "load_hour_baseline",
-    "require_openant",
     "session_summary_dict",
     "update_session_baseline",
 ]

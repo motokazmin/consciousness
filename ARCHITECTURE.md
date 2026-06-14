@@ -2,7 +2,7 @@
 
 Экспериментальная система мониторинга вариабельности сердечного ритма (HRV) в реальном времени. Проект проверяет гипотезу: **можно ли по одному сигналу RMSSD выделить физиологические кластеры, согласующиеся с субъективными метками активности пользователя** (медитация, релаксация, фокус, скроллинг).
 
-> Операционные детали (веб-UI, BLE/ANT+, mock, baseline): [hrv_mvp.md](hrv_mvp.md)
+> Операционные детали (веб-UI, BLE, mock, baseline): [hrv_mvp.md](hrv_mvp.md)
 
 ---
 
@@ -36,7 +36,7 @@
                              │ callback(rr_ms, ts)
 ┌────────────────────────────▼────────────────────────────────┐
 │  Источники данных (HRVSource)                               │
-│  Mock  │  Polar BLE  │  ANT+  │  BLE→ANT fallback          │
+│  Mock  │  Polar BLE                                              │
 └─────────────────────────────────────────────────────────────┘
                              │
 ┌────────────────────────────▼────────────────────────────────┐
@@ -91,7 +91,7 @@ flowchart LR
 | Модуль | Роль |
 |--------|------|
 | `constants.py` | Пороги, таймауты, пути (`DB_PATH`, `DRIFT_THRESHOLD=0.80`, окно RMSSD 60 с) |
-| `sources.py` | Абстракция `HRVSource`, реализации mock/BLE/ANT+/fallback, фабрика `build_source()` |
+| `sources.py` | Абстракция `HRVSource`, реализации mock/BLE, фабрика `build_source()` |
 | `pipeline.py` | `compute_rmssd()`, `HRVSessionState`, детекция drift (опц. `notify-send`) |
 | `db.py` | Схема SQLite, миграции, baseline по часу 0–23, удаление сессий |
 | `session_types.py` | Системные типы сессий (seed в БД при первом запуске): slug, label, mock-профиль, phrase_prefix |
@@ -131,10 +131,8 @@ class HRVSource(ABC):
 |------------|----------|
 | `MockHRVSource` | AR(1)-симуляция; цикл focused→drift→recovering или профиль медитации (RSA) |
 | `PolarH10Source` | BLE GATT 0x2A37, reconnect, watchdog по отсутствию RR |
-| `AntPlusHRVSource` | ANT+ Heart Rate через openant (опционально) |
-| `FallbackBleAntSource` | 30 с ожидания BLE → переключение на ANT+ |
 
-Переключение: поле `source` в веб-форме (`mock`, `ble`, `ant`, `ble_ant_fallback`).
+Переключение: поле `source` в веб-форме (`mock`, `ble`).
 
 ---
 
@@ -273,7 +271,7 @@ masterGain
 
 | Поток | Роль |
 |-------|------|
-| Источник (mock / asyncio BLE / ANT+) | Producer: вызывает callback на каждый RR |
+| Источник (mock / asyncio BLE) | Producer: вызывает callback на каждый RR |
 | Main / FastAPI | Consumer: WebSocket, SQLite, uPlot в браузере |
 | `notify-send` | Опционально в `HRVSessionState` (в веб-сессии отключён: `desktop_notify=False`) |
 
@@ -292,7 +290,7 @@ masterGain
 
 ## Стек
 
-Python 3.12 · numpy · bleak (BLE) · openant (опц.) · FastAPI · uvicorn · SQLite · hdbscan · scikit-learn · uPlot (CDN) · matplotlib (только `cluster.py`)
+Python 3.12 · numpy · bleak (BLE) · FastAPI · uvicorn · SQLite · hdbscan · scikit-learn · uPlot (CDN) · matplotlib (только `cluster.py`)
 
 ---
 

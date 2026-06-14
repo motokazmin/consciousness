@@ -29,7 +29,7 @@ class StartSessionBody(BaseModel):
     participant: str = Field(..., min_length=1, max_length=200)
     tag: str
     session_name: str | None = Field(None, max_length=4000)
-    source: str = Field(..., description="mock | ble | ant | ble_ant_fallback")
+    source: str = Field(..., description="mock | ble")
     address: str | None = None
     minutes: float | None = Field(None, gt=0)
 
@@ -203,8 +203,10 @@ def start_session(body: StartSessionBody):
         tag = normalize_tag(body.tag)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    if body.source in ("ble", "ble_ant_fallback") and not body.address:
-        raise HTTPException(400, "address required for ble / ble_ant_fallback")
+    if body.source not in ("mock", "ble"):
+        raise HTTPException(400, "source must be mock or ble")
+    if body.source == "ble" and not body.address:
+        raise HTTPException(400, "address required for ble")
     try:
         rs = MANAGER.start(
             participant=body.participant.strip(),

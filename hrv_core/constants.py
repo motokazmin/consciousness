@@ -26,14 +26,11 @@ DRIFT_COOLDOWN_SEC = 120
 # Пауза перед повторным BLE-подключением после обрыва (сек)
 RECONNECT_DELAY = 3.0
 
-# BLE/ANT+: нет RR дольше этого — watchdog считает потерю потока (сек)
+# BLE: нет RR дольше этого — watchdog считает потерю потока (сек)
 RR_WATCHDOG_SEC = 12.0
 
 # BLE: ожидание первого RR после connect до предупреждения/реконнекта (сек)
 BLE_FIRST_RR_GRACE_SEC = 15.0
-
-# BLE→ANT fallback: ждать RR по Bluetooth перед переключением на донгл (сек)
-ANT_FALLBACK_WAIT_SEC = 30.0
 
 # Таймаут одной попытки client.start_notify (сек)
 START_NOTIFY_TIMEOUT = 25.0

@@ -1036,12 +1036,10 @@
               <select id="source">
                 <option value="mock">Mock (без железа)</option>
                 <option value="ble">BLE Polar H10</option>
-                <option value="ant">ANT+ (USB stick)</option>
-                <option value="ble_ant_fallback">BLE → ANT fallback</option>
               </select>
             </div>
             <div class="field-row">
-              <div class="field">
+              <div class="field" id="address_wrap">
                 <label>MAC адрес (BLE)</label>
                 <input id="address" type="text" placeholder="AA:BB:CC:DD:EE:FF" />
               </div>

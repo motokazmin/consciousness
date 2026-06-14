@@ -1,18 +1,16 @@
-"""Источники RR: mock, BLE, ANT+, fallback."""
+"""Источники RR: mock, BLE."""
 
 from __future__ import annotations
 
 import asyncio
 import math
 import random
-import sqlite3
 import threading
 import time
 from abc import ABC, abstractmethod
 
 from hrv_core.session_types import SESSION_TYPES
 from hrv_core.constants import (
-    ANT_FALLBACK_WAIT_SEC,
     BLE_FIRST_RR_GRACE_SEC,
     BUSY_DEVICE_HINT,
     HR_UUID,
@@ -151,18 +149,11 @@ class PolarH10Source(HRVSource):
         address: str,
         *,
         session_stop: threading.Event,
-        extra_stop: threading.Event | None = None,
     ):
         self.address = address
         self._session_stop = session_stop
         self._callback = None
         self._last_rr_ts: float | None = None
-        self._extra_stop = extra_stop
-
-    def _should_stop(self) -> bool:
-        if self._session_stop.is_set():
-            return True
-        return self._extra_stop is not None and self._extra_stop.is_set()
 
     @staticmethod
     def _parse_rr(data: bytearray) -> list[float]:
@@ -245,7 +236,7 @@ class PolarH10Source(HRVSource):
 
         bt_kw = bleak_adapter_kwargs()
 
-        while not self._should_stop():
+        while not self._session_stop.is_set():
             self._last_rr_ts = None
             reconnect_pause = False
             try:
@@ -260,7 +251,7 @@ class PolarH10Source(HRVSource):
                         f"переподключение)"
                     )
                     session_start = time.time()
-                    while not self._should_stop():
+                    while not self._session_stop.is_set():
                         await asyncio.sleep(0.5)
                         now = time.time()
                         if self._last_rr_ts is None:
@@ -308,7 +299,7 @@ class PolarH10Source(HRVSource):
                 print(f"Reconnecting in {RECONNECT_DELAY}s…")
                 await asyncio.sleep(RECONNECT_DELAY)
             else:
-                if reconnect_pause and not self._should_stop():
+                if reconnect_pause and not self._session_stop.is_set():
                     await asyncio.sleep(RECONNECT_DELAY)
 
     def start(self, callback):
@@ -322,200 +313,12 @@ class PolarH10Source(HRVSource):
         self._session_stop.set()
 
 
-def require_openant():
-    try:
-        from openant.devices import ANTPLUS_NETWORK_KEY
-        from openant.devices.heart_rate import HeartRate
-        from openant.easy.node import Node
-    except ImportError as exc:
-        raise RuntimeError(
-            "Для ANT+ установите: pip install 'openant>=1.3' "
-            "(нужен USB ANT Stick и udev/prava на устройство)."
-        ) from exc
-    return ANTPLUS_NETWORK_KEY, HeartRate, Node
-
-
-class AntPlusHRVSource(HRVSource):
-    def __init__(self, session_stop: threading.Event):
-        self._session_stop = session_stop
-        self._callback = None
-        self._thread: threading.Thread | None = None
-        self._node = None
-        self._last_rr_ts: float | None = None
-
-    def start(self, callback):
-        self._callback = callback
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        if self._node is not None:
-            try:
-                self._node.stop()
-            except Exception:
-                pass
-            self._node = None
-
-    def _run(self):
-        ANTPLUS_NETWORK_KEY, HeartRate, Node = require_openant()
-        cb = self._callback
-        if cb is None:
-            return
-        session_stop = self._session_stop
-        outer = self
-
-        class _HRDevice(HeartRate):
-            def __init__(inner_self):
-                inner_self._prev_beat_tick: int | None = None
-                inner_self._prev_beat_count: int | None = None
-                super().__init__(outer._node, device_id=0, name="hrv_polar_ant")
-
-            def on_update(inner_self, data):
-                p = data[0]
-                if p in (80, 81, 82, 83):
-                    return
-                if (p & 0x0F) > 7:
-                    return
-                beat_tick = data[4] | (data[5] << 8)
-                beat_count = data[6]
-                prev_c = inner_self._prev_beat_count
-                prev_t = inner_self._prev_beat_tick
-                inner_self._prev_beat_tick = beat_tick
-                inner_self._prev_beat_count = beat_count
-                if prev_c is None or prev_t is None:
-                    return
-                dc = (beat_count - prev_c) % 256
-                if dc == 0:
-                    return
-                dtick = beat_tick - prev_t
-                if dtick < 0:
-                    dtick += 65536
-                rr_ms = (dtick / dc) * (1000.0 / 1024.0)
-                if not (300 < rr_ms < 2000):
-                    return
-                now = time.time()
-                outer._last_rr_ts = now
-                cb(rr_ms, now)
-
-        def _watchdog():
-            session_start = time.time()
-            while not session_stop.is_set():
-                time.sleep(0.5)
-                now = time.time()
-                if outer._last_rr_ts is None:
-                    if now - session_start > BLE_FIRST_RR_GRACE_SEC:
-                        print(
-                            f"\nANT+: нет RR за {BLE_FIRST_RR_GRACE_SEC:.0f}s — "
-                            "проверьте донгл, пояс и включённый ANT+ на датчике."
-                        )
-                        session_start = now
-                elif now - outer._last_rr_ts > RR_WATCHDOG_SEC:
-                    print(
-                        f"\nANT+ watchdog: нет RR {RR_WATCHDOG_SEC:.0f}s "
-                        "(потеря эфира?). Ожидание снова…"
-                    )
-                    outer._last_rr_ts = None
-                    session_start = now
-
-        try:
-            self._node = Node()
-            self._node.set_network_key(0x00, ANTPLUS_NETWORK_KEY)
-            _HRDevice()
-            print(
-                "ANT+ ✓  поиск HRM (Polar H10 должен быть в режиме ANT+); "
-                f"watchdog: нет RR {RR_WATCHDOG_SEC:.0f}s → сообщение"
-            )
-            threading.Thread(target=_watchdog, daemon=True).start()
-            self._node.start()
-        except Exception as exc:
-            print(f"ANT+ error: {exc}")
-        finally:
-            self.stop()
-
-
-class FallbackBleAntSource(HRVSource):
-    def __init__(
-        self,
-        address: str,
-        *,
-        session_stop: threading.Event,
-        conn: sqlite3.Connection,
-        session_id: int,
-        conn_lock: threading.Lock,
-    ):
-        self.address = address
-        self._session_stop = session_stop
-        self._conn = conn
-        self._session_id = session_id
-        self._conn_lock = conn_lock
-        self._user_cb = None
-        self._ble_stop = threading.Event()
-        self._first_rr = threading.Event()
-        self._ble = PolarH10Source(address, session_stop=session_stop, extra_stop=self._ble_stop)
-        self._ant: AntPlusHRVSource | None = None
-        self._fallback_thread: threading.Thread | None = None
-        self._ant_started = False
-        self._lock = threading.Lock()
-
-    def start(self, callback):
-        self._user_cb = callback
-
-        def _wrapped(rr_ms: float, ts: float):
-            self._first_rr.set()
-            callback(rr_ms, ts)
-
-        self._ble.start(_wrapped)
-        self._fallback_thread = threading.Thread(target=self._fallback_watch, daemon=True)
-        self._fallback_thread.start()
-
-    def _fallback_watch(self):
-        if self._first_rr.wait(timeout=ANT_FALLBACK_WAIT_SEC):
-            return
-        print(
-            f"\nBLE: за {ANT_FALLBACK_WAIT_SEC:.0f}s не было RR — "
-            "пауза и последняя попытка Bluetooth…\n"
-        )
-        time.sleep(1.5)
-        if self._first_rr.is_set():
-            print("BLE: RR появился — продолжаем по Bluetooth.\n")
-            return
-        print("Переключаюсь на ANT+ (USB-донгл).\n")
-        self._ble_stop.set()
-        self._start_ant()
-
-    def _start_ant(self):
-        with self._lock:
-            if self._ant_started or self._session_stop.is_set():
-                return
-            self._ant_started = True
-        try:
-            with self._conn_lock:
-                self._conn.execute(
-                    "UPDATE sessions SET source=? WHERE id=?",
-                    (f"Polar H10 ANT+ fallback (BLE {self.address})", self._session_id),
-                )
-                self._conn.commit()
-        except Exception:
-            pass
-        self._ant = AntPlusHRVSource(self._session_stop)
-        assert self._user_cb is not None
-        self._ant.start(self._user_cb)
-
-    def stop(self):
-        self._ble_stop.set()
-        if self._ant is not None:
-            self._ant.stop()
-
-
 def build_source(
     kind: str,
     *,
     session_stop: threading.Event,
-    address: str | None,
-    conn: sqlite3.Connection | None,
-    session_id: int | None,
+    address: str | None = None,
     mock_tag: str | None = None,
-    conn_lock: threading.Lock | None = None,
 ) -> HRVSource:
     if kind == "mock":
         mt = (mock_tag or "").strip().lower()
@@ -526,18 +329,4 @@ def build_source(
         if not address:
             raise ValueError("ble требует address")
         return PolarH10Source(address, session_stop=session_stop)
-    if kind == "ant":
-        return AntPlusHRVSource(session_stop)
-    if kind == "ble_ant_fallback":
-        if not address or conn is None or session_id is None:
-            raise ValueError("ble_ant_fallback требует address, conn, session_id")
-        if conn_lock is None:
-            raise ValueError("ble_ant_fallback требует conn_lock")
-        return FallbackBleAntSource(
-            address,
-            session_stop=session_stop,
-            conn=conn,
-            session_id=session_id,
-            conn_lock=conn_lock,
-        )
     raise ValueError(f"неизвестный source kind: {kind}")
