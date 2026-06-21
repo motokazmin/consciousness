@@ -14,6 +14,27 @@ POINCARE_PERCENTILE_HI = 95
 MIN_RR_FOR_VIEWPORT = 4
 DEFAULT_VIEWPORT = {"min": 600, "max": 1000}
 SDNN_INITIAL_CROP_SEC = 20.0
+STABLE_ZONE_TRIM_SEC = 60.0
+MIN_STABLE_ZONE_SEC = 120.0
+
+
+def stable_zone_mask(
+    ts: np.ndarray,
+    *,
+    trim_start_sec: float = STABLE_ZONE_TRIM_SEC,
+    trim_end_sec: float = STABLE_ZONE_TRIM_SEC,
+) -> np.ndarray:
+    """Маска ударов внутри [t0+trim_start, t_end-trim_end]. Пустая зона → все True."""
+    ts = np.asarray(ts, dtype=float)
+    if ts.size == 0:
+        return np.zeros(0, dtype=bool)
+    t0 = float(ts[0])
+    t_end = float(ts[-1])
+    lo = t0 + max(0.0, trim_start_sec)
+    hi = t_end - max(0.0, trim_end_sec)
+    if hi - lo < MIN_STABLE_ZONE_SEC:
+        return np.ones(ts.size, dtype=bool)
+    return (ts >= lo) & (ts <= hi)
 
 
 def _fft_input(rr: np.ndarray) -> np.ndarray:

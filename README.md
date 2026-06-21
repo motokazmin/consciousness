@@ -4,6 +4,7 @@
 
 - **Архитектура и назначение:** [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Детали MVP** (веб-UI, BLE, baseline, mock): [hrv_mvp.md](hrv_mvp.md)
+- **Графики HRV** (расчёт, опции «Стабильная зона», интерпретация): [explain.md](explain.md)
 - **Веб-аудио (Web Audio):** [ARCHITECTURE.md § Веб-аудио](ARCHITECTURE.md#веб-аудио-где-генерируется-звук)
 
 ## Быстрый старт

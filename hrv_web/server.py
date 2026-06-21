@@ -21,7 +21,9 @@ from hrv_core.tags import normalize_tag
 from hrv_web.session_manager import MANAGER
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-PHRASE_FILE_RE = re.compile(r"^(sit|lay)_(v|ya|u|z|vykh)_(\d+)\.mp3$")
+PHRASES_DIR = STATIC_DIR / "phrases"
+PHRASE_SET_ID_RE = re.compile(r"^[\w\-]+$")
+PHRASE_FILE_RE = re.compile(r"^(\w+)_(.+)_(\d+)\.mp3$")
 
 app = FastAPI(title="HRV Monitor")
 
@@ -463,7 +465,12 @@ def get_session(session_id: int):
 
 
 @app.get("/api/sessions/{session_id}/analysis")
-def session_analysis_endpoint(session_id: int, max_points: int = 12_000):
+def session_analysis_endpoint(
+    session_id: int,
+    max_points: int = 12_000,
+    stable_zone: bool = False,
+    smooth: bool = False,
+):
     max_points = max(100, min(max_points, 50_000))
     conn = init_db()
     row = conn.execute(
@@ -483,7 +490,9 @@ def session_analysis_endpoint(session_id: int, max_points: int = 12_000):
     ).fetchall()
     conn.close()
     rows = _decimate_rows(rows, max_points)
-    return session_analysis(rows, started, ended)
+    return session_analysis(
+        rows, started, ended, stable_zone=stable_zone or smooth
+    )
 
 
 @app.get("/api/progress/analysis")
@@ -495,6 +504,8 @@ def progress_analysis(
     started_before: str | None = None,
     max_sessions: int = 40,
     max_points_per_session: int = 4000,
+    stable_zone: bool = False,
+    smooth: bool = False,
 ):
     max_sessions = max(1, min(max_sessions, 80))
     max_points_per_session = max(100, min(max_points_per_session, 12_000))
@@ -530,7 +541,13 @@ def progress_analysis(
             (sid,),
         ).fetchone()
         rmssd_mean = float(stats[0]) if stats and stats[0] is not None else None
-        analysis = progress_session_analysis(rows_dec, started, ended, rmssd_mean)
+        analysis = progress_session_analysis(
+            rows_dec,
+            started,
+            ended,
+            rmssd_mean,
+            stable_zone=stable_zone or smooth,
+        )
         out_sessions.append(
             {
                 "id": sid,
@@ -598,22 +615,66 @@ async def session_stream(websocket: WebSocket, session_id: int):
         pass
 
 
-@app.get("/api/meditation/phrase-manifest")
-def phrase_manifest():
-    """Список mp3-фраз, реально лежащих в static/phrases/."""
-    manifest: dict[str, dict[str, list[int]]] = {"sit": {}, "lay": {}}
-    phrases_dir = STATIC_DIR / "phrases"
-    if phrases_dir.is_dir():
-        for path in phrases_dir.glob("*.mp3"):
-            m = PHRASE_FILE_RE.match(path.name)
-            if not m:
-                continue
-            prefix, category, num_s = m.group(1), m.group(2), m.group(3)
-            manifest[prefix].setdefault(category, []).append(int(num_s))
-    for prefix in manifest:
-        for category in manifest[prefix]:
-            manifest[prefix][category] = sorted(manifest[prefix][category])
+def _phrase_set_dir(prefix: str, phrase_set: str) -> Path:
+    if not PHRASE_SET_ID_RE.match(prefix) or not PHRASE_SET_ID_RE.match(phrase_set):
+        raise HTTPException(400, "Недопустимый prefix или set")
+    target = (PHRASES_DIR / prefix / phrase_set).resolve()
+    if not target.is_dir() or PHRASES_DIR.resolve() not in target.parents:
+        raise HTTPException(404, "Набор фраз не найден")
+    return target
+
+
+def _build_phrase_manifest(prefix: str, phrase_set: str) -> dict[str, list[int]]:
+    manifest: dict[str, list[int]] = {}
+    for path in _phrase_set_dir(prefix, phrase_set).glob("*.mp3"):
+        m = PHRASE_FILE_RE.match(path.name)
+        if not m or m.group(1) != prefix:
+            continue
+        category, num_s = m.group(2), m.group(3)
+        manifest.setdefault(category, []).append(int(num_s))
+    for category in manifest:
+        manifest[category] = sorted(manifest[category])
     return manifest
+
+
+@app.get("/api/meditation/phrase-sets")
+def phrase_sets(prefix: str | None = Query(None)):
+    """Доступные наборы mp3: phrases/{prefix}/{set}/."""
+    if prefix is not None and not PHRASE_SET_ID_RE.match(prefix):
+        raise HTTPException(400, "Недопустимый prefix")
+    sets: list[dict] = []
+    if not PHRASES_DIR.is_dir():
+        return {"sets": sets}
+    for prefix_dir in sorted(PHRASES_DIR.iterdir()):
+        if not prefix_dir.is_dir() or prefix_dir.name.startswith("."):
+            continue
+        if prefix is not None and prefix_dir.name != prefix:
+            continue
+        for set_dir in sorted(prefix_dir.iterdir()):
+            if not set_dir.is_dir() or set_dir.name.startswith("."):
+                continue
+            mp3_count = sum(1 for _ in set_dir.glob("*.mp3"))
+            if not mp3_count:
+                continue
+            sets.append(
+                {
+                    "id": f"{prefix_dir.name}/{set_dir.name}",
+                    "prefix": prefix_dir.name,
+                    "set": set_dir.name,
+                    "label": f"{prefix_dir.name}/{set_dir.name}",
+                    "mp3_count": mp3_count,
+                }
+            )
+    return {"sets": sets}
+
+
+@app.get("/api/meditation/phrase-manifest")
+def phrase_manifest(
+    prefix: str = Query(..., min_length=1),
+    phrase_set: str = Query("directive", alias="set", min_length=1),
+):
+    """Список mp3-фраз в phrases/{prefix}/{set}/."""
+    return _build_phrase_manifest(prefix, phrase_set)
 
 
 @app.post("/api/meditation/phrase-log")

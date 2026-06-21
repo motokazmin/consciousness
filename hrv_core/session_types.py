@@ -2,7 +2,7 @@
 
 Чтобы добавить новый тип:
   1. Добавьте запись в SESSION_TYPES ниже.
-  2. Положите mp3-фразы в static/phrases/ с нужным prefix (sit/lay/…).
+  2. Положите mp3-фразы в static/phrases/{prefix}/{set}/ (например sit/directive/).
   3. При необходимости укажите chart_profile — имя набора/настроек графиков
      для архивного просмотра (см. CHART_PROFILES во static/app.js).
      Если не указан — используется "default". Пример:

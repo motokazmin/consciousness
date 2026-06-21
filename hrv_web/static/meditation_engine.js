@@ -3,7 +3,7 @@
 /**
  * HRV-реактивное воспроизведение заранее записанных mp3-фраз для guided meditation.
  *
- * Файлы: /assets/phrases/{sit|lay}_{v|ya|u|z|vykh}_{NN}.mp3
+ * Файлы: /assets/phrases/{prefix}/{set}/{prefix}_{v|ya|u|z|vykh}_{NN}.mp3
  * Префикс: meditation → sit, rest (релаксация) → lay
  * Список доступных файлов загружается с GET /api/meditation/phrase-manifest.
  */
@@ -12,11 +12,11 @@ class MeditationEngine {
   static RN_WINDOW_SEC = 30;
   static EXIT_BEFORE_SEC = 60;
   static ENTRY_GAP_SEC = 2;
-  static ASSETS_BASE = "/assets/phrases";
 
   constructor() {
     this._sessionId = null;
     this._sessionType = "sit";
+    this._phraseSet = "directive";
     this._durationSec = null;
     this._sessionStartTs = null;
     this._running = false;
@@ -51,10 +51,11 @@ class MeditationEngine {
     });
   }
 
-  async start(sessionId, sessionType, durationMinutes, minIntervalSec) {
+  async start(sessionId, sessionType, durationMinutes, minIntervalSec, phraseSet) {
     this.stop();
     this._sessionId = sessionId;
-    this._sessionType = sessionType === "lay" ? "lay" : "sit";
+    this._sessionType = sessionType || "sit";
+    this._phraseSet = phraseSet || "directive";
     this._minIntervalSec =
       minIntervalSec != null && minIntervalSec >= 5
         ? minIntervalSec
@@ -76,9 +77,12 @@ class MeditationEngine {
     this._lastRmssd = null;
 
     try {
-      const res = await fetch("/api/meditation/phrase-manifest");
-      const data = res.ok ? await res.json() : {};
-      this._manifest = data[this._sessionType] || {};
+      const qs = new URLSearchParams({
+        prefix: this._sessionType,
+        set: this._phraseSet,
+      });
+      const res = await fetch(`/api/meditation/phrase-manifest?${qs}`);
+      this._manifest = res.ok ? await res.json() : {};
     } catch {
       this._manifest = {};
     }
@@ -140,14 +144,18 @@ class MeditationEngine {
     return this._manifest[category] || [];
   }
 
+  _assetsBase() {
+    return `/assets/phrases/${this._sessionType}/${this._phraseSet}`;
+  }
+
   _phrasePath(category, index) {
     const num = String(index).padStart(2, "0");
-    return `${MeditationEngine.ASSETS_BASE}/${this._sessionType}_${category}_${num}.mp3`;
+    return `${this._assetsBase()}/${this._sessionType}_${category}_${num}.mp3`;
   }
 
   _phraseFilename(category, index) {
     const num = String(index).padStart(2, "0");
-    return `${this._sessionType}_${category}_${num}.mp3`;
+    return `${this._phraseSet}/${this._sessionType}_${category}_${num}.mp3`;
   }
 
   _shuffle(arr) {

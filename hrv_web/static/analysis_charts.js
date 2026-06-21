@@ -163,12 +163,33 @@
     );
   }
 
+  function drawTrimBands(u, opts) {
+    const trim = opts?.trim;
+    if (!trim?.applied) return;
+    const { ctx } = u;
+    const ox = u.bbox.left;
+    const oy = u.bbox.top;
+    const h = u.bbox.height;
+    const start = trim.start_sec ?? 0;
+    const end = (trim.duration_sec ?? 0) - (trim.end_sec ?? 0);
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.28)";
+    const x0 = u.valToPos(0, "x", true);
+    const x1 = u.valToPos(start, "x", true);
+    const x2 = u.valToPos(end, "x", true);
+    const x3 = u.valToPos(trim.duration_sec ?? end, "x", true);
+    if (start > 0) ctx.fillRect(ox + x0, oy, x1 - x0, h);
+    if (end < (trim.duration_sec ?? end)) ctx.fillRect(ox + x2, oy, x3 - x2, h);
+    ctx.restore();
+  }
+
   function makeRawRrPlot(el, rawRrX, rawRr, durationSec, height, opts) {
     if (!rawRr?.length || !rawRrX?.length) return null;
     const xMax = durationSec || rawRrX[rawRrX.length - 1] || 1;
     const yMin = Math.max(300, rawRr.reduce((a, b) => (a < b ? a : b), Infinity) - 40);
     const yMax = opts?.yMax ?? (rawRr.reduce((a, b) => (a > b ? a : b), -Infinity) + 40);
     const w = plotWidth(el);
+    const trimOpts = opts?.trim;
 
     return new uPlot(
       {
@@ -190,6 +211,7 @@
           { ...AXIS_STYLE, label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...AXIS_STYLE, label: "RR, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
         ],
+        hooks: trimOpts?.applied ? { draw: [(u) => drawTrimBands(u, { trim: trimOpts })] } : {},
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
       },

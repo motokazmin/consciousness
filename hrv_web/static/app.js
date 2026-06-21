@@ -29,29 +29,90 @@ let meditationEngine = null;
 
 // Динамически заполняется из /api/session-types при старте
 let GUIDED_PHRASE_TAGS = {};
+let PHRASE_SETS = [];
+const PHRASE_SET_PREF_KEY = "hrv_phrase_set_by_prefix";
 
 function phrasePrefixForTag(tag) {
   return GUIDED_PHRASE_TAGS[tag] ?? null;
+}
+
+function loadPhraseSetPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem(PHRASE_SET_PREF_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function savePhraseSetPref(prefix, setName) {
+  const prefs = loadPhraseSetPrefs();
+  prefs[prefix] = setName;
+  localStorage.setItem(PHRASE_SET_PREF_KEY, JSON.stringify(prefs));
+}
+
+function phraseSetsForPrefix(prefix) {
+  return PHRASE_SETS.filter((item) => item.prefix === prefix);
+}
+
+function syncPhraseSetOptions() {
+  const select = $("guided_phrase_set");
+  if (!select) return;
+  const prefix = phrasePrefixForTag($("tag")?.value);
+  const prev = select.value;
+  const items = prefix ? phraseSetsForPrefix(prefix) : [];
+  select.innerHTML = "";
+  if (!items.length) {
+    select.disabled = true;
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = prefix ? "нет mp3-наборов" : "—";
+    select.appendChild(opt);
+    return;
+  }
+  select.disabled = false;
+  const prefs = loadPhraseSetPrefs();
+  for (const item of items) {
+    const opt = document.createElement("option");
+    opt.value = item.set;
+    opt.textContent = `${item.set} (${item.mp3_count} mp3)`;
+    select.appendChild(opt);
+  }
+  const preferred = prefs[prefix];
+  if (preferred && items.some((item) => item.set === preferred)) {
+    select.value = preferred;
+  } else if (items.some((item) => item.set === prev)) {
+    select.value = prev;
+  } else if (items.some((item) => item.set === "directive")) {
+    select.value = "directive";
+  } else {
+    select.value = items[0].set;
+  }
 }
 
 function syncGuidedPhraseOptionsVisibility() {
   const wrap = $("guided_phrase_options");
   if (!wrap) return;
   wrap.hidden = !phrasePrefixForTag($("tag")?.value);
+  syncPhraseSetOptions();
 }
 
 function guidedPhraseOptions() {
   const el = $("opt_guided_phrases");
   const intervalEl = $("guided_phrase_interval");
+  const setEl = $("guided_phrase_set");
   let phraseMinIntervalSec = 20;
   if (intervalEl) {
     const raw = intervalEl.value.trim().replace(",", ".");
     const n = parseFloat(raw);
     if (Number.isFinite(n) && n >= 5) phraseMinIntervalSec = n;
   }
+  const phraseSet = setEl?.value || "directive";
+  const prefix = phrasePrefixForTag($("tag")?.value);
+  if (prefix && phraseSet) savePhraseSetPref(prefix, phraseSet);
   return {
     guidedPhrases: el ? el.checked : false,
     phraseMinIntervalSec,
+    phraseSet,
   };
 }
 
@@ -84,6 +145,7 @@ function setAudioStatus(text, active) {
 }
 
 function syncBiofeedbackStats() {
+  const bioTabVisible = $("tab-biofeedback")?.classList.contains("visible");
   const rmEl = $("bf_rmssd");
   const baseEl = $("bf_base");
   const rnEl = $("bf_rn");
@@ -91,7 +153,7 @@ function syncBiofeedbackStats() {
   const modeEl = $("bf_mode_label");
   const texEl = $("bf_texture_label");
 
-  if (rmEl) {
+  if (rmEl && bioTabVisible) {
     rmEl.textContent = lastRmssd !== null ? lastRmssd.toFixed(1) : "—";
     if (lastRmssd !== null && sessionBaseline !== null && sessionBaseline > 1) {
       const ratio = lastRmssd / sessionBaseline;
@@ -100,17 +162,32 @@ function syncBiofeedbackStats() {
       rmEl.className = "stat-value";
     }
   }
-  if (baseEl) baseEl.textContent = sessionBaseline !== null ? sessionBaseline.toFixed(1) : "—";
-  if (rnEl) {
+  if (baseEl && bioTabVisible) baseEl.textContent = sessionBaseline !== null ? sessionBaseline.toFixed(1) : "—";
+  if (rnEl && bioTabVisible) {
     rnEl.textContent = lastRmssdNormalized !== null ? lastRmssdNormalized.toFixed(2) : "—";
     rnEl.className = "stat-value" + (lastRmssdNormalized != null && lastRmssdNormalized >= 2.5 ? " good" : "");
   }
-  if (srEl) srEl.textContent = lastSmoothedRr !== null ? Math.round(lastSmoothedRr) + " ms" : "—";
-  if (modeEl) {
+  if (srEl && bioTabVisible) srEl.textContent = lastSmoothedRr !== null ? Math.round(lastSmoothedRr) + " ms" : "—";
+  if (modeEl && bioTabVisible) {
     modeEl.textContent = audioMode === "smooth_rr" ? "Дышащий Эмбиент" : "Трансовый Порог";
   }
-  if (texEl) {
+  if (texEl && bioTabVisible) {
     texEl.textContent = TEXTURE_LABELS[audioTexture] || audioTexture;
+  }
+
+  // mirror to live tab placeholder mini-stats (only when live tab visible to avoid RAF/DOM churn affecting other tabs)
+  const liveTabVisible = $("tab-live")?.classList.contains("visible");
+  if (liveTabVisible) {
+    const liveRm = $("live_bf_rmssd");
+    const liveRn = $("live_bf_rn");
+    if (liveRm) {
+      liveRm.textContent = lastRmssd !== null ? lastRmssd.toFixed(1) : "—";
+      liveRm.className = rmEl ? rmEl.className : "stat-value";
+    }
+    if (liveRn) {
+      liveRn.textContent = lastRmssdNormalized !== null ? lastRmssdNormalized.toFixed(2) : "—";
+      liveRn.className = rnEl ? rnEl.className : "stat-value";
+    }
   }
 }
 
@@ -183,6 +260,7 @@ function startBiofeedbackSession(opts) {
       phrasePrefix,
       opts.durationMinutes,
       opts.phraseMinIntervalSec,
+      opts.phraseSet,
     ).catch(() => {});
   }
 }
@@ -598,6 +676,18 @@ function appendDateFilters(url, periodEl) {
   return url;
 }
 
+async function loadPhraseSets() {
+  try {
+    const { sets } = await api("/api/meditation/phrase-sets");
+    PHRASE_SETS = Array.isArray(sets) ? sets : [];
+    syncPhraseSetOptions();
+  } catch (e) {
+    console.warn("loadPhraseSets failed:", e);
+    PHRASE_SETS = [];
+    syncPhraseSetOptions();
+  }
+}
+
 async function loadSessionTypes() {
   try {
     const { session_types } = await api("/api/session-types");
@@ -614,7 +704,8 @@ async function loadSessionTypes() {
     fillTagSelect(session_types);
     fillFilterSelect($("flt_tag"), session_types);
     fillFilterSelect($("prog_tag"), session_types);
-    await loadNoteTags();
+    syncGuidedPhraseOptionsVisibility();
+    await Promise.all([loadNoteTags(), loadPhraseSets()]);
   } catch (e) {
     console.warn("loadSessionTypes failed:", e);
   }
@@ -974,7 +1065,13 @@ function showSessionNotesModal(sessionId) {
   input.value = rawText.replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "").replace(/\s+/g, " ").trim();
   sessionNotesTagsInput?.setTags(tags);
   modal.classList.add("visible");
-  input.focus();
+  // do not auto-focus to avoid stealing focus from inputs on other tabs (e.g. archive filters)
+
+  // char counter
+  const countEl = $("notes_char_count");
+  const updateCount = () => { if (countEl) countEl.textContent = String(input.value.length); };
+  updateCount();
+  input.oninput = updateCount;
 }
 
 async function saveSessionNotes() {
@@ -1026,9 +1123,11 @@ function setBiofeedbackControlsEnabled(on) {
   const audioEl = $("opt_audio_biofeedback");
   const guidedEl = $("opt_guided_phrases");
   const intervalEl = $("guided_phrase_interval");
+  const setEl = $("guided_phrase_set");
   if (audioEl) audioEl.disabled = !on;
   if (guidedEl) guidedEl.disabled = !on;
   if (intervalEl) intervalEl.disabled = !on;
+  if (setEl) setEl.disabled = !on || !phraseSetsForPrefix(phrasePrefixForTag($("tag")?.value)).length;
 }
 
 function syncSourceFields() {
@@ -1186,9 +1285,15 @@ async function loadArchive() {
       `<td>${noteTagsHtml(tags)}</td>` +
       `<td style="color:var(--text-dim);font-size:.78rem">${escapeHtml(String(s.source).slice(0, 38))}</td>` +
       `<td style="font-size:.82rem">${fmtTime(s.started)}</td>` +
-      `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--text-muted)'>…</span>"}</td>` +
+      `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--yellow)'>в процессе…</span>"}</td>` +
       `<td style="text-align:right"><button type="button" class="btn btn-danger btn-delete-session" data-id="${s.id}" style="font-size:.72rem;padding:4px 10px">Удалить</button></td>`;
-    tr.addEventListener("click", () => openArchiveSession(s.id));
+    const isActive = !s.ended || s.id === currentSessionId;
+    if (isActive) {
+      tr.style.opacity = "0.6";
+      tr.style.cursor = "not-allowed";
+    } else {
+      tr.addEventListener("click", () => openArchiveSession(s.id));
+    }
     tr.querySelector(".btn-delete-session")?.addEventListener("click", (e) => {
       e.stopPropagation();
       deleteSession(s.id);
@@ -1203,6 +1308,53 @@ let archSpectrum = null;
 let archSdnn = null;
 let archRM = null;
 let archAnalysisCache = null;
+let archSummaryCache = null;
+
+const STABLE_ZONE_KEY = "hrv_stable_zone";
+const STABLE_ZONE_TRIM_SEC = 60;
+
+function stableZoneEnabled() {
+  const arch = $("arch_stable_zone");
+  const prog = $("prog_stable_zone");
+  if (arch) return arch.checked;
+  if (prog) return prog.checked;
+  if (localStorage.getItem(STABLE_ZONE_KEY) != null) {
+    return localStorage.getItem(STABLE_ZONE_KEY) === "1";
+  }
+  return localStorage.getItem("hrv_chart_smooth") === "1";
+}
+
+function setStableZone(on) {
+  localStorage.setItem(STABLE_ZONE_KEY, on ? "1" : "0");
+  for (const id of ["arch_stable_zone", "prog_stable_zone"]) {
+    const el = $(id);
+    if (el) el.checked = on;
+  }
+}
+
+function syncStableZoneCheckboxes() {
+  const on = stableZoneEnabled();
+  for (const id of ["arch_stable_zone", "prog_stable_zone"]) {
+    const el = $(id);
+    if (el) el.checked = on;
+  }
+}
+
+function sessionAnalysisUrl(sessionId) {
+  return `/api/sessions/${sessionId}/analysis?${stableZoneEnabled() ? "stable_zone=true" : "stable_zone=false"}`;
+}
+
+function rrPlotTrimOpts(analysis) {
+  if (!analysis?.stable_zone || !analysis?.trim?.applied) return {};
+  return {
+    trim: {
+      applied: true,
+      start_sec: analysis.trim.start_sec ?? STABLE_ZONE_TRIM_SEC,
+      end_sec: analysis.trim.end_sec ?? STABLE_ZONE_TRIM_SEC,
+      duration_sec: analysis.duration_sec,
+    },
+  };
+}
 
 function renderArchNotes(sum) {
   const block = $("arch_notes_block");
@@ -1230,12 +1382,19 @@ function renderSummaryGrid(sum) {
     sum.vs_baseline_pct != null
       ? (sum.vs_baseline_pct >= 0 ? "+" : "") + sum.vs_baseline_pct.toFixed(0) + "%"
       : "—";
+  const stable = !!archAnalysisCache?.stable_zone;
+  const meanRr = stable && archAnalysisCache?.mean_rr != null
+    ? archAnalysisCache.mean_rr
+    : sum.mean_rr;
+  const coherence = stable && archAnalysisCache?.coherence_score != null
+    ? archAnalysisCache.coherence_score
+    : sum.coherence_score;
   const fields = [
     ["RMSSD mean",  sum.rmssd_mean != null ? sum.rmssd_mean.toFixed(1) + " ms" : "—"],
     ["RMSSD min",   sum.rmssd_min  != null ? sum.rmssd_min.toFixed(1)  + " ms" : "—"],
     ["RMSSD max",   sum.rmssd_max  != null ? sum.rmssd_max.toFixed(1)  + " ms" : "—"],
-    ["Mean RR",     sum.mean_rr != null ? sum.mean_rr.toFixed(1) + " ms" : "—"],
-    ["Coherence",   sum.coherence_score != null ? sum.coherence_score.toFixed(1) : "—"],
+    ["Mean RR",     meanRr != null ? Number(meanRr).toFixed(1) + " ms" : "—"],
+    ["Coherence",   coherence != null ? Number(coherence).toFixed(1) : "—"],
     ["Длительность", durMin != null ? durMin.toFixed(1) + " мин" : "—"],
     ["vs baseline", vsBl],
     ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
@@ -1253,8 +1412,8 @@ function renderSummaryGrid(sum) {
   if (metricsRow) {
     metricsRow.innerHTML = "";
     const metrics = [
-      ["Mean RR", sum.mean_rr != null ? sum.mean_rr.toFixed(1) + " ms" : "—"],
-      ["Coherence", sum.coherence_score != null ? sum.coherence_score.toFixed(1) : "—"],
+      ["Mean RR", meanRr != null ? Number(meanRr).toFixed(1) + " ms" : "—"],
+      ["Coherence", coherence != null ? Number(coherence).toFixed(1) : "—"],
       ["SD1", archAnalysisCache?.poincare?.sd1 != null ? archAnalysisCache.poincare.sd1 + " ms" : "—"],
       ["Peak Hz", archAnalysisCache?.spectrum?.peak_freq != null ? archAnalysisCache.spectrum.peak_freq + " Гц" : "—"],
     ];
@@ -1296,44 +1455,13 @@ function renderArchRmssd(analysis) {
   archRM = charts.makeRmssdPlot(el, analysis.rmssd_trend, analysis.duration_sec, ARCHIVE_PLOT_H);
 }
 
-async function openArchiveSession(id) {
-  const detail = $("arch_detail");
-  detail.classList.add("visible");
-  $("arch_id").textContent = String(id);
-  const delBtn = $("btn_delete_arch_session");
-  if (delBtn) {
-    delBtn.hidden = false;
-    delBtn.onclick = () => deleteSession(id);
-  }
-
-  destroyArchPlots();
-  archAnalysisCache = null;
-
-  let sum = null;
-  try {
-    sum = await api(`/api/sessions/${id}`);
-  } catch {
-    $("arch_summary_grid").innerHTML = "<p style='color:var(--text-dim);font-size:.8rem'>Сводка недоступна (сессия ещё идёт?)</p>";
-  }
-
-  let analysis = null;
-  try {
-    analysis = await api(`/api/sessions/${id}/analysis`);
-    archAnalysisCache = analysis;
-  } catch (e) {
-    setErr(String(e.message || e));
-  }
-
-  if (sum) {
-    renderSummaryGrid(sum);
-    renderArchNotes(sum);
-  }
-
+function renderArchiveAnalysisCharts(analysis, sum) {
   const charts = AC();
-  if (!charts) return;
+  if (!charts || !analysis) return;
 
   const profile = chartProfileFor(sum?.tag);
   const activePanels = new Set(profile.panels);
+  const stable = !!analysis.stable_zone;
 
   const rrEl = $("arch_rr");
   const pEl = $("arch_poincare");
@@ -1348,11 +1476,25 @@ async function openArchiveSession(id) {
     if (el) el.innerHTML = "";
   }
 
+  const rrTitle = rrEl?.closest(".plot-card")?.querySelector(".plot-title");
+  if (rrTitle) {
+    rrTitle.textContent = stable
+      ? `RR — полная сессия (анализ: ${STABLE_ZONE_TRIM_SEC}…${Math.round(Math.max(0, analysis.duration_sec - STABLE_ZONE_TRIM_SEC))} с)`
+      : "RR — от начала сессии (raw)";
+  }
+
+  const rrOpts = {
+    ...(profile.options.rr || {}),
+    ...rrPlotTrimOpts(analysis),
+  };
+
   if (activePanels.has("rr")) {
-    if (analysis?.raw_rr?.length && analysis?.raw_rr_x?.length) {
+    const xs = analysis.raw_rr_x || [];
+    const ys = analysis.raw_rr || [];
+    if (ys.length && xs.length) {
       archRR = charts.makeRawRrPlot(
-        rrEl, analysis.raw_rr_x, analysis.raw_rr, analysis.duration_sec,
-        ARCHIVE_PLOT_H, profile.options.rr
+        rrEl, xs, ys, analysis.duration_sec,
+        ARCHIVE_PLOT_H, rrOpts
       );
     } else if (rrEl) {
       charts.setChartEmpty(rrEl, "Нет данных RR");
@@ -1360,7 +1502,8 @@ async function openArchiveSession(id) {
   }
 
   if (activePanels.has("poincare")) {
-    const hasRawPoincare = analysis?.raw_rr?.length >= 2;
+    const poincareRr = stable ? null : analysis?.raw_rr;
+    const hasRawPoincare = !stable && poincareRr?.length >= 2;
     if (!hasRawPoincare && (analysis?.poincare?.insufficient_data || !analysis?.poincare?.points?.length)) {
       charts.setChartEmpty(pEl, analysis?.poincare?.message || "Недостаточно данных");
     } else {
@@ -1369,7 +1512,7 @@ async function openArchiveSession(id) {
         analysis?.poincare?.points,
         ARCHIVE_PLOT_H,
         analysis?.poincare?.bounds,
-        analysis?.raw_rr,
+        poincareRr,
         profile.options.poincare
       );
     }
@@ -1396,8 +1539,71 @@ async function openArchiveSession(id) {
 
   renderArchRmssd(analysis);
   nextFrame(resizePlots);
+}
+
+async function openArchiveSession(id) {
+  if (id === currentSessionId) {
+    setErr("Построение графиков для активной сессии недоступно. Завершите сессию сначала.");
+    return;
+  }
+  const detail = $("arch_detail");
+  detail.classList.add("visible");
+  $("arch_id").textContent = String(id);
+  const delBtn = $("btn_delete_arch_session");
+  if (delBtn) {
+    delBtn.hidden = false;
+    delBtn.onclick = () => deleteSession(id);
+  }
+
+  destroyArchPlots();
+  archAnalysisCache = null;
+  archSummaryCache = null;
+
+  let sum = null;
+  try {
+    sum = await api(`/api/sessions/${id}`);
+  } catch {
+    $("arch_summary_grid").innerHTML = "<p style='color:var(--text-dim);font-size:.8rem'>Сводка недоступна (сессия ещё идёт?)</p>";
+  }
+
+  let analysis = null;
+  try {
+    analysis = await api(sessionAnalysisUrl(id));
+    archAnalysisCache = analysis;
+  } catch (e) {
+    setErr(String(e.message || e));
+  }
+
+  if (sum) {
+    archSummaryCache = sum;
+    renderSummaryGrid(sum);
+    renderArchNotes(sum);
+  }
+
+  if (analysis) {
+    renderArchiveAnalysisCharts(analysis, sum);
+  }
+
   detail.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+function rerenderArchiveCharts() {
+  const id = Number($("arch_id")?.textContent);
+  if (!id || !archSummaryCache) return;
+  api(sessionAnalysisUrl(id))
+    .then((analysis) => {
+      archAnalysisCache = analysis;
+      destroyArchPlots();
+      renderSummaryGrid(archSummaryCache);
+      renderArchiveAnalysisCharts(analysis, archSummaryCache);
+    })
+    .catch((e) => setErr(String(e.message || e)));
+}
+
+$("arch_stable_zone")?.addEventListener("change", (ev) => {
+  setStableZone(ev.target.checked);
+  rerenderArchiveCharts();
+});
 
 $("arch_rmssd_mode")?.addEventListener("change", () => {
   renderArchRmssd(archAnalysisCache);
@@ -1530,6 +1736,7 @@ async function loadProgress() {
   const tag = $("prog_tag")?.value || "";
   const participant = $("prog_participant")?.value?.trim() || "";
   let url = "/api/progress/analysis?max_sessions=40&max_points_per_session=12000";
+  if (stableZoneEnabled()) url += "&stable_zone=true";
   if (tag) url += `&tag=${encodeURIComponent(tag)}`;
   url = appendNoteTagFilters(url, progNoteTagsInput);
   url = appendDateFilters(url, $("prog_period"));
@@ -1548,6 +1755,11 @@ async function loadProgress() {
 
 $("btn_prog_build")?.addEventListener("click", loadProgress);
 
+$("prog_stable_zone")?.addEventListener("change", (ev) => {
+  setStableZone(ev.target.checked);
+  if (progSessionsRaw.length) loadProgress().catch((e) => setProgErr(String(e.message || e)));
+});
+
 // ── DELETE SESSION ────────────────────────────────────────────────────────
 async function deleteSession(id) {
   const ok = confirm(`Удалить сессию #${id}?\n\nТочки RR/RMSSD и логи фраз будут удалены. Действие необратимо.`);
@@ -1560,6 +1772,7 @@ async function deleteSession(id) {
       $("btn_delete_arch_session")?.setAttribute("hidden", "");
       destroyArchPlots();
       archAnalysisCache = null;
+      archSummaryCache = null;
     }
     await loadArchive();
     if ($("tab-progress")?.classList.contains("active")) {
@@ -1600,4 +1813,5 @@ $("btn_wipe_history_prog")?.addEventListener("click", wipeHistory);
 loadSessionTypes().catch(e => setErr(String(e)));
 syncSourceFields();
 syncGuidedPhraseOptionsVisibility();
+syncStableZoneCheckboxes();
 setLiveEmptyState("idle");

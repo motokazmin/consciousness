@@ -283,7 +283,8 @@ masterGain
 - [x] `MockHRVSource` — AR(1), цикл состояний, профиль meditation (RSA)
 - [x] `PolarH10Source` — BLE, реконнект, `start_notify` с таймаутом/ретраями, watchdog по отсутствию RR
 - [x] RMSSD на скользящем окне 60 с
-- [x] **Веб-UI** (`python -m hrv_web`): live-графики RR + RMSSD (uPlot), архив, вкладка «Прогресс», guided mp3-фразы; типы активности в БД; теги заметок `#…`; фильтры по периоду и тегам
+- [x] **Веб-UI** (`python -m hrv_web`): live-графики RR + RMSSD (uPlot), архив (Poincaré, FFT, SDNN), вкладка «Прогресс» (overlay), guided mp3-фразы с выбором набора; типы активности в БД; теги заметок `#…`; фильтры по периоду и тегам
+- [x] Post-session анализ (`analysis.py`): Poincaré, Welch PSD, coherence, SDNN/RMSSD trends; опция **«Стабильная зона (±1 мин)»**
 - [x] SQLite: `sessions`, `hrv_points`, `baseline`, `session_types`, `meditation_phrase_log`; опции сессии (`opt_guided_phrases`, `opt_audio_biofeedback`)
 - [x] Drift detection (флаг в WebSocket; `notify-send` в веб-сессии отключён)
 - [x] **Session summary** после «Стоп»: длительность, min/mean/max RMSSD, drift-события, **vs baseline**, включённые опции
@@ -302,13 +303,16 @@ masterGain
 ## Файловая структура
 
 ```
-hrv_core/         — ядро: источники RR, RMSSD/drift, SQLite, session_types (seed)
-tests/            — unittest (pipeline, tags, delete_session, …)
+hrv_core/         — ядро: источники RR, RMSSD/drift, SQLite, analysis, preprocessing
+tests/            — unittest (pipeline, tags, analysis stable zone, …)
 hrv_web/          — FastAPI + статика (единственный UI записи сессий)
   static/app.js              — SPA: форма, WebSocket, архив, прогресс
+  static/analysis_charts.js  — post-session графики (RR, SDNN, Poincaré, FFT)
   static/hrv_audio_engine.js — Web Audio: triggerBeat, текстуры, rmssd pad
   static/meditation_engine.js — guided mp3-фразы (meditation / relaxation)
+  static/phrases/            — mp3 по {prefix}/{set}/
   static/index.html          — UI режимов «Дышащий Эмбиент» / «Трансовый Порог»
+explain.md        — интерпретация графиков и опций анализа
 requirements.txt  — зависимости pip
 hrv_data.sqlite   — база данных (создаётся автоматически)
 ```
@@ -371,3 +375,45 @@ python -m hrv_web
 2. Сравнить форму кривых на вкладке «Запись» и наложение на «Прогресс» (фильтры по типу, периоду, тегу заметки).
 
 После перехода на **реальный H10** смысл тот же: смотреть **дифференсы и устойчивые участки** относительно своих baseline и своих тегов сессий, а выводы об осознанности оставлять за **самонаблюдением и последующей разметкой**, а не за цветом линии один в один.
+
+---
+
+## Post-session анализ (Архив и Прогресс)
+
+После завершения сессии доступны графики Poincaré, спектр FFT, SDNN и (опционально) RMSSD. Подробная интерпретация: [explain.md](explain.md).
+
+### API
+
+| Endpoint | Назначение |
+|----------|------------|
+| `GET /api/sessions/{id}/analysis` | Полный анализ одной сессии |
+| `GET /api/progress/analysis` | Overlay нескольких сессий (фильтры: период, тип, теги заметок, участник) |
+
+Параметры анализа:
+
+| Параметр | Описание |
+|----------|----------|
+| `stable_zone=true` | Обрезка краёв ±60 с для Poincaré, спектра, SDNN; RR-график — полный, края затемнены |
+| `smooth=true` | Устаревший алиас `stable_zone` |
+| `max_points` | Downsampling точек (архив, по умолчанию 12000) |
+
+### Опции UI
+
+| Опция | Вкладка | Описание |
+|-------|---------|----------|
+| **Стабильная зона (±1 мин)** | Архив, Прогресс | Синхронизированный чекбокс; состояние в `localStorage` |
+| **Набор фраз** | Запись | Подпапка в `phrases/{prefix}/{set}/`; список: `GET /api/meditation/phrase-sets` |
+| **HRV-реактивные фразы** | Запись | Guided mp3 по RMSSD; лог в `meditation_phrase_log` |
+| **chart_profile** | Архив | Набор панелей по типу сессии (`CHART_PROFILES` в `app.js`) |
+
+### Guided meditation
+
+- `meditation` → `phrase_prefix=sit`, `relaxation` → `lay`
+- Файлы: `hrv_web/static/phrases/{prefix}/{set}/*.mp3`
+- Мин. пауза между фразами — настраивается в форме (по умолчанию 20 с)
+
+### Модули
+
+- [`hrv_core/analysis.py`](hrv_core/analysis.py) — расчёт метрик
+- [`hrv_core/preprocessing.py`](hrv_core/preprocessing.py) — стабильная зона, detrend, bounds Poincaré
+- [`hrv_web/static/analysis_charts.js`](hrv_web/static/analysis_charts.js) — отрисовка

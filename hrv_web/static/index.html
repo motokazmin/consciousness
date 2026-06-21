@@ -89,10 +89,14 @@
       transition: color .18s, border-color .18s;
       text-transform: uppercase;
     }
+    @media (max-width: 600px) {
+      nav button { padding: 10px 12px 14px; font-size: 0.78rem; }
+    }
     nav button:hover { color: var(--text); }
     nav button.active {
       color: var(--accent);
       border-bottom-color: var(--accent);
+      text-shadow: 0 0 8px rgba(0,212,255,0.3);
     }
 
     /* ── LAYOUT ── */
@@ -114,6 +118,15 @@
     }
     @media (max-width: 900px) {
       .grid-2 { grid-template-columns: 1fr; }
+      main { padding: 16px 12px; }
+      nav { padding: 10px 12px 0; }
+      header { padding: 14px 16px; }
+    }
+    @media (max-width: 600px) {
+      .btn { padding: 12px 18px; min-height: 44px; font-size: 0.9rem; }
+      .field input, .field select { padding: 12px; font-size: 1rem; }
+      .stats-strip { grid-template-columns: 1fr 1fr; }
+      .summary-grid { grid-template-columns: 1fr 1fr; }
     }
 
     /* ── CARD ── */
@@ -228,6 +241,17 @@
       color: var(--text);
     }
     .btn-secondary:hover:not(:disabled) { border-color: var(--accent2); }
+
+    /* micro interactions */
+    .card { transition: transform .15s ease, box-shadow .15s ease; }
+    .card:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+    .mode-option { transition: transform .12s ease, border-color .15s, background .15s; }
+    .mode-option:hover { transform: translateY(-1px); }
+    .modal-overlay { transition: opacity .2s ease; }
+    .modal-card { transition: transform .2s ease; }
+    .stats-strip { transition: opacity .2s ease; }
+    .arch-detail { transition: opacity .2s ease; }
+    .tag-chip { transition: background .1s ease; }
 
     /* ── STATUS BAR ── */
     .status-bar {
@@ -575,8 +599,17 @@
       border-radius: 12px;
       z-index: 2;
       pointer-events: none;
+      text-align: center;
+      padding: 16px;
     }
     .chart-empty.hidden { display: none; }
+    .chart-empty::before {
+      content: "📊";
+      display: block;
+      font-size: 1.6rem;
+      margin-bottom: 8px;
+      opacity: 0.4;
+    }
 
     .archive-timeseries-stack {
       display: flex;
@@ -612,6 +645,7 @@
       max-width: 220px;
       line-height: 1.4;
       text-align: right;
+      cursor: help;
     }
 
     .plot-header-badges {
@@ -1083,6 +1117,18 @@
     ::-webkit-scrollbar-track { background: var(--bg); }
     ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2px solid var(--border2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
   </style>
 </head>
 <body>
@@ -1096,11 +1142,11 @@
   <div class="logo-text">HRV <span>Monitor</span></div>
 </header>
 
-<nav>
-  <button type="button" data-tab="live" class="active">Запись</button>
-  <button type="button" data-tab="biofeedback">Биофидбек</button>
-  <button type="button" data-tab="archive">Архив</button>
-  <button type="button" data-tab="progress">Прогресс</button>
+<nav role="tablist" aria-label="Навигация по разделам">
+  <button type="button" role="tab" aria-selected="true" data-tab="live" class="active">Запись</button>
+  <button type="button" role="tab" aria-selected="false" data-tab="biofeedback">Биофидбек</button>
+  <button type="button" role="tab" aria-selected="false" data-tab="archive">Архив</button>
+  <button type="button" role="tab" aria-selected="false" data-tab="progress">Прогресс</button>
 </nav>
 
 <main>
@@ -1155,6 +1201,10 @@
                 HRV-реактивные голосовые фразы (mp3)
               </label>
               <div class="field" style="margin-top:10px;margin-bottom:0">
+                <label for="guided_phrase_set">Набор фраз</label>
+                <select id="guided_phrase_set" style="max-width:100%"></select>
+              </div>
+              <div class="field" style="margin-top:10px;margin-bottom:0">
                 <label for="guided_phrase_interval">Мин. пауза между фразами, сек</label>
                 <input
                   id="guided_phrase_interval"
@@ -1166,7 +1216,7 @@
                 />
               </div>
               <p style="font-size:.75rem;color:var(--text-muted);margin:6px 0 0;line-height:1.45">
-                Медитация — sit_*, отдых — lay_*. Набор фраз подхватывается автоматически из папки phrases/ при старте сессии. Вход и выход — с короткой паузой (~2 с).
+                Медитация — sit/*, отдых — lay/*. Выберите подпапку (directive, poetic, …) для сравнения вариантов. Вход и выход — с короткой паузой (~2 с).
               </p>
             </div>
             <div class="biofeedback-options">
@@ -1232,8 +1282,20 @@
                   <path d="M0,28 Q25,40 50,28 T100,28 T150,28 T200,28" style="animation-delay:.6s" />
                 </svg>
               </div>
-              <div class="biofeedback-placeholder-title">Биофидбек / Обратная связь<br>(В разработке)</div>
-              <div class="biofeedback-placeholder-sub">Индикаторы состояния в реальном времени</div>
+              <div class="biofeedback-placeholder-title">Биофидбек активен</div>
+              <div class="biofeedback-mini-stats" style="max-width:220px;margin-top:12px">
+                <div class="stat-cell" style="padding:8px 12px">
+                  <div class="stat-label">RMSSD</div>
+                  <div class="stat-value" id="live_bf_rmssd">—</div>
+                  <div class="stat-sub">ms</div>
+                </div>
+                <div class="stat-cell" style="padding:8px 12px">
+                  <div class="stat-label">Coherence</div>
+                  <div class="stat-value" id="live_bf_rn">—</div>
+                  <div class="stat-sub">× baseline</div>
+                </div>
+              </div>
+              <div class="biofeedback-placeholder-sub">Аудио и guided meditation в реальном времени</div>
             </div>
           </div>
         </div>
@@ -1404,6 +1466,10 @@
             <div class="s-label">Заметки</div>
             <div class="arch-notes-text" id="arch_notes_text"></div>
           </div>
+          <label class="check-label chart-stable-zone-toggle" style="margin-bottom:12px">
+            <input type="checkbox" id="arch_stable_zone" />
+            Стабильная зона (±1 мин) — Poincaré, спектр и SDNN без краёв сессии
+          </label>
           <div class="archive-timeseries-stack">
             <div class="plot-card" style="margin-bottom:0">
               <div class="plot-header">
@@ -1423,7 +1489,7 @@
               <div class="plot-header">
                 <span class="plot-title">Скаттерограмма Пуанкаре</span>
                 <div class="plot-header-badges">
-                  <span class="chart-badge">Широкое Облако — Высокая ВСР / Когерентность</span>
+                  <span class="chart-badge" title="Широкое облако точек указывает на высокую вариабельность и хорошую когерентность">Широкое Облако — Высокая ВСР / Когерентность</span>
                 </div>
               </div>
               <div class="plot-body" id="arch_poincare"></div>
@@ -1432,7 +1498,7 @@
               <div class="plot-header">
                 <span class="plot-title">Спектральный анализ FFT</span>
                 <div class="plot-header-badges">
-                  <span class="chart-badge">Одиночный Чистый Пик — Когерентность</span>
+                  <span class="chart-badge" title="Чёткий пик на низкой частоте (~0.1 Гц) — признак когерентного состояния">Одиночный Чистый Пик — Когерентность</span>
                 </div>
               </div>
               <div class="peak-marker-wrap">
@@ -1504,6 +1570,10 @@
           </div>
         </div>
         <div class="prog-toolbar">
+          <label class="check-label chart-stable-zone-toggle">
+            <input type="checkbox" id="prog_stable_zone" />
+            Стабильная зона (±1 мин) — Poincaré, спектр и SDNN без краёв сессии
+          </label>
           <span style="font-size:.78rem;color:var(--text-dim)">Отметьте сессии в таблице для наложения на графики</span>
           <button type="button" class="btn btn-danger" id="btn_wipe_history_prog" style="font-size:.78rem;padding:6px 14px">
             Очистить всю историю
@@ -1520,6 +1590,7 @@
               <div class="plot-body" id="prog_spectrum"></div>
               <span class="peak-marker" id="prog_peak_marker"></span>
             </div>
+            <span class="chart-badge" title="Чёткий пик на низкой частоте (~0.1 Гц) — признак когерентного состояния" style="margin:6px 0 0 auto;display:block;max-width:fit-content">Одиночный Чистый Пик — Когерентность</span>
           </div>
           <div class="plot-card" style="margin-bottom:0">
             <div class="plot-header"><span class="plot-title">SDNN Trend Overlay</span></div>
@@ -1558,6 +1629,7 @@
     <h2 id="session_notes_title">Заметки к сессии</h2>
     <p class="modal-desc">Опишите переживания и контекст.</p>
     <textarea id="session_notes_input" placeholder="Глубокое расслабление после 10-й минуты" maxlength="4000"></textarea>
+    <div style="font-size:0.7rem;color:var(--text-muted);text-align:right;margin-top:4px"><span id="notes_char_count">0</span>/4000</div>
     <div class="field" style="margin-top:14px">
       <label>Теги <span class="field-hint">(для фильтра в архиве и прогрессе)</span></label>
       <div class="tag-chip-input" id="session_notes_tags">
@@ -1577,7 +1649,7 @@
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
 <script src="/assets/hrv_audio_engine.js?v=3"></script>
 <script src="/assets/meditation_engine.js?v=3"></script>
-<script src="/assets/analysis_charts.js?v=4"></script>
+<script src="/assets/analysis_charts.js?v=6"></script>
 <script src="/assets/app.js?v=21"></script>
 </body>
 </html>

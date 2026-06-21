@@ -91,6 +91,8 @@ flowchart LR
 | `session_types.py` | Системные типы сессий (seed в БД при первом запуске): slug, label, mock-профиль, phrase_prefix |
 | `tags.py` | Нормализация метки `tag` при старте сессии |
 | `summary.py` | Session summary (JSON API) |
+| `preprocessing.py` | Маска стабильной зоны, detrend для FFT, границы viewport Poincaré |
+| `analysis.py` | Post-session: Poincaré, Welch PSD, SDNN/RMSSD trends, coherence |
 | `ble_scan.py` | BLE-сканирование Polar, проверка BlueZ/bleak (подключение) |
 
 ### `hrv_web/` — веб-интерфейс
@@ -100,6 +102,7 @@ flowchart LR
 | `server.py` | FastAPI: REST + WebSocket, раздача статики |
 | `session_manager.py` | `SessionManager` — одна активная сессия, очередь для WebSocket |
 | `static/app.js` | SPA: форма, WebSocket, архив, прогресс, guided-фразы |
+| `static/analysis_charts.js` | Отрисовка архивных графиков (RR, SDNN, Poincaré, FFT, overlay) |
 | `static/meditation_engine.js` | HRV-реактивные mp3-фразы (meditation → sit, relaxation → lay) |
 | `static/hrv_audio_engine.js` | Web Audio: пульс, текстуры, трансовый pad |
 | `static/index.html` | UI режимов «Дышащий Эмбиент» / «Трансовый Порог» |
@@ -188,13 +191,66 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 | `/api/sessions/{id}/stream` | WebSocket | Live: `beat`, `meta`, `ended` |
 | `/api/sessions/{id}` | GET/DELETE | Summary завершённой сессии / удаление |
 | `/api/sessions/{id}/points` | GET | Точки (с downsampling) |
+| `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); `?stable_zone=true`, `max_points` |
 | `/api/progress` | GET | Наложение RMSSD-кривых завершённых сессий |
+| `/api/progress/analysis` | GET | Overlay Poincaré / спектр / SDNN; фильтры + `?stable_zone=true` |
 | `/api/history` | DELETE | Очистка всей истории |
-| `/api/meditation/phrase-manifest` | GET | Список mp3-фраз в `static/phrases/` |
+| `/api/meditation/phrase-sets` | GET | Список наборов фраз (`?prefix=sit\|lay`) |
+| `/api/meditation/phrase-manifest` | GET | Список mp3 в `static/phrases/{prefix}/{set}/` |
 | `/api/meditation/phrase-log` | POST/PATCH | Лог воспроизведения guided-фраз |
 | `/api/meditation/phrase-stats` | GET | Статистика фраз по `session_id` |
 
 Одновременно допускается **только одна активная сессия** (409 Conflict при повторном старте).
+
+Подробная интерпретация графиков и опций UI: [explain.md](explain.md).
+
+---
+
+## Post-session анализ (графики)
+
+После **Стоп** сессии вкладки **Архив** и **Прогресс** запрашивают анализ у сервера. Live-графики на вкладке «Запись» считаются в браузере из WebSocket; post-session — в [`hrv_core/analysis.py`](hrv_core/analysis.py).
+
+### Поток данных
+
+```
+hrv_points (ts, rr_ms, rmssd)
+  → session_analysis() / progress_session_analysis()
+  → JSON → analysis_charts.js (uPlot)
+```
+
+### Графики и расчёт
+
+| График | Модуль | Алгоритм |
+|--------|--------|----------|
+| **RR** | `raw_rr_timeline` | Сырые RR, ось X = секунды от t₀; без сглаживания |
+| **Poincaré** | `poincare_pairs` | Пары (RRₙ, RRₙ₊₁), SD1/SD2; decimate до 2500 точек; viewport p5–p95 |
+| **Спектр (FFT)** | `compute_spectrum` | Интерполяция 4 Гц → detrend → Welch PSD; пик в 0.04–0.15 Гц |
+| **Coherence** | `coherence_score` | Доля мощности в 0.08–0.12 Гц от суммы 0–0.5 Гц (%) |
+| **SDNN trend** | `moving_sdnn` | std(RR) в окне 60 с; первые 20 с не рисуются |
+| **RMSSD trend** | `rmssd_trend` | Сохранённые значения `rmssd` по времени |
+
+Константы: `STABLE_ZONE_TRIM_SEC=60`, `MIN_STABLE_ZONE_SEC=120`, `MIN_SPECTRAL_SEC=60`, `SDNN_INITIAL_CROP_SEC=20`.
+
+### Опция «Стабильная зона (±1 мин)»
+
+Параметр API: `stable_zone=true` (алиас `smooth=true` — устаревший). Чекбокс в UI синхронизирован между Архивом и Прогрессом (`localStorage`: `hrv_stable_zone`).
+
+| Компонент | Поведение при `stable_zone=true` |
+|-----------|----------------------------------|
+| RR-график | Полная сессия; края ±60 с **затемнены** на клиенте |
+| Poincaré, спектр, SDNN, mean RR, coherence | Только удары в `[t₀+60 с, t_end−60 с]` |
+| RMSSD trend | Всегда полная сессия |
+| Trim не применяется | Если эффективная зона < 120 с или сессия < ~4 мин |
+
+Маска: [`stable_zone_mask()`](hrv_core/preprocessing.py). Фильтр артефактов и скользящее среднее по RR **не** используются — внутрисессионные скачки сохраняются.
+
+### Ответ `/api/sessions/{id}/analysis`
+
+Ключевые поля: `raw_rr`, `raw_rr_x`, `poincare`, `spectrum`, `sdnn_trend`, `rmssd_trend`, `mean_rr`, `coherence_score`, `stable_zone`, `trim: {start_sec, end_sec, applied}`.
+
+### Guided meditation
+
+Фразы: `hrv_web/static/phrases/{prefix}/{set}/` (`prefix`: `sit` / `lay` из `session_types.phrase_prefix`). UI: выбор набора фраз, HRV-реактивное воспроизведение ([`meditation_engine.js`](hrv_web/static/meditation_engine.js)).
 
 ---
 
@@ -305,11 +361,12 @@ Python 3.12 · numpy · scipy · bleak (BLE) · FastAPI · uvicorn · SQLite · 
 
 ```
 consciousness/
-├── hrv_core/           # Ядро: источники, pipeline, БД, session_types (seed), note_tags
-├── tests/              # unittest (pipeline, tags, db, …)
-├── hrv_web/            # FastAPI + статика (app.js, hrv_audio_engine.js, meditation_engine.js)
+├── hrv_core/           # Ядро: источники, pipeline, БД, analysis, preprocessing
+├── tests/              # unittest (pipeline, tags, analysis stable zone, …)
+├── hrv_web/            # FastAPI + статика (app.js, analysis_charts.js, …)
 ├── requirements.txt
 ├── hrv_data.sqlite     # БД (runtime)
+├── explain.md          # Графики: расчёт, опции, интерпретация
 ├── ARCHITECTURE.md     # Этот документ
 └── hrv_mvp.md          # Детальная спецификация MVP
 ```
