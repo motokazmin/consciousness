@@ -10,6 +10,7 @@ from hrv_core.preprocessing import (
     MIN_STABLE_ZONE_SEC,
     SDNN_INITIAL_CROP_SEC,
     STABLE_ZONE_TRIM_SEC,
+    ectopic_mask,
     preprocess_rr_session,
     stable_zone_mask,
 )
@@ -330,6 +331,12 @@ def session_analysis(
         ts_a = ts
         rr_a = rr
 
+    # Фильтр эктопических ударов — точечные выбросы внутри сессии.
+    # Применяется после stable_zone (края уже отрезаны), только к аналитике.
+    ectopic = ectopic_mask(rr_a)
+    ts_a = ts_a[ectopic]
+    rr_a = rr_a[ectopic]
+
     preprocessed = preprocess_rr_session(rr_a)
     analysis_rr = np.array(preprocessed["raw_rr"], dtype=float)
     fft_rr = np.array(preprocessed["fft_input_rr"], dtype=float)
@@ -342,6 +349,10 @@ def session_analysis(
         power = np.array(spectrum["power"])
         coherence = coherence_score(freqs, power)
 
+    # analysis_rr_* — ряд после stable_zone + ectopic фильтрации, для Poincaré overlay.
+    # raw_rr_* — полный ряд для таймлайна (всегда вся сессия).
+    analysis_rr_x, analysis_rr_y = raw_rr_timeline(ts_a, rr_a, t0)
+
     return {
         "duration_sec": round(duration_sec, 2),
         "mean_rr": round(mean_rr(analysis_rr), 1) if mean_rr(analysis_rr) is not None else None,
@@ -350,6 +361,8 @@ def session_analysis(
         "trim": trim_meta,
         "raw_rr": full_rr_y,
         "raw_rr_x": full_rr_x,
+        "analysis_rr": analysis_rr_y,
+        "analysis_rr_x": analysis_rr_x,
         "poincare": poincare_pairs(
             analysis_rr, max_points=poincare_max, bounds=poincare_bounds
         ),
@@ -380,19 +393,11 @@ def progress_session_analysis(
         trim_start_sec=trim_start_sec,
         trim_end_sec=trim_end_sec,
     )
-    # Для overlay Poincaré — RR только из стабильной зоны (если trim применён).
-    poincare_rr = full["raw_rr"]
-    poincare_rr_x = full["raw_rr_x"]
-    if full.get("stable_zone"):
-        trim = full.get("trim") or {}
-        t_start = trim.get("start_sec", 0)
-        t_end = full["duration_sec"] - trim.get("end_sec", 0)
-        poincare_rr = []
-        poincare_rr_x = []
-        for x, y in zip(full["raw_rr_x"], full["raw_rr"]):
-            if t_start <= x <= t_end:
-                poincare_rr_x.append(x)
-                poincare_rr.append(y)
+    # Для overlay Poincaré — ряд после stable_zone + ectopic фильтрации.
+    # session_analysis уже применил оба фильтра и вернул analysis_rr_* —
+    # берём напрямую, не дублируя логику здесь.
+    poincare_rr = full.get("analysis_rr", full["raw_rr"])
+    poincare_rr_x = full.get("analysis_rr_x", full["raw_rr_x"])
     return {
         "mean_rr": full["mean_rr"],
         "coherence_score": full["coherence_score"],

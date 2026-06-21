@@ -18,6 +18,24 @@ STABLE_ZONE_TRIM_SEC = 60.0
 MIN_STABLE_ZONE_SEC = 120.0
 
 
+ECTOPIC_IQR_FACTOR = 2.5
+"""RR-интервалы, отклоняющиеся от медианы более чем на ECTOPIC_IQR_FACTOR * IQR,
+считаются артефактами (эктопические удары, помехи датчика).
+Применяется только к аналитике; raw_rr для таймлайна остаётся нетронутым."""
+
+
+def ectopic_mask(rr: np.ndarray, iqr_factor: float = ECTOPIC_IQR_FACTOR) -> np.ndarray:
+    """True = валидный удар. Фильтрует точечные выбросы внутри сессии."""
+    if rr.size < 4:
+        return np.ones(rr.size, dtype=bool)
+    q25, q75 = np.percentile(rr, [25, 75])
+    iqr = q75 - q25
+    if iqr == 0:
+        return np.ones(rr.size, dtype=bool)
+    median = np.median(rr)
+    return np.abs(rr - median) <= iqr_factor * iqr
+
+
 def stable_zone_mask(
     ts: np.ndarray,
     *,
