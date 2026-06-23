@@ -78,6 +78,7 @@ def session_summary_dict(
             coherence = coherence_score(
                 np.array(spec["freqs"]),
                 np.array(spec["power"]),
+                spec.get("peak_freq"),
             )
             out["coherence_score"] = coherence
         else:

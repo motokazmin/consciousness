@@ -17,7 +17,11 @@ from hrv_core.preprocessing import (
 
 MIN_POINCARE_RR = 10
 MIN_SPECTRAL_SEC = 60.0
-COHERENCE_BAND = (0.08, 0.12)
+COHERENCE_HALF_WIDTH = 0.02
+"""Ширина полосы вокруг peak_freq для расчёта когерентности (±Гц).
+Адаптивная полоса: score высокий когда спектр остроконечный,
+низкий когда размазан по нескольким пикам.
+"""
 SPECTRUM_MAX_HZ = 0.5
 RESONANCE_BAND = (0.04, 0.15)
 DEFAULT_FS = 4.0
@@ -137,11 +141,20 @@ def welch_psd(signal: np.ndarray, fs: float = DEFAULT_FS) -> tuple[np.ndarray, n
     return freqs, power
 
 
-def coherence_score(freqs: np.ndarray, power: np.ndarray) -> float | None:
-    if freqs.size == 0 or power.size == 0:
+def coherence_score(
+    freqs: np.ndarray,
+    power: np.ndarray,
+    peak_freq: float | None,
+) -> float | None:
+    """Доля мощности в полосе ±COHERENCE_HALF_WIDTH вокруг peak_freq.
+
+    Адаптивная полоса: score высокий когда спектр остроконечный
+    (вся энергия сконцентрирована у пика), низкий когда размазан.
+    """
+    if freqs.size == 0 or power.size == 0 or peak_freq is None:
         return None
 
-    mask_total = (freqs >= 0.0) & (freqs <= SPECTRUM_MAX_HZ)
+    mask_total = (freqs >= 0.003) & (freqs <= SPECTRUM_MAX_HZ)
     if not np.any(mask_total):
         return None
 
@@ -149,7 +162,8 @@ def coherence_score(freqs: np.ndarray, power: np.ndarray) -> float | None:
     if total_power <= 0:
         return None
 
-    lo, hi = COHERENCE_BAND
+    lo = peak_freq - COHERENCE_HALF_WIDTH
+    hi = peak_freq + COHERENCE_HALF_WIDTH
     mask_band = (freqs >= lo) & (freqs <= hi)
     band_power = float(np.sum(power[mask_band])) if np.any(mask_band) else 0.0
     return round(min(100.0, band_power / total_power * 100.0), 1)
@@ -347,7 +361,7 @@ def session_analysis(
     if not spectrum.get("insufficient_data"):
         freqs = np.array(spectrum["freqs"])
         power = np.array(spectrum["power"])
-        coherence = coherence_score(freqs, power)
+        coherence = coherence_score(freqs, power, spectrum.get("peak_freq"))
 
     # analysis_rr_* — ряд после stable_zone + ectopic фильтрации, для Poincaré overlay.
     # raw_rr_* — полный ряд для таймлайна (всегда вся сессия).
