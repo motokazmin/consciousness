@@ -1581,7 +1581,11 @@
           </div>
           <label class="check-label chart-stable-zone-toggle" style="margin-bottom:12px">
             <input type="checkbox" id="arch_stable_zone" />
-            Стабильная зона (±1 мин) — Poincaré, спектр и SDNN без краёв сессии
+            Стабильная зона (±1 мин) — без краёв сессии на RR и аналитике
+          </label>
+          <label class="check-label chart-stable-zone-toggle" style="margin-bottom:12px">
+            <input type="checkbox" id="arch_filter_outliers" />
+            Без выбросов — без единичных артефактов RR на всех графиках
           </label>
           <div class="archive-timeseries-stack">
             <div class="plot-card" style="margin-bottom:0">
@@ -1685,7 +1689,11 @@
         <div class="prog-toolbar">
           <label class="check-label chart-stable-zone-toggle">
             <input type="checkbox" id="prog_stable_zone" />
-            Стабильная зона (±1 мин) — Poincaré, спектр и SDNN без краёв сессии
+            Стабильная зона (±1 мин) — без краёв сессии на RR и аналитике
+          </label>
+          <label class="check-label chart-stable-zone-toggle">
+            <input type="checkbox" id="prog_filter_outliers" />
+            Без выбросов — без единичных артефактов RR на всех графиках
           </label>
           <span style="font-size:.78rem;color:var(--text-dim)">Отметьте сессии в таблице для наложения на графики</span>
           <button type="button" class="btn btn-danger" id="btn_wipe_history_prog" style="font-size:.78rem;padding:6px 14px">

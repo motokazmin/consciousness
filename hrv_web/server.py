@@ -480,6 +480,7 @@ def session_analysis_endpoint(
     session_id: int,
     max_points: int = 12_000,
     stable_zone: bool = False,
+    filter_outliers: bool = False,
     smooth: bool = False,
 ):
     max_points = max(100, min(max_points, 50_000))
@@ -502,7 +503,11 @@ def session_analysis_endpoint(
     conn.close()
     rows = _decimate_rows(rows, max_points)
     return session_analysis(
-        rows, started, ended, stable_zone=stable_zone or smooth
+        rows,
+        started,
+        ended,
+        stable_zone=stable_zone or smooth,
+        filter_outliers=filter_outliers,
     )
 
 
@@ -516,6 +521,7 @@ def progress_analysis(
     max_sessions: int = 40,
     max_points_per_session: int = 4000,
     stable_zone: bool = False,
+    filter_outliers: bool = False,
     smooth: bool = False,
 ):
     max_sessions = max(1, min(max_sessions, 80))
@@ -558,6 +564,7 @@ def progress_analysis(
             ended,
             rmssd_mean,
             stable_zone=stable_zone or smooth,
+            filter_outliers=filter_outliers,
         )
         out_sessions.append(
             {

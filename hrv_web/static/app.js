@@ -1330,38 +1330,117 @@ let archRM = null;
 let archAnalysisCache = null;
 let archSummaryCache = null;
 
-const STABLE_ZONE_KEY = "hrv_stable_zone";
 const STABLE_ZONE_TRIM_SEC = 60;
 
-function stableZoneEnabled() {
-  const arch = $("arch_stable_zone");
-  const prog = $("prog_stable_zone");
-  if (arch) return arch.checked;
-  if (prog) return prog.checked;
-  if (localStorage.getItem(STABLE_ZONE_KEY) != null) {
-    return localStorage.getItem(STABLE_ZONE_KEY) === "1";
-  }
-  return localStorage.getItem("hrv_chart_smooth") === "1";
+const CHART_FILTER_OPTS = {
+  arch: {
+    stableZoneKey: "hrv_arch_stable_zone",
+    filterOutliersKey: "hrv_arch_filter_outliers",
+    stableZoneId: "arch_stable_zone",
+    filterOutliersId: "arch_filter_outliers",
+  },
+  prog: {
+    stableZoneKey: "hrv_prog_stable_zone",
+    filterOutliersKey: "hrv_prog_filter_outliers",
+    stableZoneId: "prog_stable_zone",
+    filterOutliersId: "prog_filter_outliers",
+  },
+};
+
+function readStoredChartFlag(key, fallback = false) {
+  const v = localStorage.getItem(key);
+  if (v == null) return fallback;
+  return v === "1";
 }
 
-function setStableZone(on) {
-  localStorage.setItem(STABLE_ZONE_KEY, on ? "1" : "0");
-  for (const id of ["arch_stable_zone", "prog_stable_zone"]) {
-    const el = $(id);
-    if (el) el.checked = on;
+function initChartFilterCheckboxes() {
+  const legacyStable = localStorage.getItem("hrv_stable_zone");
+  const legacySmooth = localStorage.getItem("hrv_chart_smooth") === "1";
+  const legacyOutliers = localStorage.getItem("hrv_filter_outliers");
+
+  for (const [scope, cfg] of Object.entries(CHART_FILTER_OPTS)) {
+    if (localStorage.getItem(cfg.stableZoneKey) == null) {
+      const fallback = scope === "arch" && legacyStable != null
+        ? legacyStable === "1"
+        : scope === "arch" && legacySmooth;
+      localStorage.setItem(cfg.stableZoneKey, fallback ? "1" : "0");
+    }
+    if (localStorage.getItem(cfg.filterOutliersKey) == null) {
+      const fallback = scope === "arch" && legacyOutliers === "1";
+      localStorage.setItem(cfg.filterOutliersKey, fallback ? "1" : "0");
+    }
+    const stableEl = $(cfg.stableZoneId);
+    const outlierEl = $(cfg.filterOutliersId);
+    if (stableEl) stableEl.checked = readStoredChartFlag(cfg.stableZoneKey);
+    if (outlierEl) outlierEl.checked = readStoredChartFlag(cfg.filterOutliersKey);
   }
 }
 
-function syncStableZoneCheckboxes() {
-  const on = stableZoneEnabled();
-  for (const id of ["arch_stable_zone", "prog_stable_zone"]) {
-    const el = $(id);
-    if (el) el.checked = on;
-  }
+function stableZoneEnabled(scope) {
+  const cfg = CHART_FILTER_OPTS[scope];
+  const el = $(cfg.stableZoneId);
+  if (el) return el.checked;
+  return readStoredChartFlag(cfg.stableZoneKey);
+}
+
+function setStableZone(scope, on) {
+  const cfg = CHART_FILTER_OPTS[scope];
+  localStorage.setItem(cfg.stableZoneKey, on ? "1" : "0");
+  const el = $(cfg.stableZoneId);
+  if (el) el.checked = on;
+}
+
+function filterOutliersEnabled(scope) {
+  const cfg = CHART_FILTER_OPTS[scope];
+  const el = $(cfg.filterOutliersId);
+  if (el) return el.checked;
+  return readStoredChartFlag(cfg.filterOutliersKey);
+}
+
+function setFilterOutliers(scope, on) {
+  const cfg = CHART_FILTER_OPTS[scope];
+  localStorage.setItem(cfg.filterOutliersKey, on ? "1" : "0");
+  const el = $(cfg.filterOutliersId);
+  if (el) el.checked = on;
+}
+
+function analysisQueryParams(scope) {
+  const params = new URLSearchParams();
+  params.set("stable_zone", stableZoneEnabled(scope) ? "true" : "false");
+  if (filterOutliersEnabled(scope)) params.set("filter_outliers", "true");
+  return params.toString();
 }
 
 function sessionAnalysisUrl(sessionId) {
-  return `/api/sessions/${sessionId}/analysis?${stableZoneEnabled() ? "stable_zone=true" : "stable_zone=false"}`;
+  return `/api/sessions/${sessionId}/analysis?${analysisQueryParams("arch")}`;
+}
+
+function rrTimelineUsesFilteredView(scope = "arch") {
+  return stableZoneEnabled(scope) || filterOutliersEnabled(scope);
+}
+
+function rrTimelineSeries(analysis, scope = "arch") {
+  if (rrTimelineUsesFilteredView(scope)) {
+    return {
+      xs: analysis.analysis_rr_x?.length ? analysis.analysis_rr_x : (analysis.raw_rr_x || []),
+      ys: analysis.analysis_rr?.length ? analysis.analysis_rr : (analysis.raw_rr || []),
+    };
+  }
+  return { xs: analysis.raw_rr_x || [], ys: analysis.raw_rr || [] };
+}
+
+function rrTimelineTitle(analysis, scope = "arch") {
+  if (!rrTimelineUsesFilteredView(scope)) return "RR — от начала сессии (raw)";
+  const parts = [];
+  if (stableZoneEnabled(scope) && analysis.stable_zone) {
+    parts.push(
+      `стабильная зона ${STABLE_ZONE_TRIM_SEC}…${Math.round(Math.max(0, analysis.duration_sec - STABLE_ZONE_TRIM_SEC))} с`
+    );
+  }
+  if (filterOutliersEnabled(scope) && analysis.filter_outliers) {
+    parts.push("без выбросов");
+  }
+  return parts.length ? `RR — ${parts.join(", ")}` : "RR — от начала сессии (raw)";
 }
 
 function rrPlotTrimOpts(analysis) {
@@ -1412,11 +1491,11 @@ function renderSummaryGrid(sum) {
     sum.vs_baseline_pct != null
       ? (sum.vs_baseline_pct >= 0 ? "+" : "") + sum.vs_baseline_pct.toFixed(0) + "%"
       : "—";
-  const stable = !!archAnalysisCache?.stable_zone;
-  const meanRr = stable && archAnalysisCache?.mean_rr != null
+  const filtered = rrTimelineUsesFilteredView("arch");
+  const meanRr = filtered && archAnalysisCache?.mean_rr != null
     ? archAnalysisCache.mean_rr
     : sum.mean_rr;
-  const coherence = stable && archAnalysisCache?.coherence_score != null
+  const coherence = filtered && archAnalysisCache?.coherence_score != null
     ? archAnalysisCache.coherence_score
     : sum.coherence_score;
   const fields = [
@@ -1491,7 +1570,7 @@ function renderArchiveAnalysisCharts(analysis, sum) {
 
   const profile = chartProfileFor(sum?.tag);
   const activePanels = new Set(profile.panels);
-  const stable = !!analysis.stable_zone;
+  const filtered = rrTimelineUsesFilteredView("arch");
 
   const rrEl = $("arch_rr");
   const pEl = $("arch_poincare");
@@ -1507,20 +1586,15 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   }
 
   const rrTitle = rrEl?.closest(".plot-card")?.querySelector(".plot-title");
-  if (rrTitle) {
-    rrTitle.textContent = stable
-      ? `RR — полная сессия (анализ: ${STABLE_ZONE_TRIM_SEC}…${Math.round(Math.max(0, analysis.duration_sec - STABLE_ZONE_TRIM_SEC))} с)`
-      : "RR — от начала сессии (raw)";
-  }
+  if (rrTitle) rrTitle.textContent = rrTimelineTitle(analysis, "arch");
 
   const rrOpts = {
     ...(profile.options.rr || {}),
-    ...rrPlotTrimOpts(analysis),
+    ...(rrTimelineUsesFilteredView("arch") ? {} : rrPlotTrimOpts(analysis)),
   };
 
   if (activePanels.has("rr")) {
-    const xs = analysis.raw_rr_x || [];
-    const ys = analysis.raw_rr || [];
+    const { xs, ys } = rrTimelineSeries(analysis, "arch");
     if (ys.length && xs.length) {
       archRR = charts.makeRawRrPlot(
         rrEl, xs, ys, analysis.duration_sec,
@@ -1532,8 +1606,8 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   }
 
   if (activePanels.has("poincare")) {
-    const poincareRr = stable ? null : analysis?.raw_rr;
-    const hasRawPoincare = !stable && poincareRr?.length >= 2;
+    const poincareRr = filtered ? null : analysis?.raw_rr;
+    const hasRawPoincare = !filtered && poincareRr?.length >= 2;
     if (!hasRawPoincare && (analysis?.poincare?.insufficient_data || !analysis?.poincare?.points?.length)) {
       charts.setChartEmpty(pEl, analysis?.poincare?.message || "Недостаточно данных");
     } else {
@@ -1633,7 +1707,12 @@ function rerenderArchiveCharts() {
 }
 
 $("arch_stable_zone")?.addEventListener("change", (ev) => {
-  setStableZone(ev.target.checked);
+  setStableZone("arch", ev.target.checked);
+  rerenderArchiveCharts();
+});
+
+$("arch_filter_outliers")?.addEventListener("change", (ev) => {
+  setFilterOutliers("arch", ev.target.checked);
   rerenderArchiveCharts();
 });
 
@@ -1777,8 +1856,7 @@ async function loadProgress() {
   setProgErr("");
   const tag = $("prog_tag")?.value || "";
   const participant = $("prog_participant")?.value?.trim() || "";
-  let url = "/api/progress/analysis?max_sessions=40&max_points_per_session=12000";
-  if (stableZoneEnabled()) url += "&stable_zone=true";
+  let url = `/api/progress/analysis?max_sessions=40&max_points_per_session=12000&${analysisQueryParams("prog")}`;
   if (tag) url += `&tag=${encodeURIComponent(tag)}`;
   url = appendNoteTagFilters(url, progNoteTagsInput);
   url = appendDateFilters(url, $("prog_period"));
@@ -1798,7 +1876,12 @@ async function loadProgress() {
 $("btn_prog_build")?.addEventListener("click", loadProgress);
 
 $("prog_stable_zone")?.addEventListener("change", (ev) => {
-  setStableZone(ev.target.checked);
+  setStableZone("prog", ev.target.checked);
+  if (progSessionsRaw.length) loadProgress().catch((e) => setProgErr(String(e.message || e)));
+});
+
+$("prog_filter_outliers")?.addEventListener("change", (ev) => {
+  setFilterOutliers("prog", ev.target.checked);
   if (progSessionsRaw.length) loadProgress().catch((e) => setProgErr(String(e.message || e)));
 });
 
@@ -1855,7 +1938,7 @@ $("btn_wipe_history_prog")?.addEventListener("click", wipeHistory);
 loadSessionTypes().catch(e => setErr(String(e)));
 syncSourceFields();
 syncGuidedPhraseOptionsVisibility();
-syncStableZoneCheckboxes();
+initChartFilterCheckboxes();
 initThemeUi();
 setLiveEmptyState("idle");
 

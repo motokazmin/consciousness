@@ -303,6 +303,7 @@ def session_analysis(
     poincare_max: int = 2500,
     trend_max: int = 500,
     stable_zone: bool = False,
+    filter_outliers: bool = False,
     trim_start_sec: float = STABLE_ZONE_TRIM_SEC,
     trim_end_sec: float = STABLE_ZONE_TRIM_SEC,
 ) -> dict[str, Any]:
@@ -312,13 +313,19 @@ def session_analysis(
         "end_sec": trim_end_sec,
         "applied": False,
     }
+    outlier_meta = {
+        "applied": False,
+        "removed": 0,
+    }
     if not points:
         return {
             "duration_sec": 0.0,
             "mean_rr": None,
             "coherence_score": None,
             "stable_zone": False,
+            "filter_outliers": False,
             "trim": trim_meta,
+            "outliers": outlier_meta,
             "poincare": {"points": [], "insufficient_data": True, "message": "Нет данных"},
             "spectrum": {"freqs": [], "power": [], "insufficient_data": True, "message": "Нет данных"},
             "sdnn_trend": [],
@@ -358,9 +365,13 @@ def session_analysis(
 
     # Фильтр эктопических ударов — точечные выбросы внутри сессии.
     # Применяется после stable_zone (края уже отрезаны), только к аналитике.
-    ectopic = ectopic_mask(rr_a)
-    ts_a = ts_a[ectopic]
-    rr_a = rr_a[ectopic]
+    if filter_outliers:
+        ectopic = ectopic_mask(rr_a)
+        removed = int((~ectopic).sum())
+        outlier_meta["removed"] = removed
+        outlier_meta["applied"] = removed > 0
+        ts_a = ts_a[ectopic]
+        rr_a = rr_a[ectopic]
 
     preprocessed = preprocess_rr_session(rr_a)
     analysis_rr = np.array(preprocessed["raw_rr"], dtype=float)
@@ -374,8 +385,8 @@ def session_analysis(
         power = np.array(spectrum["power"])
         coherence = coherence_score(freqs, power, spectrum.get("peak_freq"))
 
-    # analysis_rr_* — ряд после stable_zone + ectopic фильтрации, для Poincaré overlay.
-    # raw_rr_* — полный ряд для таймлайна (всегда вся сессия).
+    # analysis_rr_* — ряд после stable_zone + ectopic фильтрации (для графиков при включённых опциях).
+    # raw_rr_* — полный ряд без фильтров.
     analysis_rr_x, analysis_rr_y = raw_rr_timeline(ts_a, rr_a, t0)
 
     return {
@@ -383,7 +394,9 @@ def session_analysis(
         "mean_rr": round(mean_rr(analysis_rr), 1) if mean_rr(analysis_rr) is not None else None,
         "coherence_score": coherence,
         "stable_zone": stable_zone and trim_meta["applied"],
+        "filter_outliers": filter_outliers and outlier_meta["applied"],
         "trim": trim_meta,
+        "outliers": outlier_meta,
         "raw_rr": full_rr_y,
         "raw_rr_x": full_rr_x,
         "analysis_rr": analysis_rr_y,
@@ -404,6 +417,7 @@ def progress_session_analysis(
     rmssd_mean: float | None,
     *,
     stable_zone: bool = False,
+    filter_outliers: bool = False,
     trim_start_sec: float = STABLE_ZONE_TRIM_SEC,
     trim_end_sec: float = STABLE_ZONE_TRIM_SEC,
 ) -> dict[str, Any]:
@@ -415,6 +429,7 @@ def progress_session_analysis(
         poincare_max=400,
         trend_max=500,
         stable_zone=stable_zone,
+        filter_outliers=filter_outliers,
         trim_start_sec=trim_start_sec,
         trim_end_sec=trim_end_sec,
     )
@@ -427,7 +442,9 @@ def progress_session_analysis(
         "mean_rr": full["mean_rr"],
         "coherence_score": full["coherence_score"],
         "stable_zone": full.get("stable_zone", False),
+        "filter_outliers": full.get("filter_outliers", False),
         "trim": full.get("trim"),
+        "outliers": full.get("outliers"),
         "rmssd_mean": round(rmssd_mean, 1) if rmssd_mean is not None else None,
         "duration_sec": full["duration_sec"],
         "raw_rr": poincare_rr,
