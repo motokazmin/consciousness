@@ -12,7 +12,9 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from hrv_core.analysis import progress_session_analysis, session_analysis
+import numpy as np
+
+from hrv_core.analysis import progress_session_analysis, session_analysis, session_sd1
 from hrv_core.constants import DB_PATH
 from hrv_core.db import delete_session, init_db, load_hour_baseline, wipe_all_history
 from hrv_core.summary import session_summary_dict
@@ -317,9 +319,17 @@ def list_sessions(
     )
     args.append(min(limit, 2000))
     rows = conn.execute(q, args).fetchall()
-    conn.close()
-    return {
-        "sessions": [
+    sessions = []
+    for r in rows:
+        sd1 = None
+        if r[6] is not None:
+            rr_rows = conn.execute(
+                "SELECT rr_ms FROM hrv_points WHERE session_id = ? ORDER BY ts",
+                (r[0],),
+            ).fetchall()
+            if rr_rows:
+                sd1 = session_sd1(np.array([row[0] for row in rr_rows], dtype=float))
+        sessions.append(
             {
                 "id": r[0],
                 "tag": r[1],
@@ -332,10 +342,11 @@ def list_sessions(
                 "opt_guided_phrases": bool(r[8]),
                 "opt_audio_biofeedback": bool(r[9]),
                 "note_tags": parse_note_tags(r[2]),
+                "sd1": sd1,
             }
-            for r in rows
-        ]
-    }
+        )
+    conn.close()
+    return {"sessions": sessions}
 
 
 @app.get("/api/progress")

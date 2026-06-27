@@ -3,14 +3,16 @@
  * HRV analysis chart factories (Poincaré, spectrum, SDNN, progress overlays).
  */
 (function (global) {
-  const AXIS_STYLE = {
-    stroke: "#3a4050",
-    ticks: { stroke: "#3a4050" },
-    grid: { stroke: "#1e242d", width: 1 },
-    labelFont: "11px 'DM Sans'",
-    font: "11px 'Space Mono'",
-    stroke: "#5a6478",
+  const T = () => global.HrvTheme || {
+    chartAxis: () => ({}),
+    cssVar: (_n, fb) => fb || "",
+    hexToRgba: (hex, a) => hex,
+    chartLine: (_n, fb) => fb || "",
   };
+
+  function axisStyle() {
+    return T().chartAxis();
+  }
 
   // Совпадает с rrCfg в app.js — правый отступ под последнюю подпись оси X.
   const CHART_PADDING = [8, 40, 4, 4];
@@ -93,7 +95,7 @@
     const x1 = u.valToPos(hi, "x", true);
     const y1 = u.valToPos(hi, "y", true);
     ctx.beginPath();
-    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.strokeStyle = T().chartLine("--chart-guide-line", "rgba(255,255,255,0.22)");
     ctx.setLineDash([6, 4]);
     ctx.lineWidth = 1;
     ctx.moveTo(ox + x0, oy + y0);
@@ -103,10 +105,12 @@
   }
 
   function hexToRgba(hex, alpha) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r},${g},${b},${alpha})`;
+    return T().hexToRgba(hex, alpha);
+  }
+
+  function seriesColor(varName, fallback, fillAlpha) {
+    const stroke = T().cssVar(varName, fallback);
+    return { stroke, fill: hexToRgba(stroke, fillAlpha) };
   }
 
   // opts для фабрик make*Plot (передаётся из CHART_PROFILES.options в app.js):
@@ -149,8 +153,8 @@
           { points: { show: false } },
         ],
         axes: [
-          { ...AXIS_STYLE, label: "RRₙ, ms", values: (u, s) => s.map((v) => Math.round(v)) },
-          { ...AXIS_STYLE, label: "RRₙ₊₁, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
+          { ...axisStyle(), label: "RRₙ, ms", values: (u, s) => s.map((v) => Math.round(v)) },
+          { ...axisStyle(), label: "RRₙ₊₁, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
         ],
         hooks: {
           draw: [(u) => poincareDrawPoints(u, opts)],
@@ -173,7 +177,7 @@
     const start = trim.start_sec ?? 0;
     const end = (trim.duration_sec ?? 0) - (trim.end_sec ?? 0);
     ctx.save();
-    ctx.fillStyle = "rgba(0,0,0,0.28)";
+    ctx.fillStyle = T().chartLine("--chart-trim-overlay", "rgba(0,0,0,0.28)");
     const x0 = u.valToPos(0, "x", true);
     const x1 = u.valToPos(start, "x", true);
     const x2 = u.valToPos(end, "x", true);
@@ -203,13 +207,13 @@
         series: [
           {},
           applySeriesOpts(
-            { stroke: "#00d4ff", width: 1.5, fill: "rgba(0,212,255,0.04)", points: { show: false } },
+            { width: 1.5, points: { show: false }, ...seriesColor("--chart-rr", "#00d4ff", 0.04) },
             opts
           ),
         ],
         axes: [
-          { ...AXIS_STYLE, label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...AXIS_STYLE, label: "RR, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), label: "RR, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
         ],
         hooks: trimOpts?.applied ? { draw: [(u) => drawTrimBands(u, { trim: trimOpts })] } : {},
         cursor: { show: true, x: true, y: false },
@@ -239,13 +243,13 @@
         series: [
           {},
           applySeriesOpts(
-            { stroke: "#00d4ff", width: 2, fill: "rgba(0,212,255,0.08)", points: { show: false } },
+            { width: 2, points: { show: false }, ...seriesColor("--chart-rr", "#00d4ff", 0.08) },
             opts
           ),
         ],
         axes: [
-          { ...AXIS_STYLE, label: "Частота, Гц", values: fmtAxisHz },
-          { ...AXIS_STYLE, label: "Мощность", size: 52 },
+          { ...axisStyle(), label: "Частота, Гц", values: fmtAxisHz },
+          { ...axisStyle(), label: "Мощность", size: 52 },
         ],
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
@@ -287,13 +291,13 @@
         series: [
           {},
           applySeriesOpts(
-            { stroke: "#9d8ef0", width: 2, fill: "rgba(157,142,240,0.08)", points: { show: false } },
+            { width: 2, points: { show: false }, ...seriesColor("--chart-sdnn", "#9d8ef0", 0.08) },
             opts
           ),
         ],
         axes: [
-          { ...AXIS_STYLE, label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...AXIS_STYLE, label: "SDNN, ms", size: 52 },
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), label: "SDNN, ms", size: 52 },
         ],
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
@@ -323,15 +327,14 @@
         series: [
           {},
           {
-            stroke: "#39e085",
             width: 2,
-            fill: "rgba(57,224,133,0.07)",
             points: { show: false },
+            ...seriesColor("--chart-rmssd", "#39e085", 0.07),
           },
         ],
         axes: [
-          { ...AXIS_STYLE, label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...AXIS_STYLE, label: "RMSSD, ms", size: 52 },
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), label: "RMSSD, ms", size: 52 },
         ],
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
@@ -405,7 +408,7 @@
       const xmin = u.scales.x.min;
       const xmax = u.scales.x.max;
       ctx.beginPath();
-      ctx.strokeStyle = "rgba(255,255,255,0.2)";
+      ctx.strokeStyle = T().chartLine("--chart-guide-line", "rgba(255,255,255,0.22)");
       ctx.setLineDash([6, 4]);
       ctx.lineWidth = 1;
       ctx.moveTo(ox + u.valToPos(xmin, "x", true), oy + u.valToPos(xmin, "y", true));
@@ -426,8 +429,8 @@
         },
         series,
         axes: [
-          { ...AXIS_STYLE, label: "RRₙ, ms" },
-          { ...AXIS_STYLE, label: "RRₙ₊₁, ms", size: 52 },
+          { ...axisStyle(), label: "RRₙ, ms" },
+          { ...axisStyle(), label: "RRₙ₊₁, ms", size: 52 },
         ],
         hooks: { draw: drawHooks },
         cursor: { show: true, x: true, y: true },
@@ -506,8 +509,8 @@
         },
         series,
         axes: [
-          { ...AXIS_STYLE, label: "Частота, Гц", values: fmtAxisHz },
-          { ...AXIS_STYLE, label: "Мощность", size: 52 },
+          { ...axisStyle(), label: "Частота, Гц", values: fmtAxisHz },
+          { ...axisStyle(), label: "Мощность", size: 52 },
         ],
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
@@ -566,8 +569,8 @@
         },
         series: [{ show: false }],
         axes: [
-          { ...AXIS_STYLE, label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...AXIS_STYLE, label: "SDNN, ms", size: 52 },
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), label: "SDNN, ms", size: 52 },
         ],
         hooks: {
           draw: [(u) => {

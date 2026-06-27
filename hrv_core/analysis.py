@@ -33,6 +33,17 @@ def mean_rr(rr: np.ndarray) -> float | None:
     return float(np.mean(rr))
 
 
+def session_sd1(rr: np.ndarray) -> float | None:
+    """SD1 по RR-ряду — та же цепочка, что в session_analysis без stable_zone."""
+    if rr.size < MIN_POINCARE_RR:
+        return None
+    rr_f = rr.astype(float)[ectopic_mask(rr.astype(float))]
+    if rr_f.size < MIN_POINCARE_RR:
+        return None
+    analysis_rr = np.array(preprocess_rr_session(rr_f)["raw_rr"], dtype=float)
+    return poincare_pairs(analysis_rr, max_points=analysis_rr.size).get("sd1")
+
+
 def _decimate_indices(n: int, max_points: int) -> np.ndarray:
     if n <= max_points:
         return np.arange(n)
@@ -423,6 +434,7 @@ def progress_session_analysis(
         "raw_rr_x": poincare_rr_x,
         "poincare_outline": full["poincare"].get("points", []),
         "poincare_bounds": full["poincare"].get("bounds"),
+        "sd1": full["poincare"].get("sd1"),
         "spectrum": full["spectrum"],
         "sdnn_trend": full["sdnn_trend"],
     }

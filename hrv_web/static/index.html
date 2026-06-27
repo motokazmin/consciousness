@@ -1,6 +1,16 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("hrv_theme");
+        document.documentElement.setAttribute("data-theme", t === "dark" ? "dark" : "light");
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
+    })();
+  </script>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HRV Monitor</title>
@@ -8,7 +18,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css" />
   <style>
-    :root {
+    html[data-theme="dark"] {
       --bg:        #0a0c0f;
       --surface:   #111418;
       --surface2:  #181c22;
@@ -22,6 +32,58 @@
       --green:     #39e085;
       --red:       #ff4d6a;
       --yellow:    #f5c542;
+      --purple:    #9d8ef0;
+      --purple-text: #b8a8f8;
+      --overlay:   rgba(6, 8, 10, 0.72);
+      --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.2);
+      --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.45);
+      --nav-active-glow: 0 0 8px rgba(0, 212, 255, 0.3);
+      --logo-icon: #000;
+      --chart-grid: #1e242d;
+      --chart-ticks: #3a4050;
+      --chart-axis: #5a6478;
+      --chart-rr: #00d4ff;
+      --chart-sdnn: #9d8ef0;
+      --chart-rmssd: #39e085;
+      --chart-trim-overlay: rgba(0, 0, 0, 0.28);
+      --chart-guide-line: rgba(255, 255, 255, 0.22);
+      --peak-marker-bg: rgba(57, 224, 133, 0.1);
+      --peak-marker-border: rgba(57, 224, 133, 0.28);
+      --mono:      'Space Mono', monospace;
+      --sans:      'DM Sans', sans-serif;
+    }
+
+    html[data-theme="light"] {
+      --bg:        #f0f3f8;
+      --surface:   #ffffff;
+      --surface2:  #e8edf4;
+      --border:    #d4dce8;
+      --border2:   #c2ccda;
+      --text:      #1a2433;
+      --text-dim:  #5a677a;
+      --text-muted:#8a96a8;
+      --accent:    #0077aa;
+      --accent2:   #005f88;
+      --green:     #1a9b5c;
+      --red:       #d63b56;
+      --yellow:    #b8860a;
+      --purple:    #6b5fc7;
+      --purple-text: #5248a8;
+      --overlay:   rgba(20, 28, 40, 0.45);
+      --shadow-card: 0 4px 18px rgba(26, 36, 51, 0.08);
+      --shadow-modal: 0 20px 48px rgba(26, 36, 51, 0.18);
+      --nav-active-glow: none;
+      --logo-icon: #fff;
+      --chart-grid: #dce3ed;
+      --chart-ticks: #b8c4d4;
+      --chart-axis: #5a677a;
+      --chart-rr: #0077aa;
+      --chart-sdnn: #6b5fc7;
+      --chart-rmssd: #1a9b5c;
+      --chart-trim-overlay: rgba(0, 0, 0, 0.07);
+      --chart-guide-line: rgba(26, 36, 51, 0.18);
+      --peak-marker-bg: rgba(26, 155, 92, 0.12);
+      --peak-marker-border: rgba(26, 155, 92, 0.35);
       --mono:      'Space Mono', monospace;
       --sans:      'DM Sans', sans-serif;
     }
@@ -54,6 +116,7 @@
       width: 32px; height: 32px;
       border-radius: 8px;
       background: var(--accent);
+      color: var(--logo-icon);
       display: grid; place-items: center;
       flex-shrink: 0;
     }
@@ -96,7 +159,7 @@
     nav button.active {
       color: var(--accent);
       border-bottom-color: var(--accent);
-      text-shadow: 0 0 8px rgba(0,212,255,0.3);
+      text-shadow: var(--nav-active-glow);
     }
 
     /* ── LAYOUT ── */
@@ -244,7 +307,7 @@
 
     /* micro interactions */
     .card { transition: transform .15s ease, box-shadow .15s ease; }
-    .card:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+    .card:hover { transform: translateY(-1px); box-shadow: var(--shadow-card); }
     .mode-option { transition: transform .12s ease, border-color .15s, background .15s; }
     .mode-option:hover { transform: translateY(-1px); }
     .modal-overlay { transition: opacity .2s ease; }
@@ -715,8 +778,8 @@
       font-family: var(--mono);
       font-size: 0.62rem;
       color: var(--green);
-      background: rgba(57, 224, 133, 0.1);
-      border: 1px solid rgba(57, 224, 133, 0.28);
+      background: var(--peak-marker-bg);
+      border: 1px solid var(--peak-marker-border);
       border-radius: 4px;
       padding: 2px 6px;
       transform: translateX(-50%);
@@ -847,8 +910,8 @@
       font-family: var(--mono);
       padding: 2px 6px 2px 9px;
       border-radius: 999px;
-      background: rgba(157, 142, 240, 0.18);
-      color: #b8a8f8;
+      background: color-mix(in srgb, var(--purple) 18%, transparent);
+      color: var(--purple-text);
       white-space: nowrap;
     }
     .tag-chip-remove {
@@ -1023,13 +1086,20 @@
       padding: 14px 16px;
       margin-bottom: 20px;
     }
+    .arch-notes-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
     .arch-notes-block .s-label {
       font-family: var(--mono);
       font-size: 0.6rem;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--text-dim);
-      margin-bottom: 8px;
+      margin-bottom: 0;
     }
     .arch-notes-block .arch-notes-text {
       font-size: 0.88rem;
@@ -1043,8 +1113,8 @@
       padding: 2px 8px;
       margin: 0 4px 4px 0;
       border-radius: 999px;
-      background: rgba(157, 142, 240, 0.18);
-      color: #b8a8f8;
+      background: color-mix(in srgb, var(--purple) 18%, transparent);
+      color: var(--purple-text);
       font-family: var(--mono);
     }
 
@@ -1056,7 +1126,7 @@
       align-items: center;
       justify-content: center;
       padding: 24px;
-      background: rgba(6, 8, 10, 0.72);
+      background: var(--overlay);
       backdrop-filter: blur(4px);
     }
     .modal-overlay.visible { display: flex; }
@@ -1066,7 +1136,7 @@
       border: 1px solid var(--border2);
       border-radius: 14px;
       padding: 24px;
-      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+      box-shadow: var(--shadow-modal);
     }
     .modal-title {
       font-family: var(--mono);
@@ -1129,17 +1199,54 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    .header-spacer { flex: 1; }
+
+    .theme-switch {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .theme-switch-label {
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+    }
+    .theme-switch select {
+      font-family: var(--sans);
+      font-size: 0.8rem;
+      background: var(--surface2);
+      border: 1px solid var(--border2);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 5px 10px;
+      cursor: pointer;
+    }
+    .theme-switch select:focus {
+      outline: none;
+      border-color: var(--accent2);
+    }
+
   </style>
 </head>
 <body>
 
 <header>
   <div class="logo-mark">
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-      <path d="M1 9h2.5l2-6 2.5 12 2.5-9 2 5 1.5-2H17" stroke="#000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+      <path d="M1 9h2.5l2-6 2.5 12 2.5-9 2 5 1.5-2H17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
   </div>
   <div class="logo-text">HRV <span>Monitor</span></div>
+  <div class="header-spacer" aria-hidden="true"></div>
+  <label class="theme-switch">
+    <span class="theme-switch-label">Тема</span>
+    <select id="theme_select" aria-label="Цветовая схема">
+      <option value="light">Светлая</option>
+      <option value="dark">Тёмная</option>
+    </select>
+  </label>
 </header>
 
 <nav role="tablist" aria-label="Навигация по разделам">
@@ -1443,6 +1550,7 @@
                 <th>Источник</th>
                 <th>Начало</th>
                 <th>Конец</th>
+                <th>SD1 (ms)</th>
                 <th></th>
               </tr>
             </thead>
@@ -1461,9 +1569,14 @@
           </button>
         </div>
         <div class="card-body">
+          <div class="status-bar" id="arch_status"></div>
+          <div class="err-bar" id="arch_err"></div>
           <div class="summary-grid" id="arch_summary_grid"></div>
           <div class="arch-notes-block" id="arch_notes_block" hidden>
-            <div class="s-label">Заметки</div>
+            <div class="arch-notes-header">
+              <div class="s-label">Заметки</div>
+              <button type="button" class="btn btn-secondary" id="btn_edit_arch_notes" style="font-size:.72rem;padding:4px 12px">Изменить</button>
+            </div>
             <div class="arch-notes-text" id="arch_notes_text"></div>
           </div>
           <label class="check-label chart-stable-zone-toggle" style="margin-bottom:12px">
@@ -1607,6 +1720,7 @@
                     <th>Дата</th>
                     <th>Mean RR (ms)</th>
                     <th>RMSSD</th>
+                    <th>SD1 (ms)</th>
                     <th>Coherence</th>
                   </tr>
                 </thead>
@@ -1646,10 +1760,11 @@
   </div>
 </div>
 
+<script src="/assets/theme.js?v=1"></script>
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
 <script src="/assets/hrv_audio_engine.js?v=3"></script>
 <script src="/assets/meditation_engine.js?v=3"></script>
-<script src="/assets/analysis_charts.js?v=6"></script>
-<script src="/assets/app.js?v=21"></script>
+<script src="/assets/analysis_charts.js?v=7"></script>
+<script src="/assets/app.js?v=24"></script>
 </body>
 </html>

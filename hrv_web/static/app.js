@@ -783,8 +783,19 @@ const ARCHIVE_PLOT_H = 260;
 const PROGRESS_PLOT_H = 280;
 
 const AC = () => window.HrvAnalysisCharts;
+const TH = () => window.HrvTheme;
 
-const RR_COLOR   = "#00d4ff";
+function chartAxes(labelX, labelY) {
+  const a = TH()?.chartAxis() || {};
+  return [
+    { ...a, label: labelX, labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'", values: fmtAxisSec, incrs: SEC_AXIS_INCRS, gap: 4 },
+    { ...a, label: labelY, labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'", size: 52 },
+  ];
+}
+
+function rrStrokeColor() {
+  return TH()?.cssVar("--chart-rr", "#00d4ff") || "#00d4ff";
+}
 
 // ── ARCHIVE CHART PROFILES ──────────────────────────────────────────────
 // Профиль определяет, какие панели архива показывать (состав) и какие
@@ -826,6 +837,9 @@ function rrCfg(timed, w) {
   const xRange = timed && durationSec > 0
     ? (_u, _mn, _mx) => [0, durationSec]
     : (_u, _mn, _mx) => [-60, 0];
+  const stroke = rrStrokeColor();
+  const fill = TH()?.hexToRgba(stroke, 0.04) || `rgba(0,212,255,0.04)`;
+  const axes = chartAxes(timed ? "с от начала" : "с от сейчас", "RR, ms");
   return {
     width: w, height: LIVE_PLOT_H,
     padding: [8, 40, 4, 4],
@@ -835,26 +849,9 @@ function rrCfg(timed, w) {
     },
     series: [
       {},
-      { stroke: RR_COLOR, width: 1.5, fill: "rgba(0,212,255,0.04)" },
+      { stroke, width: 1.5, fill },
     ],
-    axes: [
-      {
-        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
-        label: timed ? "с от начала" : "с от сейчас",
-        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
-        stroke: "#5a6478",
-        values: fmtAxisSec,
-        incrs: SEC_AXIS_INCRS,
-        gap: 4,
-      },
-      {
-        stroke: "#3a4050", ticks: { stroke: "#3a4050" }, grid: { stroke: "#1e242d", width: 1 },
-        label: "RR, ms",
-        labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'",
-        stroke: "#5a6478",
-        size: 52,
-      },
-    ],
+    axes,
     cursor: { show: true, x: true, y: false },
     legend: { show: false },
   };
@@ -1043,7 +1040,9 @@ function onSessionEnded(statusText) {
   setStatus(statusText);
   finalizeLiveSession();
   const sid = currentSessionId;
+  currentSessionId = null;
   if (sid) showSessionNotesModal(sid);
+  loadArchive().catch((e) => setErr(String(e.message || e)));
 }
 
 function closeSessionNotesModal() {
@@ -1052,7 +1051,7 @@ function closeSessionNotesModal() {
   _notesModalSessionId = null;
 }
 
-function showSessionNotesModal(sessionId) {
+function showSessionNotesModal(sessionId, options) {
   const modal = $("session_notes_modal");
   const input = $("session_notes_input");
   const idEl = $("session_notes_id");
@@ -1060,11 +1059,17 @@ function showSessionNotesModal(sessionId) {
   ensureTagChipInputs();
   _notesModalSessionId = sessionId;
   if (idEl) idEl.textContent = String(sessionId);
-  const rawText = $("session_name")?.value?.trim() || "";
+  const fromArchive = !!(options && options.fromArchive);
+  const rawText = fromArchive
+    ? (options.sessionName || "")
+    : ($("session_name")?.value?.trim() || "");
   const tags = parseNoteTagsClient(rawText);
   input.value = rawText.replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "").replace(/\s+/g, " ").trim();
   sessionNotesTagsInput?.setTags(tags);
+  const skipBtn = $("session_notes_skip");
+  if (skipBtn) skipBtn.textContent = fromArchive ? "Отмена" : "Пропустить";
   modal.classList.add("visible");
+  if (fromArchive) input.focus();
   // do not auto-focus to avoid stealing focus from inputs on other tabs (e.g. archive filters)
 
   // char counter
@@ -1084,15 +1089,22 @@ async function saveSessionNotes() {
   const tags = sessionNotesTagsInput?.getTags() || [];
   const text = mergeNotesWithTags(rawText, tags);
   try {
-    await api(`/api/sessions/${sessionId}`, {
+    const res = await api(`/api/sessions/${sessionId}`, {
       method: "PATCH",
       body: JSON.stringify({ session_name: text || null }),
     });
-    if ($("session_name")) $("session_name").value = text;
+    const savedName = res.session_name ?? (text || null);
+    if ($("session_name")) $("session_name").value = savedName || "";
     await loadNoteTags();
-    if (text) {
-      setStatus(`Заметки к сессии #${sessionId} сохранены.`);
+    if (archSummaryCache?.id === sessionId) {
+      archSummaryCache.session_name = savedName;
+      archSummaryCache.note_tags = parseNoteTagsClient(savedName || "");
+      renderArchNotes(archSummaryCache);
     }
+    if ($("tab-archive")?.classList.contains("visible")) {
+      await loadArchive().catch((e) => setErr(String(e.message || e)));
+    }
+    setStatus(`Заметки к сессии #${sessionId} сохранены.`);
   } catch (e) {
     setErr(String(e.message || e));
     return;
@@ -1108,15 +1120,19 @@ $("session_notes_modal")?.addEventListener("click", (e) => {
 });
 
 // ── START / STOP ──────────────────────────────────────────────────────────
-function setStatus(txt) {
-  const el = $("live_status");
+function setBar(id, txt) {
+  const el = $(id);
+  if (!el) return;
   el.textContent = txt;
   el.classList.toggle("visible", !!txt);
 }
+function setStatus(txt) {
+  setBar("live_status", txt);
+  setBar("arch_status", txt);
+}
 function setErr(txt) {
-  const el = $("live_err");
-  el.textContent = txt;
-  el.classList.toggle("visible", !!txt);
+  setBar("live_err", txt);
+  setBar("arch_err", txt);
 }
 
 function setBiofeedbackControlsEnabled(on) {
@@ -1258,6 +1274,9 @@ function fmtTime(ts) {
   if (ts == null) return "";
   return new Date(ts * 1000).toLocaleString("ru-RU");
 }
+function fmtMetricMs(v) {
+  return v != null ? Number(v).toFixed(1) + " ms" : "—";
+}
 function tagPill(t) {
   const cls = TAG_PRESETS.includes(t) ? escapeHtml(t) : "";
   return `<span class="tag-pill ${cls}">${escapeHtml(tagLabel(t))}</span>`;
@@ -1286,8 +1305,9 @@ async function loadArchive() {
       `<td style="color:var(--text-dim);font-size:.78rem">${escapeHtml(String(s.source).slice(0, 38))}</td>` +
       `<td style="font-size:.82rem">${fmtTime(s.started)}</td>` +
       `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--yellow)'>в процессе…</span>"}</td>` +
+      `<td style="font-family:var(--mono);font-size:.82rem">${s.ended && s.sd1 != null ? Number(s.sd1).toFixed(1) : "—"}</td>` +
       `<td style="text-align:right"><button type="button" class="btn btn-danger btn-delete-session" data-id="${s.id}" style="font-size:.72rem;padding:4px 10px">Удалить</button></td>`;
-    const isActive = !s.ended || s.id === currentSessionId;
+    const isActive = !s.ended;
     if (isActive) {
       tr.style.opacity = "0.6";
       tr.style.cursor = "not-allowed";
@@ -1356,22 +1376,32 @@ function rrPlotTrimOpts(analysis) {
   };
 }
 
+function notesDisplayText(raw) {
+  return (raw || "").replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "").replace(/\s+/g, " ").trim();
+}
+
 function renderArchNotes(sum) {
   const block = $("arch_notes_block");
   const textEl = $("arch_notes_text");
+  const editBtn = $("btn_edit_arch_notes");
   if (!block || !textEl) return;
+  block.hidden = false;
   const notes = (sum?.session_name || "").trim();
   const tags = sum?.note_tags?.length ? sum.note_tags : parseNoteTagsClient(notes);
-  if (!notes) {
-    block.hidden = true;
-    textEl.textContent = "";
-    return;
-  }
-  block.hidden = false;
+  const body = notesDisplayText(notes);
   const tagsRow = tags.length
     ? `<div style="margin-bottom:8px">${noteTagsHtml(tags)}</div>`
     : "";
-  textEl.innerHTML = tagsRow + escapeHtml(notes).replace(/\n/g, "<br>");
+  if (body) {
+    textEl.innerHTML = tagsRow + escapeHtml(body).replace(/\n/g, "<br>");
+  } else if (tags.length) {
+    textEl.innerHTML = tagsRow;
+  } else {
+    textEl.innerHTML = '<span style="color:var(--text-dim);font-size:.85rem">Заметок нет</span>';
+  }
+  if (editBtn) {
+    editBtn.textContent = body || tags.length ? "Изменить" : "Добавить";
+  }
 }
 
 function renderSummaryGrid(sum) {
@@ -1414,7 +1444,7 @@ function renderSummaryGrid(sum) {
     const metrics = [
       ["Mean RR", meanRr != null ? Number(meanRr).toFixed(1) + " ms" : "—"],
       ["Coherence", coherence != null ? Number(coherence).toFixed(1) : "—"],
-      ["SD1", archAnalysisCache?.poincare?.sd1 != null ? archAnalysisCache.poincare.sd1 + " ms" : "—"],
+      ["SD1", fmtMetricMs(archAnalysisCache?.poincare?.sd1)],
       ["Peak Hz", archAnalysisCache?.spectrum?.peak_freq != null ? archAnalysisCache.spectrum.peak_freq + " Гц" : "—"],
     ];
     for (const [label, value] of metrics) {
@@ -1542,7 +1572,7 @@ function renderArchiveAnalysisCharts(analysis, sum) {
 }
 
 async function openArchiveSession(id) {
-  if (id === currentSessionId) {
+  if (currentSessionId != null && id === currentSessionId) {
     setErr("Построение графиков для активной сессии недоступно. Завершите сессию сначала.");
     return;
   }
@@ -1564,6 +1594,8 @@ async function openArchiveSession(id) {
     sum = await api(`/api/sessions/${id}`);
   } catch {
     $("arch_summary_grid").innerHTML = "<p style='color:var(--text-dim);font-size:.8rem'>Сводка недоступна (сессия ещё идёт?)</p>";
+    const notesBlock = $("arch_notes_block");
+    if (notesBlock) notesBlock.hidden = true;
   }
 
   let analysis = null;
@@ -1603,6 +1635,15 @@ function rerenderArchiveCharts() {
 $("arch_stable_zone")?.addEventListener("change", (ev) => {
   setStableZone(ev.target.checked);
   rerenderArchiveCharts();
+});
+
+$("btn_edit_arch_notes")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!archSummaryCache?.id) return;
+  showSessionNotesModal(archSummaryCache.id, {
+    fromArchive: true,
+    sessionName: archSummaryCache.session_name,
+  });
 });
 
 $("arch_rmssd_mode")?.addEventListener("change", () => {
@@ -1673,6 +1714,7 @@ function renderProgCompareTable(sessions) {
       `<td>${fmtShortDate(s.started)}</td>` +
       `<td>${s.mean_rr != null ? s.mean_rr.toFixed(1) : "—"}</td>` +
       `<td>${s.rmssd_mean != null ? s.rmssd_mean.toFixed(1) : "—"}</td>` +
+      `<td>${s.sd1 != null ? Number(s.sd1).toFixed(1) : "—"}</td>` +
       `<td>${s.coherence_score != null ? s.coherence_score.toFixed(1) : "—"}</td>`;
     tr.querySelector(".prog-session-cb")?.addEventListener("change", (ev) => {
       const sid = Number(ev.target.dataset.id);
@@ -1814,4 +1856,32 @@ loadSessionTypes().catch(e => setErr(String(e)));
 syncSourceFields();
 syncGuidedPhraseOptionsVisibility();
 syncStableZoneCheckboxes();
+initThemeUi();
 setLiveEmptyState("idle");
+
+function initThemeUi() {
+  const sel = $("theme_select");
+  if (!sel || !TH()) return;
+  sel.value = TH().getTheme();
+  sel.addEventListener("change", () => {
+    TH().setTheme(sel.value);
+  });
+}
+
+function onThemeChange() {
+  const rrEl = $("rrPlot");
+  if (rrEl) {
+    const timed = liveMode === "timed";
+    const hadData = rrBuf.length > 0;
+    makeRRPlot(rrEl, timed);
+    if (hadData) {
+      _dirty = true;
+      if (!raf) raf = requestAnimationFrame(redrawLive);
+    }
+  }
+  rerenderArchiveCharts();
+  if (progSessionsRaw.length) buildProgressPlots();
+  nextFrame(resizePlots);
+}
+
+window.addEventListener("hrv-theme-change", onThemeChange);
