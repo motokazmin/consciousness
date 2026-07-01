@@ -33,7 +33,7 @@ app = FastAPI(title="HRV Monitor")
 class StartSessionBody(BaseModel):
     participant: str = Field(..., min_length=1, max_length=200)
     tag: str
-    session_name: str | None = Field(None, max_length=4000)
+    session_name: str | None = Field(None, max_length=12000)
     source: str = Field(..., description="mock | ble")
     address: str | None = None
     minutes: float | None = Field(None, gt=0)
@@ -57,7 +57,7 @@ class PhraseLogPatchBody(BaseModel):
 
 
 class PatchSessionNotesBody(BaseModel):
-    session_name: str | None = Field(None, max_length=4000)
+    session_name: str | None = Field(None, max_length=12000)
 
 
 class CreateSessionTypeBody(BaseModel):

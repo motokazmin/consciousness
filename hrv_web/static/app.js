@@ -10,6 +10,7 @@ let currentSessionId = null;
 let _sessionEndHandled = false;
 let _notesModalSessionId = null;
 let _dirty = false;
+const SESSION_NOTES_MAX_LEN = 12000;
 
 let liveMode   = "window";
 let sessionT0  = 0;
@@ -588,7 +589,9 @@ function ensureTagChipInputs() {
     progNoteTagsInput = createTagChipInput($("prog_note_tags"), { allowCreate: false });
   }
   if (!sessionNotesTagsInput) {
-    sessionNotesTagsInput = createTagChipInput($("session_notes_tags"));
+    sessionNotesTagsInput = createTagChipInput($("session_notes_tags"), {
+      onChange: () => updateSessionNotesCounter(),
+    });
   }
 }
 
@@ -630,15 +633,70 @@ function parseNoteTagsClient(text) {
 // Объединяет свободный текст заметки с набором тегов из chip-инпута:
 // удаляет существующие #теги из текста и добавляет актуальный набор в конец.
 function mergeNotesWithTags(text, tags) {
-  const body = (text || "").replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "").replace(/\s+/g, " ").trim();
+  const body = (text || "")
+    .replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   const tagsStr = (tags || []).map((t) => `#${t}`).join(" ");
   if (body && tagsStr) return `${body} ${tagsStr}`;
   return body || tagsStr;
 }
 
 function noteTagsHtml(tags) {
-  if (!tags?.length) return '<span style="color:var(--text-muted)">—</span>';
+  if (!tags?.length) return '<span class="note-empty">—</span>';
   return tags.map((t) => `<span class="note-tag-pill">#${escapeHtml(t)}</span>`).join("");
+}
+
+function notesDisplayText(raw) {
+  return (raw || "")
+    .replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+let _noteMarkdownReady = false;
+
+function ensureNoteMarkdown() {
+  if (_noteMarkdownReady || typeof marked === "undefined") return;
+  marked.use({
+    gfm: true,
+    breaks: true,
+    tokenizer: {
+      // Keep "~text~" literal in notes.
+      del() {
+        return false;
+      },
+    },
+  });
+  _noteMarkdownReady = true;
+}
+
+function noteBodyHtml(body) {
+  if (!body) return "";
+  if (typeof marked !== "undefined") {
+    ensureNoteMarkdown();
+    const html = marked.parse(body, { async: false });
+    if (typeof DOMPurify !== "undefined") {
+      return DOMPurify.sanitize(html);
+    }
+    return html;
+  }
+  return escapeHtml(body).replace(/\n/g, "<br>");
+}
+
+function renderNoteContentHtml(raw) {
+  const notes = (raw || "").trim();
+  if (!notes) return '<span class="note-empty">—</span>';
+  const tags = parseNoteTagsClient(notes);
+  const body = notesDisplayText(notes);
+  const parts = [];
+  if (tags.length) parts.push(`<div class="note-tags-row">${noteTagsHtml(tags)}</div>`);
+  if (body) parts.push(`<div class="note-body-text note-md">${noteBodyHtml(body)}</div>`);
+  if (!parts.length) return '<span class="note-empty">—</span>';
+  return parts.join("");
 }
 
 function isoLocalDate(d) {
@@ -1064,7 +1122,12 @@ function showSessionNotesModal(sessionId, options) {
     ? (options.sessionName || "")
     : ($("session_name")?.value?.trim() || "");
   const tags = parseNoteTagsClient(rawText);
-  input.value = rawText.replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "").replace(/\s+/g, " ").trim();
+  input.value = rawText
+    .replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   sessionNotesTagsInput?.setTags(tags);
   const skipBtn = $("session_notes_skip");
   if (skipBtn) skipBtn.textContent = fromArchive ? "Отмена" : "Пропустить";
@@ -1072,11 +1135,17 @@ function showSessionNotesModal(sessionId, options) {
   if (fromArchive) input.focus();
   // do not auto-focus to avoid stealing focus from inputs on other tabs (e.g. archive filters)
 
-  // char counter
+  updateSessionNotesCounter();
+  input.oninput = () => updateSessionNotesCounter();
+}
+
+function updateSessionNotesCounter() {
   const countEl = $("notes_char_count");
-  const updateCount = () => { if (countEl) countEl.textContent = String(input.value.length); };
-  updateCount();
-  input.oninput = updateCount;
+  const input = $("session_notes_input");
+  if (!countEl || !input) return;
+  const mergedLen = mergeNotesWithTags(input.value || "", sessionNotesTagsInput?.getTags() || []).length;
+  countEl.textContent = String(mergedLen);
+  countEl.style.color = mergedLen > SESSION_NOTES_MAX_LEN ? "var(--danger)" : "var(--text-muted)";
 }
 
 async function saveSessionNotes() {
@@ -1088,6 +1157,13 @@ async function saveSessionNotes() {
   const rawText = ($("session_notes_input")?.value || "").trim();
   const tags = sessionNotesTagsInput?.getTags() || [];
   const text = mergeNotesWithTags(rawText, tags);
+  if (text.length > SESSION_NOTES_MAX_LEN) {
+    setErr(
+      `Заметка слишком длинная: ${text.length}/${SESSION_NOTES_MAX_LEN}. ` +
+      "Сократите текст или уберите часть тегов."
+    );
+    return;
+  }
   try {
     const res = await api(`/api/sessions/${sessionId}`, {
       method: "PATCH",
@@ -1455,10 +1531,6 @@ function rrPlotTrimOpts(analysis) {
   };
 }
 
-function notesDisplayText(raw) {
-  return (raw || "").replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "").replace(/\s+/g, " ").trim();
-}
-
 function renderArchNotes(sum) {
   const block = $("arch_notes_block");
   const textEl = $("arch_notes_text");
@@ -1468,15 +1540,10 @@ function renderArchNotes(sum) {
   const notes = (sum?.session_name || "").trim();
   const tags = sum?.note_tags?.length ? sum.note_tags : parseNoteTagsClient(notes);
   const body = notesDisplayText(notes);
-  const tagsRow = tags.length
-    ? `<div style="margin-bottom:8px">${noteTagsHtml(tags)}</div>`
-    : "";
-  if (body) {
-    textEl.innerHTML = tagsRow + escapeHtml(body).replace(/\n/g, "<br>");
-  } else if (tags.length) {
-    textEl.innerHTML = tagsRow;
+  if (notes) {
+    textEl.innerHTML = renderNoteContentHtml(notes);
   } else {
-    textEl.innerHTML = '<span style="color:var(--text-dim);font-size:.85rem">Заметок нет</span>';
+    textEl.innerHTML = '<span class="note-empty">Заметок нет</span>';
   }
   if (editBtn) {
     editBtn.textContent = body || tags.length ? "Изменить" : "Добавить";
