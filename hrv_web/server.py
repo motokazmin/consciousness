@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import logging
 import queue
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -16,7 +18,14 @@ import numpy as np
 
 from hrv_core.analysis import progress_session_analysis, session_analysis, session_sd1
 from hrv_core.constants import DB_PATH
-from hrv_core.db import delete_session, init_db, load_hour_baseline, wipe_all_history
+from hrv_core.db import (
+    delete_session,
+    finalize_orphaned_sessions,
+    finalize_session,
+    init_db,
+    load_hour_baseline,
+    wipe_all_history,
+)
 from hrv_core.summary import session_summary_dict
 from hrv_core.note_tags import note_tag_sql_pattern, parse_note_tags
 from hrv_core.tags import normalize_tag
@@ -27,7 +36,22 @@ PHRASES_DIR = STATIC_DIR / "phrases"
 PHRASE_SET_ID_RE = re.compile(r"^[\w\-]+$")
 PHRASE_FILE_RE = re.compile(r"^(\w+)_(.+)_(\d+)\.mp3$")
 
-app = FastAPI(title="HRV Monitor")
+log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    conn = init_db()
+    try:
+        finalized = finalize_orphaned_sessions(conn)
+        if finalized:
+            log.info("Завершены незакрытые сессии после перезапуска: %s", finalized)
+    finally:
+        conn.close()
+    yield
+
+
+app = FastAPI(title="HRV Monitor", lifespan=_lifespan)
 
 
 class StartSessionBody(BaseModel):
@@ -264,11 +288,44 @@ def start_session(body: StartSessionBody):
     }
 
 
+@app.get("/api/sessions/recording")
+def recording_status():
+    active = MANAGER.get_active()
+    if active is None:
+        return {"recording": False}
+    return {
+        "recording": True,
+        "session_id": active.session_id,
+        "started_at": active.started_at,
+    }
+
+
 @app.post("/api/sessions/{session_id}/stop")
 def stop_session(session_id: int):
     summary = MANAGER.stop(session_id)
+    if summary is not None:
+        return summary
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT started, ended, drift_events FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Сессия не найдена")
+        if row[1] is not None:
+            raise HTTPException(404, "Сессия уже остановлена")
+        if not finalize_session(conn, session_id):
+            raise HTTPException(404, "Сессия не найдена или уже остановлена")
+        hour = datetime.datetime.fromtimestamp(row[0]).hour
+        baseline_at_start = load_hour_baseline(conn, hour)
+        summary = session_summary_dict(
+            conn, session_id, baseline_at_start, int(row[2] or 0)
+        )
+    finally:
+        conn.close()
     if summary is None:
-        raise HTTPException(404, "Сессия не найдена или уже остановлена")
+        raise HTTPException(404, "Сессия не найдена")
     return summary
 
 
@@ -409,11 +466,9 @@ def progress_data(
 
 @app.delete("/api/history")
 def wipe_history():
-    if MANAGER.get_active() is not None:
-        raise HTTPException(
-            409,
-            "Сначала остановите активную запись сессии.",
-        )
+    active = MANAGER.get_active()
+    if active is not None:
+        MANAGER.stop(active.session_id)
     conn = init_db()
     try:
         n_sessions = wipe_all_history(conn)
@@ -426,10 +481,7 @@ def wipe_history():
 def delete_one_session(session_id: int):
     active = MANAGER.get_active()
     if active is not None and active.session_id == session_id:
-        raise HTTPException(
-            409,
-            "Нельзя удалить активную сессию — сначала остановите запись.",
-        )
+        MANAGER.stop(session_id)
     conn = init_db()
     try:
         if not delete_session(conn, session_id):

@@ -3,6 +3,7 @@
 const $ = (id) => document.getElementById(id);
 
 let rrPlot = null;
+let liveRrZoom = null;
 let rrBuf  = [];
 let ws     = null;
 let raf    = null;
@@ -832,8 +833,36 @@ function plotWidth(el) {
 }
 
 function syncLivePlotXScale() {
-  if (!rrPlot || liveMode !== "timed" || !(durationSec > 0)) return;
-  rrPlot.setScale("x", { min: 0, max: durationSec });
+  // If the user has zoomed, re-pin that range: uPlot's live RR chart uses a
+  // function-based x `range`, so every setData() call (up to 60x/sec while
+  // streaming) makes uPlot silently auto-reset the x scale back to the full
+  // window right before this runs. applyBaselineIfDefault() alone only
+  // handled the "not zoomed" case, so an active zoom got wiped on the very
+  // next redraw frame. syncAfterDataChange() re-asserts the zoom instead.
+  liveRrZoom?.syncAfterDataChange();
+}
+
+function liveRrBaseline() {
+  if (liveMode === "timed") {
+    const xs = rrBuf.map((p) => Math.max(0, p[0] - sessionT0));
+    const ys = rrBuf.map((p) => p[1]);
+    const xMax = Math.max(durationSec, xs.length ? xs[xs.length - 1] : 0, 1);
+    if (!ys.length) return { x: [0, xMax], y: [350, 1300] };
+    const mn = ys.reduce((a, b) => (a < b ? a : b), Infinity);
+    const mx = ys.reduce((a, b) => (a > b ? a : b), -Infinity);
+    return {
+      x: [0, xMax],
+      y: [Math.max(300, mn - 40), mx + 40],
+    };
+  }
+
+  const ys = rrBuf.map((p) => p[1]);
+  if (!ys.length) return { x: [-60, 0], y: [350, 1300] };
+  const mx = ys.reduce((a, b) => (a > b ? a : b), 400);
+  return {
+    x: [-60, 0],
+    y: [Math.max(300, mx - 500), mx + 100],
+  };
 }
 
 const LIVE_PLOT_H = 360;
@@ -910,15 +939,27 @@ function rrCfg(timed, w) {
       { stroke, width: 1.5, fill },
     ],
     axes,
-    cursor: { show: true, x: true, y: false },
+    // uPlot's built-in drag-to-select-zoom is on by default and fires on the
+    // same .u-over element that chart_zoom.js uses for custom pan/wheel-zoom.
+    // Left enabled, both handlers reacted to the same drag: the chart would
+    // pan live under the cursor and then, on mouseup, snap back to whatever
+    // rectangle uPlot's own drag-select computed — the "zoom works weirdly"
+    // symptom. Disable native drag since HrvChartZoom fully owns it here.
+    cursor: { show: true, x: true, y: false, drag: { setScale: false, x: false, y: false } },
     legend: { show: false },
   };
 }
 
 function makeRRPlot(el, timed) {
+  if (liveRrZoom) { liveRrZoom.destroy(); liveRrZoom = null; }
   if (rrPlot) { rrPlot.destroy(); rrPlot = null; }
   el.innerHTML = "";
   rrPlot = new uPlot(rrCfg(timed, plotWidth(el)), [[], []], el);
+  liveRrZoom = window.HrvChartZoom?.attach(rrPlot, {
+    getBaseline: liveRrBaseline,
+    minSpan: { x: timed ? 1 : 0.5, y: 20 },
+    toolbarEl: el.closest(".plot-card")?.querySelector(".plot-header"),
+  });
   syncLivePlotXScale();
   return rrPlot;
 }
@@ -1029,9 +1070,6 @@ function redrawLive() {
       setLiveEmptyState("hidden");
       rrPlot.setData([xsR, ysR]);
       syncLivePlotXScale();
-      const mn = ysR.reduce((a, b) => a < b ? a : b, Infinity);
-      const mx = ysR.reduce((a, b) => a > b ? a : b, -Infinity);
-      rrPlot.setScale("y", { min: Math.max(300, mn - 40), max: mx + 40 });
     }
   } else {
     const now = Date.now() / 1000;
@@ -1043,8 +1081,7 @@ function redrawLive() {
     if (rrPlot && xsR.length) {
       setLiveEmptyState("hidden");
       rrPlot.setData([xsR, ysR]);
-      const mx = ysR.reduce((a, b) => a > b ? a : b, 400);
-      rrPlot.setScale("y", { min: Math.max(300, mx - 500), max: mx + 100 });
+      syncLivePlotXScale();
     }
   }
   updateStats();
@@ -1358,6 +1395,42 @@ function tagPill(t) {
   return `<span class="tag-pill ${cls}">${escapeHtml(tagLabel(t))}</span>`;
 }
 
+async function syncRecordingState() {
+  if (currentSessionId != null) return;
+  try {
+    const st = await api("/api/sessions/recording");
+    if (st.recording) {
+      $("btn_start").disabled = true;
+      setStatus(
+        `На сервере ещё идёт запись сессии #${st.session_id}. ` +
+          "Прервите её в архиве (кнопка «Прервать») или удалите."
+      );
+      return;
+    }
+    $("btn_start").disabled = false;
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+async function abortSession(id) {
+  const ok = confirm(
+    `Прервать сессию #${id}?\n\nЗапись остановится, данные до момента прерывания сохранятся.`
+  );
+  if (!ok) return;
+  try {
+    await api(`/api/sessions/${id}/stop`, { method: "POST" });
+    await syncRecordingState();
+    await loadArchive();
+    if ($("tab-progress")?.classList.contains("active")) {
+      await loadProgress();
+    }
+    setStatus(`Сессия #${id} прервана.`);
+  } catch (e) {
+    setErr(String(e.message || e));
+  }
+}
+
 async function loadArchive() {
   const p = $("flt_participant").value.trim();
   const t = $("flt_tag").value;
@@ -1372,6 +1445,7 @@ async function loadArchive() {
   for (const s of sessions) {
     const dur = s.ended ? Math.round((s.ended - s.started) / 60) : null;
     const tags = s.note_tags?.length ? s.note_tags : parseNoteTagsClient(s.session_name);
+    const isActive = !s.ended;
     const tr = document.createElement("tr");
     tr.innerHTML =
       `<td style="color:var(--text-dim);font-family:var(--mono);font-size:.8rem">${s.id}</td>` +
@@ -1382,14 +1456,20 @@ async function loadArchive() {
       `<td style="font-size:.82rem">${fmtTime(s.started)}</td>` +
       `<td style="font-size:.82rem">${s.ended ? fmtTime(s.ended) + (dur ? ` <span style="color:var(--text-muted)">(${dur} мин)</span>` : "") : "<span style='color:var(--yellow)'>в процессе…</span>"}</td>` +
       `<td style="font-family:var(--mono);font-size:.82rem">${s.ended && s.sd1 != null ? Number(s.sd1).toFixed(1) : "—"}</td>` +
-      `<td style="text-align:right"><button type="button" class="btn btn-danger btn-delete-session" data-id="${s.id}" style="font-size:.72rem;padding:4px 10px">Удалить</button></td>`;
-    const isActive = !s.ended;
+      `<td style="text-align:right;white-space:nowrap">` +
+      (isActive
+        ? `<button type="button" class="btn btn-abort-session" data-id="${s.id}" style="font-size:.72rem;padding:4px 10px;margin-right:6px">Прервать</button>`
+        : "") +
+      `<button type="button" class="btn btn-danger btn-delete-session" data-id="${s.id}" style="font-size:.72rem;padding:4px 10px">Удалить</button></td>`;
     if (isActive) {
-      tr.style.opacity = "0.6";
-      tr.style.cursor = "not-allowed";
+      tr.style.opacity = "0.85";
     } else {
       tr.addEventListener("click", () => openArchiveSession(s.id));
     }
+    tr.querySelector(".btn-abort-session")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      abortSession(s.id);
+    });
     tr.querySelector(".btn-delete-session")?.addEventListener("click", (e) => {
       e.stopPropagation();
       deleteSession(s.id);
@@ -1601,8 +1681,14 @@ function renderSummaryGrid(sum) {
   }
 }
 
+function destroyPlotInstance(plot) {
+  if (!plot) return;
+  plot._hrvZoom?.destroy();
+  plot.destroy();
+}
+
 function destroyArchPlots() {
-  if (archRR) { archRR.destroy(); archRR = null; }
+  if (archRR) { destroyPlotInstance(archRR); archRR = null; }
   if (archPoincare) { archPoincare.destroy(); archPoincare = null; }
   if (archSpectrum?.plot) { archSpectrum.plot.destroy(); archSpectrum = null; }
   if (archSdnn) { archSdnn.destroy(); archSdnn = null; }
@@ -1967,6 +2053,7 @@ async function deleteSession(id) {
       archSummaryCache = null;
     }
     await loadArchive();
+    await syncRecordingState();
     if ($("tab-progress")?.classList.contains("active")) {
       await loadProgress();
     }
@@ -2008,6 +2095,8 @@ syncGuidedPhraseOptionsVisibility();
 initChartFilterCheckboxes();
 initThemeUi();
 setLiveEmptyState("idle");
+syncRecordingState();
+loadArchive().catch(() => {});
 
 function initThemeUi() {
   const sel = $("theme_select");

@@ -5,7 +5,13 @@ import time
 import unittest
 from pathlib import Path
 
-from hrv_core.db import delete_session, init_db, wipe_all_history
+from hrv_core.db import (
+    delete_session,
+    finalize_orphaned_sessions,
+    finalize_session,
+    init_db,
+    wipe_all_history,
+)
 
 
 class DeleteSessionTests(unittest.TestCase):
@@ -71,6 +77,41 @@ class DeleteSessionTests(unittest.TestCase):
 
     def test_delete_session_missing_returns_false(self):
         self.assertFalse(delete_session(self.conn, 9999))
+
+    def test_finalize_session_sets_ended_from_last_point(self):
+        now = time.time()
+        cur = self.conn.execute(
+            "INSERT INTO sessions (tag, source, started, ended) VALUES (?, ?, ?, NULL)",
+            ("focus", "mock", now - 120,),
+        )
+        self.conn.commit()
+        sid = int(cur.lastrowid)
+        self.conn.execute(
+            "INSERT INTO hrv_points (session_id, ts, rr_ms, rmssd) VALUES (?, ?, ?, ?)",
+            (sid, now - 30, 800.0, 45.0),
+        )
+        self.conn.commit()
+        self.assertTrue(finalize_session(self.conn, sid))
+        ended = self.conn.execute(
+            "SELECT ended FROM sessions WHERE id = ?", (sid,)
+        ).fetchone()[0]
+        self.assertAlmostEqual(ended, now - 30, places=3)
+        self.assertFalse(finalize_session(self.conn, sid))
+
+    def test_finalize_orphaned_sessions_batch(self):
+        now = time.time()
+        for _ in range(2):
+            self.conn.execute(
+                "INSERT INTO sessions (tag, source, started, ended) VALUES (?, ?, ?, NULL)",
+                ("focus", "mock", now - 60),
+            )
+        self.conn.commit()
+        finalized = finalize_orphaned_sessions(self.conn)
+        self.assertEqual(len(finalized), 2)
+        n_open = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE ended IS NULL"
+        ).fetchone()[0]
+        self.assertEqual(n_open, 0)
 
     def test_wipe_all_history_clears_tables(self):
         sid = self._insert_session()

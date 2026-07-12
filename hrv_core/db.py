@@ -190,6 +190,37 @@ def update_session_baseline(conn: sqlite3.Connection, session_id: int) -> None:
     log.debug("Baseline updated for hours %s", updated)
 
 
+def finalize_session(conn: sqlite3.Connection, session_id: int) -> bool:
+    """Проставить ended для незавершённой сессии (сбой, закрытие без stop)."""
+    row = conn.execute(
+        "SELECT started, ended, drift_events FROM sessions WHERE id = ?", (session_id,)
+    ).fetchone()
+    if not row or row[1] is not None:
+        return False
+    started, _, drift_events = row[0], row[1], int(row[2] or 0)
+    last_ts = conn.execute(
+        "SELECT MAX(ts) FROM hrv_points WHERE session_id = ?", (session_id,)
+    ).fetchone()[0]
+    ended = float(last_ts) if last_ts is not None else float(started or time.time())
+    conn.execute(
+        "UPDATE sessions SET ended=?, drift_events=? WHERE id=?",
+        (ended, drift_events, session_id),
+    )
+    conn.commit()
+    update_session_baseline(conn, session_id)
+    return True
+
+
+def finalize_orphaned_sessions(conn: sqlite3.Connection) -> list[int]:
+    """Завершить все сессии с ended IS NULL. Возвращает id затронутых строк."""
+    rows = conn.execute("SELECT id FROM sessions WHERE ended IS NULL").fetchall()
+    finalized: list[int] = []
+    for (sid,) in rows:
+        if finalize_session(conn, int(sid)):
+            finalized.append(int(sid))
+    return finalized
+
+
 def delete_session(conn: sqlite3.Connection, session_id: int) -> bool:
     """Удалить сессию и связанные точки/логи фраз. Возвращает True, если сессия была."""
     row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()

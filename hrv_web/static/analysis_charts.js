@@ -194,14 +194,18 @@
     const yMax = opts?.yMax ?? (rawRr.reduce((a, b) => (a > b ? a : b), -Infinity) + 40);
     const w = plotWidth(el);
     const trimOpts = opts?.trim;
+    const baseline = { x: [0, xMax], y: [yMin, yMax] };
 
-    return new uPlot(
+    const plot = new uPlot(
       {
         width: w,
         height: height || 260,
         padding: CHART_PADDING,
         scales: {
-          x: { ...xScaleLinear, range: [0, xMax] },
+          // Static range: [0, xMax] blocks X zoom — uPlot re-applies it on every
+          // setScale and snaps back to the full session. A callback lets zoom/pan
+          // keep a narrowed window while defaulting to the full extent.
+          x: { ...xScaleLinear, range: (_u, min, max) => [min ?? 0, max ?? xMax] },
           y: { time: false, distr: 1, range: [yMin, yMax] },
         },
         series: [
@@ -216,12 +220,24 @@
           { ...axisStyle(), label: "RR, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
         ],
         hooks: trimOpts?.applied ? { draw: [(u) => drawTrimBands(u, { trim: trimOpts })] } : {},
-        cursor: { show: true, x: true, y: false },
+        // Native drag-to-select-zoom must be off here too — HrvChartZoom.attach
+        // below binds its own drag-to-pan on the same .u-over element, and the
+        // two were fighting over every drag gesture (see chart_zoom.js / app.js
+        // for the full explanation).
+        cursor: { show: true, x: true, y: false, drag: { setScale: false, x: false, y: false } },
         legend: { show: false },
       },
       [rawRrX, rawRr],
       el
     );
+
+    const zoom = global.HrvChartZoom?.attach(plot, {
+      getBaseline: () => baseline,
+      minSpan: { x: 1, y: 20 },
+    });
+    if (zoom) plot._hrvZoom = zoom;
+
+    return plot;
   }
 
   function makeSpectrumPlot(el, spectrum, height, opts) {
