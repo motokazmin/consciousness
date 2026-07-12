@@ -1,0 +1,28 @@
+{
+  "estimated_duration_sec": 1380,
+  "cues": [
+    {"file": "release_01.mp3", "pause_after_sec": 20},
+    {"file": "release_02.mp3", "pause_after_sec": 25},
+    {"file": "release_03.mp3", "pause_after_sec": 30},
+    {"file": "release_04.mp3", "pause_after_sec": 15},
+    {"file": "release_05.mp3", "pause_after_sec": 30},
+    {"file": "release_06.mp3", "pause_after_sec": 30},
+    {"file": "release_07.mp3", "pause_after_sec": 30},
+    {"file": "release_08.mp3", "pause_after_sec": 40},
+    {"file": "release_09.mp3", "pause_after_sec": 30},
+    {"file": "release_10.mp3", "pause_after_sec": 30},
+    {"file": "release_11.mp3", "pause_after_sec": 20},
+    {"file": "release_11b.mp3", "pause_after_sec": 30},
+    {"file": "release_11c.mp3", "pause_after_sec": 30},
+    {"file": "release_12.mp3", "pause_after_sec": 20},
+    {"file": "release_13.mp3", "pause_after_sec": 15},
+    {"file": "release_14.mp3", "pause_after_sec": 15},
+    {"file": "release_15.mp3", "pause_after_sec": 60},
+    {"file": "release_16.mp3", "pause_after_sec": 60},
+    {"file": "release_17.mp3", "pause_after_sec": 90},
+    {"file": "release_18.mp3", "pause_after_sec": 90},
+    {"file": "release_19.mp3", "pause_after_sec": 60},
+    {"file": "release_20.mp3", "pause_after_sec": 20},
+    {"file": "release_21.mp3", "pause_after_sec": 0}
+  ]
+}

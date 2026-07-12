@@ -33,6 +33,12 @@ let meditationEngine = null;
 let GUIDED_PHRASE_TAGS = {};
 let PHRASE_SETS = [];
 const PHRASE_SET_PREF_KEY = "hrv_phrase_set_by_prefix";
+const RELEASE_TAG = "release";
+const RELEASE_PROTOCOL_DURATION_SEC = 1380;
+
+function isReleaseTag(tag) {
+  return tag === RELEASE_TAG;
+}
 
 function phrasePrefixForTag(tag) {
   return GUIDED_PHRASE_TAGS[tag] ?? null;
@@ -80,7 +86,9 @@ function syncPhraseSetOptions() {
     select.appendChild(opt);
   }
   const preferred = prefs[prefix];
-  if (preferred && items.some((item) => item.set === preferred)) {
+  if (prefix === RELEASE_TAG && items.some((item) => item.set === "soft")) {
+    select.value = "soft";
+  } else if (preferred && items.some((item) => item.set === preferred)) {
     select.value = preferred;
   } else if (items.some((item) => item.set === prev)) {
     select.value = prev;
@@ -91,28 +99,50 @@ function syncPhraseSetOptions() {
   }
 }
 
+function syncReleaseSessionOptions() {
+  const tag = $("tag")?.value;
+  const isRelease = isReleaseTag(tag);
+  const minutesWrap = $("minutes_wrap");
+  if (minutesWrap) minutesWrap.hidden = isRelease;
+
+  const intervalWrap = $("guided_phrase_interval_wrap");
+  if (intervalWrap) intervalWrap.hidden = isRelease;
+
+  const guidedEl = $("opt_guided_phrases");
+  if (guidedEl) {
+    if (isRelease) {
+      guidedEl.checked = true;
+      guidedEl.disabled = true;
+    } else if (!currentSessionId) {
+      guidedEl.disabled = false;
+    }
+  }
+}
+
 function syncGuidedPhraseOptionsVisibility() {
   const wrap = $("guided_phrase_options");
   if (!wrap) return;
   wrap.hidden = !phrasePrefixForTag($("tag")?.value);
   syncPhraseSetOptions();
+  syncReleaseSessionOptions();
 }
 
 function guidedPhraseOptions() {
+  const tag = $("tag")?.value;
   const el = $("opt_guided_phrases");
   const intervalEl = $("guided_phrase_interval");
   const setEl = $("guided_phrase_set");
   let phraseMinIntervalSec = 20;
-  if (intervalEl) {
+  if (intervalEl && !isReleaseTag(tag)) {
     const raw = intervalEl.value.trim().replace(",", ".");
     const n = parseFloat(raw);
     if (Number.isFinite(n) && n >= 5) phraseMinIntervalSec = n;
   }
-  const phraseSet = setEl?.value || "directive";
-  const prefix = phrasePrefixForTag($("tag")?.value);
+  const phraseSet = isReleaseTag(tag) ? (setEl?.value || "soft") : (setEl?.value || "directive");
+  const prefix = phrasePrefixForTag(tag);
   if (prefix && phraseSet) savePhraseSetPref(prefix, phraseSet);
   return {
-    guidedPhrases: el ? el.checked : false,
+    guidedPhrases: isReleaseTag(tag) ? true : (el ? el.checked : false),
     phraseMinIntervalSec,
     phraseSet,
   };
@@ -255,7 +285,15 @@ function startBiofeedbackSession(opts) {
   syncBiofeedbackStats();
 
   const phrasePrefix = phrasePrefixForTag(opts.tag);
-  if (opts.guidedPhrases && phrasePrefix && window.MeditationEngine) {
+  if (opts.tag === RELEASE_TAG && window.TimedProtocolEngine) {
+    meditationEngine = new TimedProtocolEngine();
+    meditationEngine.start(
+      opts.sessionId,
+      phrasePrefix,
+      opts.phraseSet || "soft",
+      () => stopLive(),
+    ).catch(() => {});
+  } else if (opts.guidedPhrases && phrasePrefix && window.MeditationEngine) {
     meditationEngine = new MeditationEngine();
     meditationEngine.start(
       opts.sessionId,
@@ -1124,6 +1162,7 @@ function finalizeLiveSession() {
   $("btn_stop").disabled = true;
   $("btn_start").disabled = false;
   setBiofeedbackControlsEnabled(true);
+  syncReleaseSessionOptions();
   if (ws) { ws.close(); ws = null; }
   stopRaf();
   stopBiofeedbackSession();
@@ -1277,7 +1316,9 @@ async function startLive() {
     return;
   }
 
-  const rawMin = $("minutes").value.trim();
+  const tagFromSelect = $("tag")?.value;
+  const isReleasePre = tagFromSelect === RELEASE_TAG;
+  const rawMin = isReleasePre ? "" : $("minutes").value.trim();
   const minutes = rawMin ? parseFloat(rawMin.replace(",", ".")) : null;
   let tag;
   try {
@@ -1286,15 +1327,20 @@ async function startLive() {
     setErr(String(e.message || e));
     return;
   }
+  const isRelease = isReleaseTag(tag);
   const opts = { ...audioOptions(), ...guidedPhraseOptions() };
+  if (isRelease) {
+    opts.guidedPhrases = true;
+    opts.phraseSet = opts.phraseSet || "soft";
+  }
   const body = {
     participant,
     tag,
     session_name: $("session_name").value.trim() || null,
     source,
     address: source === "ble" ? address : null,
-    minutes: minutes != null && !Number.isNaN(minutes) && minutes > 0 ? minutes : null,
-    opt_guided_phrases: opts.guidedPhrases,
+    minutes: isRelease ? null : (minutes != null && !Number.isNaN(minutes) && minutes > 0 ? minutes : null),
+    opt_guided_phrases: isRelease ? true : opts.guidedPhrases,
     opt_audio_biofeedback: opts.audioBiofeedback,
   };
 
@@ -1304,10 +1350,10 @@ async function startLive() {
     const res = await api("/api/sessions", { method: "POST", body: JSON.stringify(body) });
     currentSessionId = res.id;
     _sessionEndHandled = false;
-    const timed = body.minutes != null && body.minutes > 0;
+    const timed = isRelease || (body.minutes != null && body.minutes > 0);
     liveMode    = timed ? "timed" : "window";
     sessionT0   = typeof res.started_at === "number" ? res.started_at : Date.now() / 1000;
-    durationSec = timed ? body.minutes * 60 : 0;
+    durationSec = isRelease ? RELEASE_PROTOCOL_DURATION_SEC : (timed ? body.minutes * 60 : 0);
     lastRmssd   = null;
     lastRmssdNormalized = null;
     lastSmoothedRr = null;
@@ -1333,7 +1379,7 @@ async function startLive() {
     setLiveEmptyState("waiting");
     nextFrame(resizePlots);
 
-    setStatus(`Сессия #${currentSessionId} · ${tagLabel(body.tag)}${timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);
+    setStatus(`Сессия #${currentSessionId} · ${tagLabel(body.tag)}${isRelease ? " · протокол" : timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);
     loadSessionTypes().catch(() => {});
     $("btn_start").disabled = true;
     $("btn_stop").disabled  = false;

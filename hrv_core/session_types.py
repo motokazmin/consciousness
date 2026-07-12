@@ -73,6 +73,12 @@ SESSION_TYPES: dict[str, SessionType] = {
         mock_profile="default",
         phrase_prefix=None,
     ),
+    "release": SessionType(
+        slug="release",
+        label="Телесное расслабление",
+        mock_profile="default",
+        phrase_prefix="release",
+    ),
 }
 
 # Кортеж slug-ов для валидации (используется в constants.py и tags.py)
