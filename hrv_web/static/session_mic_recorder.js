@@ -28,6 +28,7 @@
       this._mimeType = "";
       this._started = false;
       this._status = "off"; // off | pending | recording | denied | error | stopped
+      this._startedAt = null;
     }
 
     get status() {
@@ -36,6 +37,10 @@
 
     get recording() {
       return this._started && this._recorder?.state === "recording";
+    }
+
+    get startedAt() {
+      return this._startedAt;
     }
 
     /**
@@ -86,6 +91,7 @@
         if (ev.data && ev.data.size > 0) this._chunks.push(ev.data);
       };
       this._recorder.start(5000);
+      this._startedAt = Date.now() / 1000;
       this._started = true;
       this._status = "recording";
       return true;
@@ -133,6 +139,7 @@
       this._chunks = [];
       this._started = false;
       this._mimeType = "";
+      this._startedAt = null;
       this._releaseStream();
       this._status = "off";
     }

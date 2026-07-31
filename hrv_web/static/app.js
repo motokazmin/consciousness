@@ -171,11 +171,15 @@ function setMicStatus(text) {
   el.classList.toggle("visible", on);
 }
 
-async function uploadSessionAudio(sessionId, blob) {
+async function uploadSessionAudio(sessionId, blob, recorderStartedAt) {
   if (!sessionId || !blob) return;
+  const headers = { "Content-Type": blob.type || "audio/webm" };
+  if (recorderStartedAt != null) {
+    headers["X-Recorder-Started-At"] = String(recorderStartedAt);
+  }
   const res = await fetch(`/api/sessions/${sessionId}/audio`, {
     method: "PUT",
-    headers: { "Content-Type": blob.type || "audio/webm" },
+    headers,
     body: blob,
   });
   const t = await res.text();
@@ -201,6 +205,7 @@ async function finishMicRecording(sessionId) {
     return;
   }
   const rec = micRecorder;
+  const startedAt = rec.startedAt;
   micRecorder = null;
   let blob = null;
   try {
@@ -213,7 +218,7 @@ async function finishMicRecording(sessionId) {
   setMicStatus("");
   if (!blob || !sessionId) return;
   try {
-    await uploadSessionAudio(sessionId, blob);
+    await uploadSessionAudio(sessionId, blob, startedAt);
   } catch (e) {
     setErr(`Аудио не сохранено: ${e.message || e}`);
   }
@@ -2023,9 +2028,8 @@ async function syncArchAudioPlayer(sum) {
   const sid = sum?.id;
   const has = !!sum?.has_audio;
   
-  // Компенсация задержки: запись стартует в armSession после первого RR
-  // Примерная задержка ~0.3-0.5с (arm event + recorder start latency)
-  const audioOffset = sum?.audio_offset_sec ?? 0.4;
+  // Точный offset между sessions.started и recorder.start() из БД
+  const audioOffset = sum?.audio_offset_sec ?? 0;
   player.setAudioOffset(audioOffset);
   
   await player.load(sid, has);

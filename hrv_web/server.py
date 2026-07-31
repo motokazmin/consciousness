@@ -506,7 +506,8 @@ def get_session(session_id: int):
     conn = init_db()
     row = conn.execute(
         "SELECT tag, session_name, participant, source, started, ended, drift_events, "
-        "opt_guided_phrases, opt_audio_biofeedback, opt_mic_recording, has_audio "
+        "opt_guided_phrases, opt_audio_biofeedback, opt_mic_recording, has_audio, "
+        "audio_started_at "
         "FROM sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
@@ -525,6 +526,7 @@ def get_session(session_id: int):
         opt_audio,
         opt_mic,
         has_audio,
+        audio_started_at,
     ) = row
     if ended is None:
         conn.close()
@@ -539,6 +541,8 @@ def get_session(session_id: int):
         summary["opt_mic_recording"] = bool(opt_mic)
         summary["has_audio"] = bool(has_audio)
         summary["note_tags"] = parse_note_tags(session_name)
+        if has_audio and audio_started_at and started:
+            summary["audio_offset_sec"] = float(audio_started_at - started)
     return summary
 
 
@@ -553,6 +557,15 @@ async def put_session_audio(session_id: int, request: Request):
         raise HTTPException(400, "Пустое тело запроса")
     if len(body) > _AUDIO_MAX_BYTES:
         raise HTTPException(413, "Файл аудио слишком большой")
+    
+    recorder_started_at_str = request.headers.get("X-Recorder-Started-At")
+    recorder_started_at = None
+    if recorder_started_at_str:
+        try:
+            recorder_started_at = float(recorder_started_at_str)
+        except (ValueError, TypeError):
+            pass
+    
     conn = init_db()
     try:
         row = conn.execute(
@@ -565,7 +578,7 @@ async def put_session_audio(session_id: int, request: Request):
         ensure_session_audio_dir()
         path = session_audio_path(session_id)
         path.write_bytes(body)
-        set_session_has_audio(conn, session_id, True)
+        set_session_has_audio(conn, session_id, True, recorder_started_at)
     finally:
         conn.close()
     return {"ok": True, "has_audio": True, "bytes": len(body)}

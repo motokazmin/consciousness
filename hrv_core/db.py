@@ -164,6 +164,10 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN has_audio INTEGER NOT NULL DEFAULT 0"
         )
+    if "audio_started_at" not in cols:
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN audio_started_at REAL"
+        )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS meditation_phrase_log (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -286,14 +290,19 @@ def wipe_all_history(conn: sqlite3.Connection) -> int:
     return int(n_sessions)
 
 
-def set_session_has_audio(conn: sqlite3.Connection, session_id: int, has_audio: bool) -> bool:
-    """Выставить has_audio. Возвращает False, если сессии нет."""
+def set_session_has_audio(
+    conn: sqlite3.Connection,
+    session_id: int,
+    has_audio: bool,
+    audio_started_at: float | None = None,
+) -> bool:
+    """Выставить has_audio и audio_started_at. Возвращает False, если сессии нет."""
     row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
     if not row:
         return False
     conn.execute(
-        "UPDATE sessions SET has_audio = ? WHERE id = ?",
-        (1 if has_audio else 0, session_id),
+        "UPDATE sessions SET has_audio = ?, audio_started_at = ? WHERE id = ?",
+        (1 if has_audio else 0, audio_started_at, session_id),
     )
     conn.commit()
     return True
