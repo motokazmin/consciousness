@@ -69,12 +69,21 @@ flowchart LR
     ST --> WEB
 ```
 
+### Жизненный цикл сессии (arm с первого RR)
+
+Отсчёт длительности, ось live-графика, guided-фразы и release-протокол стартуют **не** в момент `POST /api/sessions`, а с **первого реального RR** (arm).
+
+1. **Старт** (`SessionManager.start`): запись в `sessions`, запуск источника, сторож `ARM_TIMEOUT_SEC` (300 с) — если RR так и не пришёл, сессия останавливается.
+2. **Первый RR** → `_arm(ts)`: `first_beat_at = ts`, `UPDATE sessions SET started = ts`, WS `{type:"armed", started_at}`, старт таймера авто-стопа (`duration_minutes`), если задан.
+3. **Клиент** (`app.js`): до arm — «ожидание устройства»; по `armed` / `meta.first_beat_at` / первому `beat` — `armSession()` (T0, фразы, аудио).
+4. **Стоп** — summary, обновление персонального baseline по часу.
+
 ### Обработка одного удара
 
 1. **Источник** (`hrv_core/sources.py`) в отдельном потоке вызывает `callback(rr_ms, ts)`.
-2. **`HRVSessionState.process_beat()`** (`hrv_core/pipeline.py`): скользящий буфер RR (60 с), RMSSD, drift; возвращает `BeatSample(ts, rr_ms, rmssd, drift_just_fired)`.
-3. **Веб-слой** сохраняет точку в `hrv_points`, отправляет метрики по WebSocket, обновляет графики (uPlot).
-4. **При завершении сессии** — summary, обновление персонального baseline по часу.
+2. **`SessionManager`**: при первом колбэке вызывает `_arm`, затем `RunningSession.on_beat`.
+3. **`HRVSessionState.process_beat()`** (`hrv_core/pipeline.py`): скользящий буфер RR (60 с), RMSSD, drift; возвращает `BeatSample(ts, rr_ms, rmssd, drift_just_fired)` (первый удар может не дать sample, пока RMSSD = 0).
+4. **Веб-слой** сохраняет точку в `hrv_points`, отправляет метрики по WebSocket, обновляет графики (uPlot).
 
 ---
 
@@ -100,10 +109,11 @@ flowchart LR
 | Модуль | Роль |
 |--------|------|
 | `server.py` | FastAPI: REST + WebSocket, раздача статики |
-| `session_manager.py` | `SessionManager` — одна активная сессия, очередь для WebSocket |
-| `static/app.js` | SPA: форма, WebSocket, архив, прогресс, guided-фразы |
+| `session_manager.py` | `SessionManager` — одна активная сессия; arm с первого RR; очередь WS |
+| `static/app.js` | SPA: форма, WebSocket, архив, прогресс; `armSession` после первого удара |
 | `static/analysis_charts.js` | Отрисовка архивных графиков (RR, SDNN, Poincaré, FFT, overlay) |
 | `static/meditation_engine.js` | HRV-реактивные mp3-фразы (meditation → sit, relaxation → lay) |
+| `static/timed_protocol_engine.js` | Последовательный протокол «Телесное расслабление» (`release`) по `release_schedule.json` |
 | `static/hrv_audio_engine.js` | Web Audio: пульс, текстуры, трансовый pad |
 | `static/index.html` | UI режимов «Дышащий Эмбиент» / «Трансовый Порог» |
 
@@ -157,6 +167,8 @@ session_types   (slug, label, phrase_prefix, mock_profile, chart_profile, is_cus
 meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_before, …)
 ```
 
+`sessions.started` при INSERT — момент создания; после arm переписывается временем первого RR (канонический t₀ длительности и оси `ts - started`).
+
 ### Тегирование
 
 Два независимых механизма — подробнее в [hrv_mvp.md § Тегирование](hrv_mvp.md#тегирование-сессий):
@@ -166,7 +178,7 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 | **Тип активности** | `sessions.tag` (slug) | Список «Тип активности» до старта | «Тип активности» |
 | **Теги заметок** | `#…` внутри `sessions.session_name` | Поле «Заметка» / модал после «Стоп» | «Тег заметки» |
 
-**Типы активности (slug в `sessions.tag`):** системные — `relaxation`, `meditation`, `test`, `yoga`, `sleep`, `work`, `mental_training`; плюс пользовательские в `session_types` (`is_custom=1`).
+**Типы активности (slug в `sessions.tag`):** системные — `relaxation`, `meditation`, `release`, `test`, `yoga`, `sleep`, `work`, `mental_training`; плюс пользовательские в `session_types` (`is_custom=1`). Тип `release` — timed-протокол через [`timed_protocol_engine.js`](hrv_web/static/timed_protocol_engine.js) и `phrases/release/`.
 
 **Теги заметок:** формат `#слово` в тексте заметки. Парсинг — [`hrv_core/note_tags.py`](hrv_core/note_tags.py). API: `GET /api/note-tags`; фильтр — один или несколько `note_tag=…` (OR: сессия содержит любой из тегов).
 
@@ -188,7 +200,7 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 | `/api/sessions` | POST/GET | Старт / список сессий (фильтры: participant, tag, note_tag, период) |
 | `/api/sessions/{id}` | PATCH | Заметки после завершения (`session_name`) |
 | `/api/sessions/{id}/stop` | POST | Остановка + summary |
-| `/api/sessions/{id}/stream` | WebSocket | Live: `beat`, `meta`, `ended` |
+| `/api/sessions/{id}/stream` | WebSocket | Live: `meta` (`first_beat_at`), `armed`, `beat`, `ended` |
 | `/api/sessions/{id}` | GET/DELETE | Summary завершённой сессии / удаление |
 | `/api/sessions/{id}/points` | GET | Точки (с downsampling) |
 | `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); `?stable_zone=true`, `max_points` |
@@ -248,9 +260,14 @@ hrv_points (ts, rr_ms, rmssd)
 
 Ключевые поля: `raw_rr`, `raw_rr_x`, `poincare`, `spectrum`, `sdnn_trend`, `rmssd_trend`, `mean_rr`, `coherence_score`, `stable_zone`, `trim: {start_sec, end_sec, applied}`.
 
-### Guided meditation
+### Guided meditation и release-протокол
 
-Фразы: `hrv_web/static/phrases/{prefix}/{set}/` (`prefix`: `sit` / `lay` из `session_types.phrase_prefix`). UI: выбор набора фраз, HRV-реактивное воспроизведение ([`meditation_engine.js`](hrv_web/static/meditation_engine.js)).
+Фразы: `hrv_web/static/phrases/{prefix}/{set}/` (`prefix`: `sit` / `lay` / `release` из `session_types.phrase_prefix`).
+
+| Режим | Движок | Старт |
+|-------|--------|-------|
+| Guided (meditation / relaxation, …) | [`meditation_engine.js`](hrv_web/static/meditation_engine.js) | После `armed` (первый RR) |
+| `release` (телесное расслабление) | [`timed_protocol_engine.js`](hrv_web/static/timed_protocol_engine.js) + `release_schedule.json` | После `armed` |
 
 ---
 
@@ -352,6 +369,7 @@ Python 3.12 · numpy · scipy · bleak (BLE) · FastAPI · uvicorn · SQLite · 
 - **Strategy + Factory** — `HRVSource` + `build_source(kind)`.
 - **Shared core, web UI** — один pipeline, веб для записи и графиков.
 - **Single active session** — `SessionManager`.
+- **Arm on first RR** — таймер и UI-движки стартуют с первого удара, не с кнопки «Старт».
 - **Incremental personal baseline** — per-hour RMSSD между сессиями.
 - **Graceful hardware handling** — reconnect, watchdog, подсказки про «занятый» H10.
 
@@ -361,13 +379,16 @@ Python 3.12 · numpy · scipy · bleak (BLE) · FastAPI · uvicorn · SQLite · 
 
 ```
 consciousness/
+├── .cursor/
+│   ├── rules/project-context.mdc   # always-on: читать/синхронизировать ARCHITECTURE
+│   └── skills/project-context/     # bootstrap + refresh after commit
 ├── hrv_core/           # Ядро: источники, pipeline, БД, analysis, preprocessing
 ├── tests/              # unittest (pipeline, tags, analysis stable zone, …)
 ├── hrv_web/            # FastAPI + статика (app.js, analysis_charts.js, …)
 ├── requirements.txt
 ├── hrv_data.sqlite     # БД (runtime)
 ├── explain.md          # Графики: расчёт, опции, интерпретация
-├── ARCHITECTURE.md     # Этот документ
+├── ARCHITECTURE.md     # Этот документ (канон контекста для агента)
 └── hrv_mvp.md          # Детальная спецификация MVP
 ```
 

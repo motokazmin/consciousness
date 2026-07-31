@@ -1,0 +1,26 @@
+---
+description: Bootstrap from ARCHITECTURE.md; keep it in sync after architecture-changing commits
+alwaysApply: true
+---
+
+# Контекст проекта
+
+Канон архитектуры: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+## Начало сессии
+
+До нетривиальной работы **прочитай** `ARCHITECTURE.md` целиком через Read tool. Не полагайся на память прошлых чатов, если файл мог измениться.
+
+Узкие детали — по ссылкам из ARCHITECTURE, не целиком каждый раз:
+- UI / BLE / baseline / mock → [`hrv_mvp.md`](hrv_mvp.md)
+- графики / интерпретация → [`explain.md`](explain.md)
+
+Для полного workflow (bootstrap + refresh) следуй skill **project-context**.
+
+## После коммита
+
+Если пользователь просит коммит (или коммит только что сделан):
+
+1. Сверь staged / just-committed diff с `ARCHITECTURE.md`.
+2. Если менялись поведение, API, WS-сообщения, схема БД, поток сессии, модули или ключевые константы — **обнови** `ARCHITECTURE.md` в том же цикле (включить в коммит или follow-up `docs: sync ARCHITECTURE.md` по правилам коммитов пользователя).
+3. Косметика / тесты без архитектурного эффекта — файл не трогай.
