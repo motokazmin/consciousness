@@ -62,6 +62,7 @@
      */
     setAudioOffset(offsetSec) {
       this._audioOffset = Number.isFinite(offsetSec) ? offsetSec : 0;
+      console.log("[AudioPlayer] setAudioOffset:", this._audioOffset);
     }
 
     /**
@@ -71,7 +72,7 @@
     async load(sessionId, hasAudio) {
       this.detachPlot();
       this._teardownAudio();
-      this._playheadSec = 0;
+      this._playheadSec = this._audioOffset;
       if (!hasAudio || !sessionId) {
         this._setVisible(false);
         this._syncUi();
@@ -99,7 +100,11 @@
         this._stopRaf();
         this._syncUi();
       });
-      audio.addEventListener("loadedmetadata", () => this._syncUi());
+      audio.addEventListener("loadedmetadata", () => {
+        this._playheadSec = (audio.currentTime || 0) + this._audioOffset;
+        this._syncUi();
+        this._redrawPlot();
+      });
 
       this._setVisible(true);
       this._syncUi();

@@ -31,6 +31,7 @@ let audioMode = "smooth_rr";
 let audioTexture = "space_pad";
 let meditationEngine = null;
 let micRecorder = null;
+let micRecorderArmTime = null;
 let archAudioPlayer = null;
 
 // Динамически заполняется из /api/session-types при старте
@@ -171,11 +172,11 @@ function setMicStatus(text) {
   el.classList.toggle("visible", on);
 }
 
-async function uploadSessionAudio(sessionId, blob, recorderStartedAt) {
+async function uploadSessionAudio(sessionId, blob, delaySeconds) {
   if (!sessionId || !blob) return;
   const headers = { "Content-Type": blob.type || "audio/webm" };
-  if (recorderStartedAt != null) {
-    headers["X-Recorder-Started-At"] = String(recorderStartedAt);
+  if (delaySeconds != null && Number.isFinite(delaySeconds)) {
+    headers["X-Audio-Delay-Sec"] = String(delaySeconds);
   }
   const res = await fetch(`/api/sessions/${sessionId}/audio`, {
     method: "PUT",
@@ -202,11 +203,15 @@ async function uploadSessionAudio(sessionId, blob, recorderStartedAt) {
 async function finishMicRecording(sessionId) {
   if (!micRecorder) {
     setMicStatus("");
+    micRecorderArmTime = null;
     return;
   }
   const rec = micRecorder;
-  const startedAt = rec.startedAt;
+  const recorderStartedAtLocal = rec.startedAt;
+  const armTimeLocal = micRecorderArmTime;
   micRecorder = null;
+  micRecorderArmTime = null;
+  
   let blob = null;
   try {
     blob = await rec.stop();
@@ -217,8 +222,14 @@ async function finishMicRecording(sessionId) {
   }
   setMicStatus("");
   if (!blob || !sessionId) return;
+  
+  // Вычисляем задержку В СЕКУНДАХ между arm и началом записи (относительно браузера)
+  const delaySeconds = armTimeLocal && recorderStartedAtLocal 
+    ? (recorderStartedAtLocal - armTimeLocal) / 1000 
+    : null;
+  
   try {
-    await uploadSessionAudio(sessionId, blob, startedAt);
+    await uploadSessionAudio(sessionId, blob, delaySeconds);
   } catch (e) {
     setErr(`Аудио не сохранено: ${e.message || e}`);
   }
@@ -1249,6 +1260,7 @@ function armSession(t0) {
     }
   }
   if (micRecorder && !micRecorder.recording) {
+    micRecorderArmTime = Date.now();
     if (micRecorder.start()) setMicStatus("микрофон: пишет");
     else setMicStatus("микрофон: ошибка записи");
   }

@@ -91,7 +91,8 @@
         if (ev.data && ev.data.size > 0) this._chunks.push(ev.data);
       };
       this._recorder.start(5000);
-      this._startedAt = Date.now() / 1000;
+      // Запоминаем локальное время браузера (для вычисления задержки)
+      this._startedAt = Date.now();
       this._started = true;
       this._status = "recording";
       return true;
