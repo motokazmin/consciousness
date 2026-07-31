@@ -30,6 +30,8 @@ let audioEnabled = false;
 let audioMode = "smooth_rr";
 let audioTexture = "space_pad";
 let meditationEngine = null;
+let micRecorder = null;
+let archAudioPlayer = null;
 
 // Динамически заполняется из /api/session-types при старте
 let GUIDED_PHRASE_TAGS = {};
@@ -153,6 +155,79 @@ function guidedPhraseOptions() {
 function audioOptions() {
   const el = $("opt_audio_biofeedback");
   return { audioBiofeedback: el ? el.checked : false };
+}
+
+function micOptions() {
+  const el = $("opt_mic_recording");
+  return { micRecording: el ? el.checked : false };
+}
+
+function setMicStatus(text) {
+  const el = $("mic_status");
+  if (!el) return;
+  el.textContent = text || "";
+  const on = !!text;
+  el.style.display = on ? "block" : "none";
+  el.classList.toggle("visible", on);
+}
+
+async function uploadSessionAudio(sessionId, blob) {
+  if (!sessionId || !blob) return;
+  const res = await fetch(`/api/sessions/${sessionId}/audio`, {
+    method: "PUT",
+    headers: { "Content-Type": blob.type || "audio/webm" },
+    body: blob,
+  });
+  const t = await res.text();
+  let j = {};
+  try {
+    j = t ? JSON.parse(t) : {};
+  } catch {
+    j = {};
+  }
+  if (!res.ok) {
+    const d = j.detail;
+    const msg = Array.isArray(d)
+      ? d.map((x) => x.msg || JSON.stringify(x)).join("; ")
+      : d || j.error || t || res.statusText || String(res.status);
+    throw new Error(msg);
+  }
+  return j;
+}
+
+async function finishMicRecording(sessionId) {
+  if (!micRecorder) {
+    setMicStatus("");
+    return;
+  }
+  const rec = micRecorder;
+  micRecorder = null;
+  let blob = null;
+  try {
+    blob = await rec.stop();
+  } catch (e) {
+    setMicStatus("");
+    setErr(`Ошибка остановки микрофона: ${e.message || e}`);
+    return;
+  }
+  setMicStatus("");
+  if (!blob || !sessionId) return;
+  try {
+    await uploadSessionAudio(sessionId, blob);
+  } catch (e) {
+    setErr(`Аудио не сохранено: ${e.message || e}`);
+  }
+}
+
+function ensureArchAudioPlayer() {
+  if (archAudioPlayer || typeof SessionAudioPlayer === "undefined") return archAudioPlayer;
+  archAudioPlayer = new SessionAudioPlayer();
+  archAudioPlayer.bindUi({
+    wrapEl: $("arch_audio_player"),
+    playBtn: $("arch_audio_play"),
+    timeEl: $("arch_audio_time"),
+  });
+  return archAudioPlayer;
 }
 
 function currentAudioMode() {
@@ -1167,6 +1242,10 @@ function armSession(t0) {
         .catch(() => {});
     }
   }
+  if (micRecorder && !micRecorder.recording) {
+    if (micRecorder.start()) setMicStatus("микрофон: пишет");
+    else setMicStatus("микрофон: ошибка записи");
+  }
 }
 
 function onWsMessage(ev) {
@@ -1216,12 +1295,15 @@ function finalizeLiveSession() {
 function onSessionEnded(statusText) {
   if (_sessionEndHandled) return;
   _sessionEndHandled = true;
+  const sid = currentSessionId;
   setStatus(statusText);
   finalizeLiveSession();
-  const sid = currentSessionId;
   currentSessionId = null;
-  if (sid) showSessionNotesModal(sid);
-  loadArchive().catch((e) => setErr(String(e.message || e)));
+  void (async () => {
+    await finishMicRecording(sid);
+    if (sid) showSessionNotesModal(sid);
+    loadArchive().catch((e) => setErr(String(e.message || e)));
+  })();
 }
 
 function closeSessionNotesModal() {
@@ -1337,10 +1419,12 @@ function setBiofeedbackControlsEnabled(on) {
   const guidedEl = $("opt_guided_phrases");
   const intervalEl = $("guided_phrase_interval");
   const setEl = $("guided_phrase_set");
+  const micEl = $("opt_mic_recording");
   if (audioEl) audioEl.disabled = !on;
   if (guidedEl) guidedEl.disabled = !on;
   if (intervalEl) intervalEl.disabled = !on;
   if (setEl) setEl.disabled = !on || !phraseSetsForPrefix(phrasePrefixForTag($("tag")?.value)).length;
+  if (micEl) micEl.disabled = !on;
 }
 
 function syncSourceFields() {
@@ -1373,7 +1457,7 @@ async function startLive() {
     return;
   }
   const isRelease = isReleaseTag(tag);
-  const opts = { ...audioOptions(), ...guidedPhraseOptions() };
+  const opts = { ...audioOptions(), ...guidedPhraseOptions(), ...micOptions() };
   if (isRelease) {
     opts.guidedPhrases = true;
     opts.phraseSet = opts.phraseSet || "soft";
@@ -1387,10 +1471,39 @@ async function startLive() {
     minutes: isRelease ? null : (minutes != null && !Number.isNaN(minutes) && minutes > 0 ? minutes : null),
     opt_guided_phrases: isRelease ? true : opts.guidedPhrases,
     opt_audio_biofeedback: opts.audioBiofeedback,
+    opt_mic_recording: opts.micRecording,
   };
 
   try {
     audioMode = currentAudioMode();
+
+    if (opts.micRecording && typeof SessionMicRecorder !== "undefined") {
+      micRecorder = new SessionMicRecorder();
+      const st = await micRecorder.prepare();
+      if (st === "denied") {
+        setErr("Нет доступа к микрофону — сессия без аудиозаписи");
+        setMicStatus("микрофон: нет доступа");
+        micRecorder.reset();
+        micRecorder = null;
+        body.opt_mic_recording = false;
+        opts.micRecording = false;
+      } else if (st === "error") {
+        setErr("Не удалось открыть микрофон — сессия без аудиозаписи");
+        setMicStatus("микрофон: ошибка");
+        micRecorder.reset();
+        micRecorder = null;
+        body.opt_mic_recording = false;
+        opts.micRecording = false;
+      } else {
+        setMicStatus("микрофон: ожидание первого RR…");
+      }
+    } else {
+      if (micRecorder) {
+        micRecorder.reset();
+        micRecorder = null;
+      }
+      setMicStatus("");
+    }
 
     const res = await api("/api/sessions", { method: "POST", body: JSON.stringify(body) });
     currentSessionId = res.id;
@@ -1450,6 +1563,11 @@ async function startLive() {
       armSession(res.first_beat_at);
     }
   } catch (e) {
+    if (micRecorder) {
+      micRecorder.reset();
+      micRecorder = null;
+    }
+    setMicStatus("");
     setErr(String(e.message || e));
   }
 }
@@ -1462,7 +1580,10 @@ async function stopLive() {
     onSessionEnded("Сессия остановлена.");
   } catch (e) {
     setErr(String(e.message || e));
+    const sid = currentSessionId;
+    await finishMicRecording(sid);
     finalizeLiveSession();
+    currentSessionId = null;
   }
 }
 
@@ -1748,6 +1869,7 @@ function renderSummaryGrid(sum) {
     ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
     ["Guided meditation", sum.opt_guided_phrases ? "да" : "нет"],
     ["Аудио-биофидбек", sum.opt_audio_biofeedback ? "да" : "нет"],
+    ["Запись микрофона", sum.has_audio ? "есть файл" : (sum.opt_mic_recording ? "запрошена" : "нет")],
   ];
   for (const [label, value] of fields) {
     const cell = document.createElement("div");
@@ -1780,6 +1902,7 @@ function destroyPlotInstance(plot) {
 }
 
 function destroyArchPlots() {
+  archAudioPlayer?.detachPlot();
   if (archRR) { destroyPlotInstance(archRR); archRR = null; }
   if (archPoincare) { archPoincare.destroy(); archPoincare = null; }
   if (archSpectrum?.plot) { archSpectrum.plot.destroy(); archSpectrum = null; }
@@ -1845,6 +1968,9 @@ function renderArchiveAnalysisCharts(analysis, sum) {
         rrEl, xs, ys, analysis.duration_sec,
         ARCHIVE_PLOT_H, rrOpts
       );
+      if (archRR && sum?.has_audio) {
+        ensureArchAudioPlayer()?.attachToPlot(archRR);
+      }
     } else if (rrEl) {
       charts.setChartEmpty(rrEl, "Нет данных RR");
     }
@@ -1890,6 +2016,15 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   nextFrame(resizePlots);
 }
 
+async function syncArchAudioPlayer(sum) {
+  const player = ensureArchAudioPlayer();
+  if (!player) return;
+  const sid = sum?.id;
+  const has = !!sum?.has_audio;
+  await player.load(sid, has);
+  if (has && archRR) player.attachToPlot(archRR);
+}
+
 async function openArchiveSession(id) {
   if (currentSessionId != null && id === currentSessionId) {
     setErr("Построение графиков для активной сессии недоступно. Завершите сессию сначала.");
@@ -1929,10 +2064,16 @@ async function openArchiveSession(id) {
     archSummaryCache = sum;
     renderSummaryGrid(sum);
     renderArchNotes(sum);
+  } else {
+    ensureArchAudioPlayer()?.load(null, false);
   }
 
   if (analysis) {
     renderArchiveAnalysisCharts(analysis, sum);
+  }
+
+  if (sum) {
+    await syncArchAudioPlayer(sum);
   }
 
   detail.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1942,11 +2083,12 @@ function rerenderArchiveCharts() {
   const id = Number($("arch_id")?.textContent);
   if (!id || !archSummaryCache) return;
   api(sessionAnalysisUrl(id))
-    .then((analysis) => {
+    .then(async (analysis) => {
       archAnalysisCache = analysis;
       destroyArchPlots();
       renderSummaryGrid(archSummaryCache);
       renderArchiveAnalysisCharts(analysis, archSummaryCache);
+      await syncArchAudioPlayer(archSummaryCache);
     })
     .catch((e) => setErr(String(e.message || e)));
 }
@@ -2132,7 +2274,7 @@ $("prog_filter_outliers")?.addEventListener("change", (ev) => {
 
 // ── DELETE SESSION ────────────────────────────────────────────────────────
 async function deleteSession(id) {
-  const ok = confirm(`Удалить сессию #${id}?\n\nТочки RR/RMSSD и логи фраз будут удалены. Действие необратимо.`);
+  const ok = confirm(`Удалить сессию #${id}?\n\nТочки RR/RMSSD, логи фраз и аудиозапись будут удалены. Действие необратимо.`);
   if (!ok) return;
   try {
     await api(`/api/sessions/${id}`, { method: "DELETE" });
@@ -2141,6 +2283,7 @@ async function deleteSession(id) {
       $("arch_detail")?.classList.remove("visible");
       $("btn_delete_arch_session")?.setAttribute("hidden", "");
       destroyArchPlots();
+      archAudioPlayer?.destroy();
       archAnalysisCache = null;
       archSummaryCache = null;
     }

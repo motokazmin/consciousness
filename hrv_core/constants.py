@@ -47,6 +47,9 @@ BUSY_DEVICE_HINT = (
 # Файл SQLite с сессиями, точками HRV и baseline по часам
 DB_PATH = Path("hrv_data.sqlite")
 
+# Записи микрофона сессий (рядом с БД): session_audio/{id}.webm
+SESSION_AUDIO_DIR = Path("session_audio")
+
 # Допустимые метки типа активности при старте сессии
 # Источник правды — hrv_core/session_types.py
 from hrv_core.session_types import SESSION_SLUGS as SESSION_TAGS  # noqa: F401

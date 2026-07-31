@@ -115,6 +115,8 @@ flowchart LR
 | `static/meditation_engine.js` | HRV-реактивные mp3-фразы (meditation → sit, relaxation → lay) |
 | `static/timed_protocol_engine.js` | Последовательный протокол «Телесное расслабление» (`release`) по `release_schedule.json` |
 | `static/hrv_audio_engine.js` | Web Audio: пульс, текстуры, трансовый pad |
+| `static/session_mic_recorder.js` | Запись микрофона с arm: `MediaRecorder` → blob → upload после stop |
+| `static/session_audio_player.js` | Архивный плеер: клик по RR → seek, playhead, Play/Pause |
 | `static/index.html` | UI режимов «Дышащий Эмбиент» / «Трансовый Порог» |
 
 ### Точки входа
@@ -160,12 +162,15 @@ Persistent baseline накапливается между сессиями ин�
 
 ```sql
 sessions        (id, tag, source, session_name, participant, started, ended,
-                 drift_events, opt_guided_phrases, opt_audio_biofeedback)
+                 drift_events, opt_guided_phrases, opt_audio_biofeedback,
+                 opt_mic_recording, has_audio)
 hrv_points      (id, session_id, ts, rr_ms, rmssd)
 baseline        (hour, rmssd_mean, n_samples, updated_at)   -- hour 0–23
 session_types   (slug, label, phrase_prefix, mock_profile, chart_profile, is_custom)
 meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_before, …)
 ```
+
+**Файлы:** `session_audio/{session_id}.webm` — записи микрофона рядом с БД.
 
 `sessions.started` при INSERT — момент создания; после arm переписывается временем первого RR (канонический t₀ длительности и оси `ts - started`).
 
@@ -201,7 +206,9 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 | `/api/sessions/{id}` | PATCH | Заметки после завершения (`session_name`) |
 | `/api/sessions/{id}/stop` | POST | Остановка + summary |
 | `/api/sessions/{id}/stream` | WebSocket | Live: `meta` (`first_beat_at`), `armed`, `beat`, `ended` |
-| `/api/sessions/{id}` | GET/DELETE | Summary завершённой сессии / удаление |
+| `/api/sessions/{id}` | GET/DELETE | Summary завершённой сессии / удаление (+ файл аудио) |
+| `/api/sessions/{id}/audio` | PUT | Сохранить запись микрофона (raw body webm/ogg, после stop) |
+| `/api/sessions/{id}/audio` | GET | Отдать файл записи (`audio/webm`) |
 | `/api/sessions/{id}/points` | GET | Точки (с downsampling) |
 | `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); `?stable_zone=true`, `max_points` |
 | `/api/progress` | GET | Наложение RMSSD-кривых завершённых сессий |
@@ -221,6 +228,8 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 ## Post-session анализ (графики)
 
 После **Стоп** сессии вкладки **Архив** и **Прогресс** запрашивают анализ у сервера. Live-графики на вкладке «Запись» считаются в браузере из WebSocket; post-session — в [`hrv_core/analysis.py`](hrv_core/analysis.py).
+
+**Ось времени (t₀):** `raw_rr_x` строится от `sessions.started` (arm / первый RR), не от первой сохранённой точки, для sync с аудио (`audio.currentTime = x` секунд от t₀).
 
 ### Поток данных
 

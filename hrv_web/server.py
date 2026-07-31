@@ -10,7 +10,7 @@ import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -20,10 +20,13 @@ from hrv_core.analysis import progress_session_analysis, session_analysis, sessi
 from hrv_core.constants import DB_PATH
 from hrv_core.db import (
     delete_session,
+    ensure_session_audio_dir,
     finalize_orphaned_sessions,
     finalize_session,
     init_db,
     load_hour_baseline,
+    session_audio_path,
+    set_session_has_audio,
     wipe_all_history,
 )
 from hrv_core.summary import session_summary_dict
@@ -63,6 +66,7 @@ class StartSessionBody(BaseModel):
     minutes: float | None = Field(None, gt=0)
     opt_guided_phrases: bool = False
     opt_audio_biofeedback: bool = False
+    opt_mic_recording: bool = False
 
 
 class PhraseLogBody(BaseModel):
@@ -274,6 +278,7 @@ def start_session(body: StartSessionBody):
             minutes=body.minutes,
             opt_guided_phrases=body.opt_guided_phrases,
             opt_audio_biofeedback=body.opt_audio_biofeedback,
+            opt_mic_recording=body.opt_mic_recording,
         )
     except RuntimeError as e:
         if "already_running" in str(e):
@@ -372,7 +377,8 @@ def list_sessions(
     )
     q = (
         "SELECT id, tag, session_name, participant, source, started, ended, "
-        "drift_events, opt_guided_phrases, opt_audio_biofeedback"
+        "drift_events, opt_guided_phrases, opt_audio_biofeedback, "
+        "opt_mic_recording, has_audio"
         + filt
         + " ORDER BY id DESC LIMIT ?"
     )
@@ -400,6 +406,8 @@ def list_sessions(
                 "drift_events": r[7],
                 "opt_guided_phrases": bool(r[8]),
                 "opt_audio_biofeedback": bool(r[9]),
+                "opt_mic_recording": bool(r[10]),
+                "has_audio": bool(r[11]),
                 "note_tags": parse_note_tags(r[2]),
                 "sd1": sd1,
             }
@@ -498,7 +506,8 @@ def get_session(session_id: int):
     conn = init_db()
     row = conn.execute(
         "SELECT tag, session_name, participant, source, started, ended, drift_events, "
-        "opt_guided_phrases, opt_audio_biofeedback FROM sessions WHERE id = ?",
+        "opt_guided_phrases, opt_audio_biofeedback, opt_mic_recording, has_audio "
+        "FROM sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
     if not row:
@@ -514,6 +523,8 @@ def get_session(session_id: int):
         drift_n,
         opt_guided,
         opt_audio,
+        opt_mic,
+        has_audio,
     ) = row
     if ended is None:
         conn.close()
@@ -525,8 +536,61 @@ def get_session(session_id: int):
     if summary is not None:
         summary["opt_guided_phrases"] = bool(opt_guided)
         summary["opt_audio_biofeedback"] = bool(opt_audio)
+        summary["opt_mic_recording"] = bool(opt_mic)
+        summary["has_audio"] = bool(has_audio)
         summary["note_tags"] = parse_note_tags(session_name)
     return summary
+
+
+_AUDIO_MAX_BYTES = 500 * 1024 * 1024  # 500 MiB
+
+
+@app.put("/api/sessions/{session_id}/audio")
+async def put_session_audio(session_id: int, request: Request):
+    """Сохранить запись микрофона (raw body, webm/ogg)."""
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, "Пустое тело запроса")
+    if len(body) > _AUDIO_MAX_BYTES:
+        raise HTTPException(413, "Файл аудио слишком большой")
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT ended FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Сессия не найдена")
+        if row[0] is None:
+            raise HTTPException(400, "Аудио можно загрузить только после завершения сессии")
+        ensure_session_audio_dir()
+        path = session_audio_path(session_id)
+        path.write_bytes(body)
+        set_session_has_audio(conn, session_id, True)
+    finally:
+        conn.close()
+    return {"ok": True, "has_audio": True, "bytes": len(body)}
+
+
+@app.get("/api/sessions/{session_id}/audio")
+def get_session_audio(session_id: int):
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT has_audio FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Сессия не найдена")
+        if not row[0]:
+            raise HTTPException(404, "У сессии нет аудиозаписи")
+    finally:
+        conn.close()
+    path = session_audio_path(session_id)
+    if not path.is_file():
+        raise HTTPException(404, "Файл аудио не найден")
+    media = "audio/webm"
+    if path.suffix.lower() == ".ogg":
+        media = "audio/ogg"
+    return FileResponse(path, media_type=media, filename=path.name)
 
 
 @app.get("/api/sessions/{session_id}/analysis")
