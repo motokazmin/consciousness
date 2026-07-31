@@ -24,21 +24,44 @@
         wrap: null,
         playBtn: null,
         timeEl: null,
+        scrubber: null,
       };
       this._pointer = null;
+      this._scrubbing = false;
+      this._audioOffset = 0;
     }
 
     /**
      * @param {{ sessionId: number, wrapEl: HTMLElement, playBtn: HTMLElement,
-     *           timeEl: HTMLElement }} opts
+     *           timeEl: HTMLElement, scrubber: HTMLInputElement }} opts
      */
     bindUi(opts) {
       this._ui.wrap = opts.wrapEl || null;
       this._ui.playBtn = opts.playBtn || null;
       this._ui.timeEl = opts.timeEl || null;
+      this._ui.scrubber = opts.scrubber || null;
       if (this._ui.playBtn) {
         this._ui.playBtn.onclick = () => this.togglePlay();
       }
+      if (this._ui.scrubber) {
+        this._ui.scrubber.addEventListener("input", (e) => {
+          this._scrubbing = true;
+          const val = parseFloat(e.target.value);
+          if (!Number.isFinite(val)) return;
+          this.seekTo(val);
+        });
+        this._ui.scrubber.addEventListener("change", () => {
+          this._scrubbing = false;
+        });
+      }
+    }
+
+    /**
+     * Установить offset (в секундах) между arm и началом записи.
+     * @param {number} offsetSec
+     */
+    setAudioOffset(offsetSec) {
+      this._audioOffset = Number.isFinite(offsetSec) ? offsetSec : 0;
     }
 
     /**
@@ -60,7 +83,7 @@
       this._audio = audio;
 
       audio.addEventListener("timeupdate", () => {
-        this._playheadSec = audio.currentTime || 0;
+        this._playheadSec = (audio.currentTime || 0) + this._audioOffset;
         this._syncUi();
         this._redrawPlot();
       });
@@ -148,21 +171,29 @@
       this._pointer = null;
     }
 
-    seekAndPlay(sec) {
+    seekTo(sec) {
       const audio = this._audio;
       if (!audio) return;
       const dur = Number.isFinite(audio.duration) ? audio.duration : Infinity;
-      const t = Math.max(0, Math.min(sec, dur));
-      this._playheadSec = t;
+      const compensated = Math.max(0, sec - this._audioOffset);
+      const t = Math.max(0, Math.min(compensated, dur));
+      this._playheadSec = sec;
       try {
         audio.currentTime = t;
       } catch (_) {
         /* ignore seek errors before metadata */
       }
+      this._syncUi();
+      this._redrawPlot();
+    }
+
+    seekAndPlay(sec) {
+      this.seekTo(sec);
+      const audio = this._audio;
+      if (!audio) return;
       const playPromise = audio.play();
       if (playPromise?.catch) playPromise.catch(() => {});
       this._syncUi();
-      this._redrawPlot();
     }
 
     togglePlay() {
@@ -212,12 +243,19 @@
           playing ? "Пауза" : "Воспроизвести"
         );
       }
+      const cur = this._playheadSec;
+      const audioTime = audio ? (audio.currentTime || 0) + this._audioOffset : 0;
+      const dur = audio && Number.isFinite(audio.duration) ? audio.duration + this._audioOffset : null;
+      
       if (this._ui.timeEl) {
-        const cur = audio ? audio.currentTime || this._playheadSec : this._playheadSec;
-        const dur = audio && Number.isFinite(audio.duration) ? audio.duration : null;
         this._ui.timeEl.textContent = dur != null
-          ? `${fmtClock(cur)} / ${fmtClock(dur)}`
-          : fmtClock(cur);
+          ? `${fmtClock(audioTime)} / ${fmtClock(dur)}`
+          : fmtClock(audioTime);
+      }
+      
+      if (this._ui.scrubber && !this._scrubbing && dur != null) {
+        this._ui.scrubber.max = String(dur);
+        this._ui.scrubber.value = String(audioTime);
       }
     }
 

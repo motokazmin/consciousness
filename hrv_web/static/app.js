@@ -226,6 +226,7 @@ function ensureArchAudioPlayer() {
     wrapEl: $("arch_audio_player"),
     playBtn: $("arch_audio_play"),
     timeEl: $("arch_audio_time"),
+    scrubber: $("arch_audio_scrubber"),
   });
   return archAudioPlayer;
 }
@@ -2021,6 +2022,12 @@ async function syncArchAudioPlayer(sum) {
   if (!player) return;
   const sid = sum?.id;
   const has = !!sum?.has_audio;
+  
+  // Компенсация задержки: запись стартует в armSession после первого RR
+  // Примерная задержка ~0.3-0.5с (arm event + recorder start latency)
+  const audioOffset = sum?.audio_offset_sec ?? 0.4;
+  player.setAudioOffset(audioOffset);
+  
   await player.load(sid, has);
   if (has && archRR) player.attachToPlot(archRR);
 }

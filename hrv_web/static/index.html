@@ -876,6 +876,34 @@
       color: var(--text-muted);
       line-height: 1.35;
     }
+    .arch-audio-scrubber {
+      flex: 1 1 auto;
+      min-width: 120px;
+      height: 6px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: var(--border);
+      border-radius: 3px;
+      outline: none;
+      cursor: pointer;
+    }
+    .arch-audio-scrubber::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--primary);
+      cursor: pointer;
+    }
+    .arch-audio-scrubber::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--primary);
+      cursor: pointer;
+      border: none;
+    }
     .chart-zoom-toolbar {
       display: flex;
       align-items: center;
@@ -1732,7 +1760,16 @@
               >
                 <button type="button" class="btn btn-primary" id="arch_audio_play">▶ Слушать</button>
                 <span class="arch-audio-time" id="arch_audio_time">0:00</span>
-                <span class="arch-audio-hint">Клик по RR — слушать с этой секунды</span>
+                <input
+                  type="range"
+                  class="arch-audio-scrubber"
+                  id="arch_audio_scrubber"
+                  min="0"
+                  max="100"
+                  value="0"
+                  step="0.1"
+                />
+                <span class="arch-audio-hint">Клик по RR или перемотка</span>
               </div>
               <div class="plot-body" id="arch_rr"></div>
             </div>
