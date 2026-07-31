@@ -16,6 +16,9 @@ from hrv_core.sources import build_source
 from hrv_core.session_types import SESSION_TYPES
 from hrv_core.summary import session_summary_dict
 
+# Если за это время не пришёл ни один RR — сессия останавливается сама.
+ARM_TIMEOUT_SEC = 300.0
+
 
 def _source_label(kind: str, address: str | None, *, mock_tag: str | None = None) -> str:
     if kind == "mock":
@@ -39,6 +42,7 @@ class RunningSession:
     baseline_at_start: float | None
     started_at: float
     duration_minutes: float | None
+    first_beat_at: float | None = None
     ws_queue: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=2000))
     timer: threading.Timer | None = None
 
@@ -168,6 +172,8 @@ class SessionManager:
         )
 
         def _beat(rr: float, ts: float) -> None:
+            if rs.first_beat_at is None:
+                self._arm(rs, ts)
             rs.on_beat(rr, ts)
 
         with self._lock:
@@ -180,16 +186,46 @@ class SessionManager:
 
         source.start(_beat)
 
-        if minutes is not None and minutes > 0:
+        def _arm_timeout() -> None:
+            self.stop(session_id)
+
+        rs.timer = threading.Timer(ARM_TIMEOUT_SEC, _arm_timeout)
+        rs.timer.daemon = True
+        rs.timer.start()
+
+        return rs
+
+    def _arm(self, rs: RunningSession, ts: float) -> None:
+        """Первый RR: отсчёт длительности, sessions.started и ws «armed»."""
+        if rs.first_beat_at is not None:
+            return
+        rs.first_beat_at = ts
+        if rs.timer is not None:
+            try:
+                rs.timer.cancel()
+            except Exception:
+                pass
+            rs.timer = None
+        with rs.conn_lock:
+            rs.conn.execute(
+                "UPDATE sessions SET started = ? WHERE id = ?",
+                (ts, rs.session_id),
+            )
+            rs.conn.commit()
+        rs._enqueue_ws({"type": "armed", "started_at": ts})
+        if (
+            rs.duration_minutes is not None
+            and rs.duration_minutes > 0
+            and not rs.stop_event.is_set()
+        ):
+            session_id = rs.session_id
 
             def _auto_stop() -> None:
                 self.stop(session_id)
 
-            rs.timer = threading.Timer(minutes * 60.0, _auto_stop)
+            rs.timer = threading.Timer(rs.duration_minutes * 60.0, _auto_stop)
             rs.timer.daemon = True
             rs.timer.start()
-
-        return rs
 
     def stop(self, session_id: int) -> dict[str, Any] | None:
         with self._lock:

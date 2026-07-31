@@ -20,6 +20,8 @@ let lastRmssd  = null;
 let lastRmssdNormalized = null;
 let lastSmoothedRr = null;
 let sessionBaseline = null;
+let sessionArmed = false;
+let pendingArm = null;
 
 // ── AUDIO BIOFEEDBACK ─────────────────────────────────────────────────────
 let audioEngine = null;
@@ -1008,6 +1010,9 @@ function setLiveEmptyState(mode) {
   if (mode === "idle") {
     empty.textContent = "Служба готова к запуску";
     empty.classList.remove("hidden");
+  } else if (mode === "device") {
+    empty.textContent = "Ожидание устройства — отсчёт начнётся с первого удара";
+    empty.classList.remove("hidden");
   } else if (mode === "waiting") {
     empty.textContent = "Ожидание данных";
     empty.classList.remove("hidden");
@@ -1095,6 +1100,10 @@ function computeBaseline(buf, n) {
 }
 
 function redrawLive() {
+  if (!sessionArmed) {
+    raf = requestAnimationFrame(redrawLive);
+    return;
+  }
   if (!_dirty) {
     raf = requestAnimationFrame(redrawLive);
     return;
@@ -1132,10 +1141,43 @@ function stopRaf() {
 }
 
 // ── WS ────────────────────────────────────────────────────────────────────
+function armSession(t0) {
+  if (sessionArmed || t0 == null || !Number.isFinite(t0)) return;
+  sessionArmed = true;
+  sessionT0 = t0;
+  const arm = pendingArm;
+  pendingArm = null;
+  if (arm) {
+    const statusExtra = arm.isRelease
+      ? " · протокол"
+      : arm.timed
+        ? ` · ${arm.durationMinutes} мин`
+        : " · скользящее окно";
+    setStatus(`Сессия #${currentSessionId} · ${tagLabel(arm.tag)}${statusExtra}`);
+    setLiveEmptyState("waiting");
+    startBiofeedbackSession({
+      ...arm.opts,
+      tag: arm.tag,
+      sessionId: currentSessionId,
+      durationMinutes: arm.durationMinutes,
+    });
+    if (arm.opts?.audioBiofeedback) {
+      startAudioEngine()
+        .then(() => switchTab("biofeedback"))
+        .catch(() => {});
+    }
+  }
+}
+
 function onWsMessage(ev) {
   const msg = JSON.parse(ev.data);
   if (msg.type === "meta") {
-    if (msg.started_at != null) sessionT0 = msg.started_at;
+    if (msg.first_beat_at != null) armSession(msg.first_beat_at);
+    else if (msg.started_at != null && sessionArmed) sessionT0 = msg.started_at;
+    return;
+  }
+  if (msg.type === "armed") {
+    if (msg.started_at != null) armSession(msg.started_at);
     return;
   }
   if (msg.type === "ended") {
@@ -1143,6 +1185,7 @@ function onWsMessage(ev) {
     return;
   }
   if (msg.type === "beat" && msg.t?.length) {
+    if (!sessionArmed) armSession(msg.t[0]);
     _dirty = true;
     for (let i = 0; i < msg.t.length; i++) {
       rrBuf.push([msg.t[i], msg.r[i]]);
@@ -1166,6 +1209,8 @@ function finalizeLiveSession() {
   if (ws) { ws.close(); ws = null; }
   stopRaf();
   stopBiofeedbackSession();
+  sessionArmed = false;
+  pendingArm = null;
 }
 
 function onSessionEnded(statusText) {
@@ -1352,12 +1397,20 @@ async function startLive() {
     _sessionEndHandled = false;
     const timed = isRelease || (body.minutes != null && body.minutes > 0);
     liveMode    = timed ? "timed" : "window";
-    sessionT0   = typeof res.started_at === "number" ? res.started_at : Date.now() / 1000;
+    sessionT0   = 0;
+    sessionArmed = false;
     durationSec = isRelease ? RELEASE_PROTOCOL_DURATION_SEC : (timed ? body.minutes * 60 : 0);
     lastRmssd   = null;
     lastRmssdNormalized = null;
     lastSmoothedRr = null;
     sessionBaseline = null;
+    pendingArm = {
+      opts,
+      tag: body.tag,
+      isRelease,
+      timed,
+      durationMinutes: body.minutes,
+    };
 
     $("stat_rmssd").textContent = "—";
     $("stat_rmssd").className   = "stat-value";
@@ -1376,10 +1429,10 @@ async function startLive() {
 
     rrBuf = [];
     makeRRPlot($("rrPlot"), timed);
-    setLiveEmptyState("waiting");
+    setLiveEmptyState("device");
     nextFrame(resizePlots);
 
-    setStatus(`Сессия #${currentSessionId} · ${tagLabel(body.tag)}${isRelease ? " · протокол" : timed ? ` · ${body.minutes} мин` : " · скользящее окно"}`);
+    setStatus(`Сессия #${currentSessionId} · ожидание устройства…`);
     loadSessionTypes().catch(() => {});
     $("btn_start").disabled = true;
     $("btn_stop").disabled  = false;
@@ -1393,15 +1446,8 @@ async function startLive() {
     stopRaf();
     raf = requestAnimationFrame(redrawLive);
 
-    startBiofeedbackSession({
-      ...opts,
-      tag: body.tag,
-      sessionId: currentSessionId,
-      durationMinutes: body.minutes,
-    });
-    if (opts.audioBiofeedback) {
-      await startAudioEngine();
-      switchTab("biofeedback");
+    if (res.first_beat_at != null) {
+      armSession(res.first_beat_at);
     }
   } catch (e) {
     setErr(String(e.message || e));

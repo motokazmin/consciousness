@@ -283,6 +283,7 @@ def start_session(body: StartSessionBody):
         "id": rs.session_id,
         "started": True,
         "started_at": rs.started_at,
+        "first_beat_at": rs.first_beat_at,
         "duration_minutes": rs.duration_minutes,
         "tag": tag,
     }
@@ -297,6 +298,7 @@ def recording_status():
         "recording": True,
         "session_id": active.session_id,
         "started_at": active.started_at,
+        "first_beat_at": active.first_beat_at,
     }
 
 
@@ -660,6 +662,7 @@ async def session_stream(websocket: WebSocket, session_id: int):
             "persistent_baseline": rs.state.persistent_baseline,
             "session_id": session_id,
             "started_at": rs.started_at,
+            "first_beat_at": rs.first_beat_at,
             "duration_minutes": rs.duration_minutes,
         }
     )
