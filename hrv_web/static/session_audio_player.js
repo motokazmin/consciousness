@@ -61,8 +61,9 @@
      * @param {number} offsetSec
      */
     setAudioOffset(offsetSec) {
-      this._audioOffset = Number.isFinite(offsetSec) ? offsetSec : 0;
-      console.log("[AudioPlayer] setAudioOffset:", this._audioOffset);
+      const o = Number.isFinite(offsetSec) ? offsetSec : 0;
+      // arm→recorder обычно <1 с; >2 с — артефакт старого API (browser vs server clock).
+      this._audioOffset = o >= 0 && o <= 2 ? o : 0;
     }
 
     /**
@@ -72,7 +73,7 @@
     async load(sessionId, hasAudio) {
       this.detachPlot();
       this._teardownAudio();
-      this._playheadSec = this._audioOffset;
+      this._playheadSec = 0;
       if (!hasAudio || !sessionId) {
         this._setVisible(false);
         this._syncUi();

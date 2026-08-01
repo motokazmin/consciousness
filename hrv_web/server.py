@@ -542,7 +542,9 @@ def get_session(session_id: int):
         summary["has_audio"] = bool(has_audio)
         summary["note_tags"] = parse_note_tags(session_name)
         if has_audio and audio_delay_sec is not None:
-            summary["audio_offset_sec"] = float(audio_delay_sec)
+            delay = float(audio_delay_sec)
+            if 0 <= delay <= 2.0:
+                summary["audio_offset_sec"] = delay
     return summary
 
 
