@@ -223,9 +223,9 @@ async function finishMicRecording(sessionId) {
   setMicStatus("");
   if (!blob || !sessionId) return;
   
-  // Вычисляем задержку В СЕКУНДАХ между arm и началом записи (относительно браузера)
-  const delaySeconds = armTimeLocal && recorderStartedAtLocal 
-    ? (recorderStartedAtLocal - armTimeLocal) / 1000 
+  // Локальная задержка arm → MediaRecorder.start() (обычно <1 с).
+  const delaySeconds = armTimeLocal != null && recorderStartedAtLocal
+    ? (recorderStartedAtLocal - armTimeLocal) / 1000
     : null;
   
   try {
@@ -1986,9 +1986,6 @@ function renderArchiveAnalysisCharts(analysis, sum) {
         rrEl, xs, ys, analysis.duration_sec,
         ARCHIVE_PLOT_H, rrOpts
       );
-      if (archRR && sum?.has_audio) {
-        ensureArchAudioPlayer()?.attachToPlot(archRR);
-      }
     } else if (rrEl) {
       charts.setChartEmpty(rrEl, "Нет данных RR");
     }
@@ -2040,7 +2037,7 @@ async function syncArchAudioPlayer(sum) {
   const sid = sum?.id;
   const has = !!sum?.has_audio;
   
-  // Точный offset между sessions.started и recorder.start() из БД
+  // Локальная задержка arm→recorder из БД (обычно <1 с).
   const audioOffset = sum?.audio_offset_sec ?? 0;
   player.setAudioOffset(audioOffset);
   

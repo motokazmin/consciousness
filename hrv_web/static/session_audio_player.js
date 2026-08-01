@@ -1,8 +1,10 @@
 /**
  * Архивный плеер: клик по RR → seek, playhead на uPlot, Play/Pause.
+ * Ось RR и audio.currentTime — секунды от arm (t₀); offset — только arm→recorder (<1 с).
  */
 (function (global) {
   const CLICK_MAX_MOVE_PX = 6;
+  const MAX_AUDIO_OFFSET_SEC = 2;
 
   function fmtClock(sec) {
     if (!Number.isFinite(sec) || sec < 0) sec = 0;
@@ -57,17 +59,25 @@
     }
 
     /**
-     * Установить offset (в секундах) между arm и началом записи.
+     * Локальная задержка arm → MediaRecorder.start() (сек). Большие значения игнорируются.
      * @param {number} offsetSec
      */
     setAudioOffset(offsetSec) {
       const o = Number.isFinite(offsetSec) ? offsetSec : 0;
-      // arm→recorder обычно <1 с; >2 с — артефакт старого API (browser vs server clock).
-      this._audioOffset = o >= 0 && o <= 2 ? o : 0;
+      this._audioOffset = o >= 0 && o <= MAX_AUDIO_OFFSET_SEC ? o : 0;
+    }
+
+    _audioNow() {
+      if (!this._audio) return 0;
+      const t = this._audio.currentTime;
+      return Number.isFinite(t) ? t : 0;
+    }
+
+    _sessionSec() {
+      return this._audioNow() + this._audioOffset;
     }
 
     /**
-     * Показать/загрузить аудио для сессии. Скрыть, если hasAudio=false.
      * @returns {Promise<boolean>} true если плеер активен
      */
     async load(sessionId, hasAudio) {
@@ -84,11 +94,13 @@
       audio.src = `/api/sessions/${sessionId}/audio`;
       this._audio = audio;
 
-      audio.addEventListener("timeupdate", () => {
-        this._playheadSec = (audio.currentTime || 0) + this._audioOffset;
+      const onTime = () => {
+        this._playheadSec = this._sessionSec();
         this._syncUi();
         this._redrawPlot();
-      });
+      };
+
+      audio.addEventListener("timeupdate", onTime);
       audio.addEventListener("play", () => {
         this._startRaf();
         this._syncUi();
@@ -101,18 +113,13 @@
         this._stopRaf();
         this._syncUi();
       });
-      audio.addEventListener("loadedmetadata", () => {
-        this._playheadSec = (audio.currentTime || 0) + this._audioOffset;
-        this._syncUi();
-        this._redrawPlot();
-      });
+      audio.addEventListener("loadedmetadata", onTime);
 
       this._setVisible(true);
       this._syncUi();
       return true;
     }
 
-    /** Привязать click-to-seek и playhead к архивному RR-плоту. */
     attachToPlot(plot) {
       this.detachPlot();
       if (!plot?.over || !this._audio) return;
@@ -249,19 +256,22 @@
           playing ? "Пауза" : "Воспроизвести"
         );
       }
-      const cur = this._playheadSec;
-      const audioTime = audio ? (audio.currentTime || 0) + this._audioOffset : 0;
-      const dur = audio && Number.isFinite(audio.duration) ? audio.duration + this._audioOffset : null;
-      
+      const sessionSec = this._sessionSec();
+      const dur =
+        audio && Number.isFinite(audio.duration)
+          ? audio.duration + this._audioOffset
+          : null;
+
       if (this._ui.timeEl) {
-        this._ui.timeEl.textContent = dur != null
-          ? `${fmtClock(audioTime)} / ${fmtClock(dur)}`
-          : fmtClock(audioTime);
+        this._ui.timeEl.textContent =
+          dur != null
+            ? `${fmtClock(sessionSec)} / ${fmtClock(dur)}`
+            : fmtClock(sessionSec);
       }
-      
+
       if (this._ui.scrubber && !this._scrubbing && dur != null) {
         this._ui.scrubber.max = String(dur);
-        this._ui.scrubber.value = String(audioTime);
+        this._ui.scrubber.value = String(sessionSec);
       }
     }
 
@@ -300,7 +310,7 @@
       const tick = () => {
         this._raf = null;
         if (!this._audio || this._audio.paused) return;
-        this._playheadSec = (this._audio.currentTime || 0) + this._audioOffset;
+        this._playheadSec = this._sessionSec();
         this._syncUi();
         this._redrawPlot();
         this._raf = requestAnimationFrame(tick);

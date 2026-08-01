@@ -337,10 +337,14 @@ def session_analysis(
     ts = np.array([p[0] for p in points], dtype=float)
     rr = np.array([p[1] for p in points], dtype=float)
     rmssd = np.array([p[2] for p in points], dtype=float)
-    # Канонический t₀ — sessions.started (arm / первый RR), не первая сохранённая точка.
-    t0 = float(started) if started else float(ts[0])
+    # Канонический t₀ — sessions.started (arm / первый RR).
+    first_ts = float(ts[0])
+    t0 = float(started) if started else first_ts
+    # Если started заметно раньше первой точки — arm не обновил started (ожидание устройства).
+    if started and first_ts - t0 > 1.0:
+        t0 = first_ts
 
-    duration_sec = float(ended - started) if ended and started else float(ts[-1] - t0)
+    duration_sec = float(ended - t0) if ended else float(ts[-1] - t0)
     if duration_sec <= 0:
         duration_sec = float(ts[-1] - t0)
 
