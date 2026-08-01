@@ -947,6 +947,12 @@
       min-height: 260px;
     }
 
+    /* Архив RR + аудио: только playhead, не uPlot cursor */
+    #arch_rr .u-cursor-x,
+    #arch_rr .u-cursor-pt {
+      display: none !important;
+    }
+
     /* uPlot overrides */
     .uplot { margin: 0; }
     .u-title { display: none !important; }

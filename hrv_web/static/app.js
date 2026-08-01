@@ -1977,6 +1977,7 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   const rrOpts = {
     ...(profile.options.rr || {}),
     ...(rrTimelineUsesFilteredView("arch") ? {} : rrPlotTrimOpts(analysis)),
+    ...(sum?.has_audio ? { noCursor: true } : {}),
   };
 
   if (activePanels.has("rr")) {

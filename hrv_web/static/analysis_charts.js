@@ -220,11 +220,9 @@
           { ...axisStyle(), label: "RR, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
         ],
         hooks: trimOpts?.applied ? { draw: [(u) => drawTrimBands(u, { trim: trimOpts })] } : {},
-        // Native drag-to-select-zoom must be off here too — HrvChartZoom.attach
-        // below binds its own drag-to-pan on the same .u-over element, and the
-        // two were fighting over every drag gesture (see chart_zoom.js / app.js
-        // for the full explanation).
-        cursor: { show: true, x: true, y: false, drag: { setScale: false, x: false, y: false } },
+        cursor: opts?.noCursor
+          ? { show: false, x: false, y: false, points: { show: false } }
+          : { show: true, x: true, y: false, drag: { setScale: false, x: false, y: false } },
         legend: { show: false },
       },
       [rawRrX, rawRr],

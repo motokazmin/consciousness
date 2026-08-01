@@ -126,7 +126,7 @@
 
       this._prevCursor = plot.cursor;
       try {
-        plot.setCursor({ show: false });
+        plot.setCursor({ show: false, x: false, y: false, points: { show: false } });
       } catch (_) {
         /* ignore */
       }
@@ -289,7 +289,11 @@
     }
 
     _drawPlayhead(u) {
+      const audio = this._audio;
+      const playing = !!(audio && !audio.paused && !audio.ended);
       const t = this._playheadSec;
+      // До старта воспроизведения не рисуем (избегаем путаницы с uPlot cursor).
+      if (!playing && t < 0.05) return;
       if (!Number.isFinite(t)) return;
       const xMin = u.scales.x.min;
       const xMax = u.scales.x.max;
