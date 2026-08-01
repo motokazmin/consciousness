@@ -229,9 +229,9 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 
 После **Стоп** сессии вкладки **Архив** и **Прогресс** запрашивают анализ у сервера. Live-графики на вкладке «Запись» считаются в браузере из WebSocket; post-session — в [`hrv_core/analysis.py`](hrv_core/analysis.py).
 
-**Ось времени (t₀):** `raw_rr_x` строится от `sessions.started` (arm / первый RR), для sync с аудио (`audio.currentTime = x` секунд от t₀). Если `started` заметно раньше первой точки (>1 с, ожидание устройства до arm) — t₀ берётся от первой точки, чтобы ось начиналась с 0.
+**Ось времени (t₀):** `raw_rr_x` — секунды от t₀; t₀ = timestamp первой сохранённой RR-точки (≈ arm). Sync с аудио: `audio.currentTime = x` от arm. При старте `init_db()` сессии с `started` >1 с раньше первой точки (POST до Polar) **авто-чинятся** в БД.
 
-**Аудио:** `audio_delay_sec` — только локальная задержка arm→`MediaRecorder.start()` (<1 с); плеер игнорирует значения >2 с (артефакты старого API).
+**Аудио:** `audio_delay_sec` — локальная задержка arm→recorder (<2 с); в плеере не используется (прямой `currentTime`).
 
 ### Поток данных
 
