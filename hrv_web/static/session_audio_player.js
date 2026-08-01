@@ -265,7 +265,7 @@
     }
 
     _drawPlayhead(u) {
-      const t = this._audio ? this._audio.currentTime || this._playheadSec : this._playheadSec;
+      const t = this._playheadSec;
       if (!Number.isFinite(t)) return;
       const xMin = u.scales.x.min;
       const xMax = u.scales.x.max;
@@ -299,7 +299,7 @@
       const tick = () => {
         this._raf = null;
         if (!this._audio || this._audio.paused) return;
-        this._playheadSec = this._audio.currentTime || 0;
+        this._playheadSec = (this._audio.currentTime || 0) + this._audioOffset;
         this._syncUi();
         this._redrawPlot();
         this._raf = requestAnimationFrame(tick);
