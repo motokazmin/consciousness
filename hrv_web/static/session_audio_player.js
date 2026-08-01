@@ -4,7 +4,6 @@
  */
 (function (global) {
   const CLICK_MAX_MOVE_PX = 6;
-  const MAX_AUDIO_OFFSET_SEC = 2;
 
   function fmtClock(sec) {
     if (!Number.isFinite(sec) || sec < 0) sec = 0;
@@ -31,6 +30,7 @@
       this._pointer = null;
       this._scrubbing = false;
       this._audioOffset = 0;
+      this._prevCursor = null;
     }
 
     /**
@@ -62,9 +62,8 @@
      * Локальная задержка arm → MediaRecorder.start() (сек). Большие значения игнорируются.
      * @param {number} offsetSec
      */
-    setAudioOffset(offsetSec) {
-      const o = Number.isFinite(offsetSec) ? offsetSec : 0;
-      this._audioOffset = o >= 0 && o <= MAX_AUDIO_OFFSET_SEC ? o : 0;
+    setAudioOffset(_offsetSec) {
+      this._audioOffset = 0;
     }
 
     _audioNow() {
@@ -74,7 +73,7 @@
     }
 
     _sessionSec() {
-      return this._audioNow() + this._audioOffset;
+      return this._audioNow();
     }
 
     /**
@@ -125,6 +124,13 @@
       if (!plot?.over || !this._audio) return;
       this._plot = plot;
 
+      this._prevCursor = plot.cursor;
+      try {
+        plot.setCursor({ show: false });
+      } catch (_) {
+        /* ignore */
+      }
+
       this._drawHook = (u) => this._drawPlayhead(u);
       if (!plot.hooks.draw) plot.hooks.draw = [];
       plot.hooks.draw.push(this._drawHook);
@@ -167,9 +173,11 @@
 
     detachPlot() {
       this._stopRaf();
-      if (this._plot && this._drawHook && this._plot.hooks?.draw) {
-        const idx = this._plot.hooks.draw.indexOf(this._drawHook);
-        if (idx >= 0) this._plot.hooks.draw.splice(idx, 1);
+      const plot = this._plot;
+      const prevCursor = this._prevCursor;
+      if (plot && this._drawHook && plot.hooks?.draw) {
+        const idx = plot.hooks.draw.indexOf(this._drawHook);
+        if (idx >= 0) plot.hooks.draw.splice(idx, 1);
       }
       for (const fn of this._cleanups) {
         try {
@@ -182,14 +190,21 @@
       this._drawHook = null;
       this._plot = null;
       this._pointer = null;
+      if (plot && prevCursor) {
+        try {
+          plot.setCursor(prevCursor);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      this._prevCursor = null;
     }
 
     seekTo(sec) {
       const audio = this._audio;
       if (!audio) return;
       const dur = Number.isFinite(audio.duration) ? audio.duration : Infinity;
-      const compensated = Math.max(0, sec - this._audioOffset);
-      const t = Math.max(0, Math.min(compensated, dur));
+      const t = Math.max(0, Math.min(sec, dur));
       this._playheadSec = sec;
       try {
         audio.currentTime = t;
@@ -258,9 +273,7 @@
       }
       const sessionSec = this._sessionSec();
       const dur =
-        audio && Number.isFinite(audio.duration)
-          ? audio.duration + this._audioOffset
-          : null;
+        audio && Number.isFinite(audio.duration) ? audio.duration : null;
 
       if (this._ui.timeEl) {
         this._ui.timeEl.textContent =

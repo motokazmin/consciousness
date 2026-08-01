@@ -64,6 +64,13 @@ class RunningSession:
             return
         sample = self.state.process_beat(rr_ms, ts)
         if sample is None:
+            # Первый удар (RMSSD ещё 0) — сохраняем для оси RR и sync с аудио.
+            with self.conn_lock:
+                self.conn.execute(
+                    "INSERT INTO hrv_points (session_id, ts, rr_ms, rmssd) VALUES (?, ?, ?, ?)",
+                    (self.session_id, ts, rr_ms, 0.0),
+                )
+                self.conn.commit()
             return
         with self.conn_lock:
             self.conn.execute(

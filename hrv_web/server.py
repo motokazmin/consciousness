@@ -534,6 +534,9 @@ def get_session(session_id: int):
     hour = datetime.datetime.fromtimestamp(started).hour
     baseline_at_start = load_hour_baseline(conn, hour)
     summary = session_summary_dict(conn, session_id, baseline_at_start, int(drift_n or 0))
+    first_rr = conn.execute(
+        "SELECT MIN(ts) FROM hrv_points WHERE session_id = ?", (session_id,)
+    ).fetchone()
     conn.close()
     if summary is not None:
         summary["opt_guided_phrases"] = bool(opt_guided)
@@ -541,6 +544,9 @@ def get_session(session_id: int):
         summary["opt_mic_recording"] = bool(opt_mic)
         summary["has_audio"] = bool(has_audio)
         summary["note_tags"] = parse_note_tags(session_name)
+        if first_rr and first_rr[0] is not None:
+            summary["first_rr_ts"] = float(first_rr[0])
+            summary["timeline_skew_sec"] = round(float(first_rr[0]) - float(started), 3)
         if has_audio and audio_delay_sec is not None:
             delay = float(audio_delay_sec)
             if 0 <= delay <= 2.0:
