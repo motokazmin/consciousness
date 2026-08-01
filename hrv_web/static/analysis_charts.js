@@ -170,18 +170,17 @@
     const trim = opts?.trim;
     if (!trim?.applied) return;
     const { ctx } = u;
-    const ox = u.bbox.left;
     const oy = u.bbox.top;
     const h = u.bbox.height;
     const start = trim.start_sec ?? 0;
     const end = (trim.duration_sec ?? 0) - (trim.end_sec ?? 0);
     ctx.save();
     ctx.fillStyle = T().chartLine("--chart-trim-overlay", "rgba(0,0,0,0.28)");
+    // valToPos(..., true) уже включает bbox.left.
     const x0 = u.valToPos(0, "x", true);
     const x1 = u.valToPos(start, "x", true);
     const x2 = u.valToPos(end, "x", true);
     const x3 = u.valToPos(trim.duration_sec ?? end, "x", true);
-    // valToPos(..., true) уже включает bbox.left — не прибавлять ox.
     if (start > 0) ctx.fillRect(x0, oy, x1 - x0, h);
     if (end < (trim.duration_sec ?? end)) ctx.fillRect(x2, oy, x3 - x2, h);
     ctx.restore();
