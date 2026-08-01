@@ -205,7 +205,7 @@ def _repair_session_timelines(conn: sqlite3.Connection) -> None:
         UPDATE sessions
         SET audio_delay_sec = NULL
         WHERE audio_delay_sec IS NOT NULL
-          AND (audio_delay_sec > 2.0 OR audio_delay_sec < 0)
+          AND (audio_delay_sec > 120.0 OR audio_delay_sec < 0)
         """
     )
     conn.commit()

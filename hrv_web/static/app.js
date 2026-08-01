@@ -223,10 +223,11 @@ async function finishMicRecording(sessionId) {
   setMicStatus("");
   if (!blob || !sessionId) return;
   
-  // Локальная задержка arm → MediaRecorder.start() (обычно <1 с).
-  const delaySeconds = armTimeLocal != null && recorderStartedAtLocal
-    ? (recorderStartedAtLocal - armTimeLocal) / 1000
-    : null;
+  // Задержка arm → MediaRecorder.start() (с startAtArm stream открывается в arm — ≈0).
+  let delaySeconds = null;
+  if (armTimeLocal != null && recorderStartedAtLocal) {
+    delaySeconds = (recorderStartedAtLocal - armTimeLocal) / 1000;
+  }
   
   try {
     await uploadSessionAudio(sessionId, blob, delaySeconds);
@@ -1261,8 +1262,10 @@ function armSession(t0) {
   }
   if (micRecorder && !micRecorder.recording) {
     micRecorderArmTime = Date.now();
-    if (micRecorder.start()) setMicStatus("микрофон: пишет");
-    else setMicStatus("микрофон: ошибка записи");
+    micRecorder.startAtArm().then((ok) => {
+      if (ok) setMicStatus("микрофон: пишет");
+      else setMicStatus("микрофон: ошибка записи");
+    });
   }
 }
 
@@ -2038,9 +2041,10 @@ async function syncArchAudioPlayer(sum) {
   const sid = sum?.id;
   const has = !!sum?.has_audio;
   
-  // Локальная задержка arm→recorder из БД (обычно <1 с).
-  const audioOffset = sum?.audio_offset_sec ?? 0;
-  player.setAudioOffset(audioOffset);
+  // audio_offset_sec / audio_lead_sec — сдвиг начала файла относительно оси RR (сек).
+  const audioLead =
+    sum?.audio_lead_sec ?? sum?.audio_offset_sec ?? sum?.audio_delay_sec ?? 0;
+  player.setAudioOffset(audioLead);
   
   await player.load(sid, has);
   if (has && archRR) player.attachToPlot(archRR);

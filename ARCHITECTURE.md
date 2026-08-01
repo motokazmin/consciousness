@@ -115,7 +115,7 @@ flowchart LR
 | `static/meditation_engine.js` | HRV-реактивные mp3-фразы (meditation → sit, relaxation → lay) |
 | `static/timed_protocol_engine.js` | Последовательный протокол «Телесное расслабление» (`release`) по `release_schedule.json` |
 | `static/hrv_audio_engine.js` | Web Audio: пульс, текстуры, трансовый pad |
-| `static/session_mic_recorder.js` | Запись микрофона с arm: `MediaRecorder` → blob → upload после stop |
+| `static/session_mic_recorder.js` | Запись микрофона с arm: `prepare()` на POST, `startAtArm()` — новый stream и `MediaRecorder` в arm |
 | `static/session_audio_player.js` | Архивный плеер: клик по RR → seek, playhead, Play/Pause |
 | `static/index.html` | UI режимов «Дышащий Эмбиент» / «Трансовый Порог» |
 
@@ -231,7 +231,7 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 
 **Ось времени (t₀):** `raw_rr_x` — секунды от t₀; t₀ = timestamp первой сохранённой RR-точки (≈ arm). Sync с аудио: `audio.currentTime = x` от arm. При старте `init_db()` сессии с `started` >1 с раньше первой точки (POST до Polar) **авто-чинятся** в БД.
 
-**Аудио:** `audio_delay_sec` — локальная задержка arm→recorder (<2 с); в плеере не используется (прямой `currentTime`).
+**Аудио:** `audio_delay_sec` — сдвиг начала файла относительно оси RR (сек); в summary как `audio_lead_sec`. Плеер: `session_t = audio.currentTime − audio_lead_sec`. Для записей после `startAtArm` — ≈0 (arm→recorder); для старых с POST→arm в файле — может быть ~15–20 с. Опции «Стабильная зона» / «Без выбросов» на ось RR и playhead **не влияют**, когда выключены (график raw с t=0).
 
 ### Поток данных
 

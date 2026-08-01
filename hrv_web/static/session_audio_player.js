@@ -59,11 +59,13 @@
     }
 
     /**
-     * Локальная задержка arm → MediaRecorder.start() (сек). Большие значения игнорируются.
-     * @param {number} offsetSec
+     * Сдвиг начала аудиофайла относительно оси RR (сек): t_session = currentTime − leadIn.
+     * Для старых записей (POST→arm в файле) может быть ~15–20 с; для startAtArm — ≈0.
+     * @param {number} leadInSec
      */
-    setAudioOffset(_offsetSec) {
-      this._audioOffset = 0;
+    setAudioOffset(leadInSec) {
+      const n = Number(leadInSec);
+      this._audioOffset = Number.isFinite(n) && n > 0 && n <= 120 ? n : 0;
     }
 
     _audioNow() {
@@ -73,7 +75,11 @@
     }
 
     _sessionSec() {
-      return this._audioNow();
+      return Math.max(0, this._audioNow() - this._audioOffset);
+    }
+
+    _audioTimeForSession(sec) {
+      return Math.max(0, sec + this._audioOffset);
     }
 
     /**
@@ -204,10 +210,11 @@
       const audio = this._audio;
       if (!audio) return;
       const dur = Number.isFinite(audio.duration) ? audio.duration : Infinity;
-      const t = Math.max(0, Math.min(sec, dur));
-      this._playheadSec = sec;
+      const sessionDur = Math.max(0, dur - this._audioOffset);
+      const s = Math.max(0, Math.min(sec, sessionDur));
+      this._playheadSec = s;
       try {
-        audio.currentTime = t;
+        audio.currentTime = this._audioTimeForSession(s);
       } catch (_) {
         /* ignore seek errors before metadata */
       }
@@ -272,18 +279,20 @@
         );
       }
       const sessionSec = this._sessionSec();
-      const dur =
+      const audioDur =
         audio && Number.isFinite(audio.duration) ? audio.duration : null;
+      const sessionDur =
+        audioDur != null ? Math.max(0, audioDur - this._audioOffset) : null;
 
       if (this._ui.timeEl) {
         this._ui.timeEl.textContent =
-          dur != null
-            ? `${fmtClock(sessionSec)} / ${fmtClock(dur)}`
+          sessionDur != null
+            ? `${fmtClock(sessionSec)} / ${fmtClock(sessionDur)}`
             : fmtClock(sessionSec);
       }
 
-      if (this._ui.scrubber && !this._scrubbing && dur != null) {
-        this._ui.scrubber.max = String(dur);
+      if (this._ui.scrubber && !this._scrubbing && sessionDur != null) {
+        this._ui.scrubber.max = String(sessionDur);
         this._ui.scrubber.value = String(sessionSec);
       }
     }
@@ -291,9 +300,9 @@
     _drawPlayhead(u) {
       const audio = this._audio;
       const playing = !!(audio && !audio.paused && !audio.ended);
+      // Красная линия только при воспроизведении — не путать с uPlot cursor при hover.
+      if (!playing) return;
       const t = this._playheadSec;
-      // До старта воспроизведения не рисуем (избегаем путаницы с uPlot cursor).
-      if (!playing && t < 0.05) return;
       if (!Number.isFinite(t)) return;
       const xMin = u.scales.x.min;
       const xMax = u.scales.x.max;
