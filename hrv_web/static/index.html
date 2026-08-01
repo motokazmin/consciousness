@@ -947,6 +947,12 @@
       min-height: 260px;
     }
 
+    /* Архив RR + аудио: только playhead, не uPlot cursor */
+    #arch_rr .u-cursor-x,
+    #arch_rr .u-cursor-pt {
+      display: none !important;
+    }
+
     /* uPlot overrides */
     .uplot { margin: 0; }
     .u-title { display: none !important; }
@@ -1954,10 +1960,10 @@
 <script src="/assets/hrv_audio_engine.js?v=3"></script>
 <script src="/assets/meditation_engine.js?v=3"></script>
 <script src="/assets/timed_protocol_engine.js?v=1"></script>
-<script src="/assets/session_mic_recorder.js?v=1"></script>
-<script src="/assets/session_audio_player.js?v=1"></script>
+<script src="/assets/session_mic_recorder.js?v=2"></script>
+<script src="/assets/session_audio_player.js?v=7"></script>
 <script src="/assets/chart_zoom.js?v=1"></script>
-<script src="/assets/analysis_charts.js?v=9"></script>
-<script src="/assets/app.js?v=28"></script>
+<script src="/assets/analysis_charts.js?v=11"></script>
+<script src="/assets/app.js?v=32"></script>
 </body>
 </html>

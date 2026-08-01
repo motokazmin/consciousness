@@ -1,5 +1,8 @@
 /**
  * Архивный плеер: клик по RR → seek, playhead на uPlot, Play/Pause.
+ * Ось RR и audio.currentTime — секунды от arm (t₀).
+ * uPlot.valToPos(v, scale, true) уже в canvas-координатах (с bbox.left/top) —
+ * не прибавлять bbox ещё раз.
  */
 (function (global) {
   const CLICK_MAX_MOVE_PX = 6;
@@ -29,6 +32,7 @@
       this._pointer = null;
       this._scrubbing = false;
       this._audioOffset = 0;
+      this._prevCursor = null;
     }
 
     /**
@@ -57,22 +61,36 @@
     }
 
     /**
-     * Установить offset (в секундах) между arm и началом записи.
+     * Локальная задержка arm → MediaRecorder.start() (сек). Только малые значения;
+     * большие (старый POST→arm) игнорируем — запись с startAtArm синхронна с RR.
      * @param {number} offsetSec
      */
     setAudioOffset(offsetSec) {
-      this._audioOffset = Number.isFinite(offsetSec) ? offsetSec : 0;
-      console.log("[AudioPlayer] setAudioOffset:", this._audioOffset);
+      const n = Number(offsetSec);
+      this._audioOffset = Number.isFinite(n) && n > 0 && n <= 2 ? n : 0;
+    }
+
+    _audioNow() {
+      if (!this._audio) return 0;
+      const t = this._audio.currentTime;
+      return Number.isFinite(t) ? t : 0;
+    }
+
+    _sessionSec() {
+      return Math.max(0, this._audioNow() - this._audioOffset);
+    }
+
+    _audioTimeForSession(sec) {
+      return Math.max(0, sec + this._audioOffset);
     }
 
     /**
-     * Показать/загрузить аудио для сессии. Скрыть, если hasAudio=false.
      * @returns {Promise<boolean>} true если плеер активен
      */
     async load(sessionId, hasAudio) {
       this.detachPlot();
       this._teardownAudio();
-      this._playheadSec = this._audioOffset;
+      this._playheadSec = 0;
       if (!hasAudio || !sessionId) {
         this._setVisible(false);
         this._syncUi();
@@ -83,11 +101,13 @@
       audio.src = `/api/sessions/${sessionId}/audio`;
       this._audio = audio;
 
-      audio.addEventListener("timeupdate", () => {
-        this._playheadSec = (audio.currentTime || 0) + this._audioOffset;
+      const onTime = () => {
+        this._playheadSec = this._sessionSec();
         this._syncUi();
         this._redrawPlot();
-      });
+      };
+
+      audio.addEventListener("timeupdate", onTime);
       audio.addEventListener("play", () => {
         this._startRaf();
         this._syncUi();
@@ -100,22 +120,24 @@
         this._stopRaf();
         this._syncUi();
       });
-      audio.addEventListener("loadedmetadata", () => {
-        this._playheadSec = (audio.currentTime || 0) + this._audioOffset;
-        this._syncUi();
-        this._redrawPlot();
-      });
+      audio.addEventListener("loadedmetadata", onTime);
 
       this._setVisible(true);
       this._syncUi();
       return true;
     }
 
-    /** Привязать click-to-seek и playhead к архивному RR-плоту. */
     attachToPlot(plot) {
       this.detachPlot();
       if (!plot?.over || !this._audio) return;
       this._plot = plot;
+
+      this._prevCursor = plot.cursor;
+      try {
+        plot.setCursor({ show: false, x: false, y: false, points: { show: false } });
+      } catch (_) {
+        /* ignore */
+      }
 
       this._drawHook = (u) => this._drawPlayhead(u);
       if (!plot.hooks.draw) plot.hooks.draw = [];
@@ -159,9 +181,11 @@
 
     detachPlot() {
       this._stopRaf();
-      if (this._plot && this._drawHook && this._plot.hooks?.draw) {
-        const idx = this._plot.hooks.draw.indexOf(this._drawHook);
-        if (idx >= 0) this._plot.hooks.draw.splice(idx, 1);
+      const plot = this._plot;
+      const prevCursor = this._prevCursor;
+      if (plot && this._drawHook && plot.hooks?.draw) {
+        const idx = plot.hooks.draw.indexOf(this._drawHook);
+        if (idx >= 0) plot.hooks.draw.splice(idx, 1);
       }
       for (const fn of this._cleanups) {
         try {
@@ -174,17 +198,25 @@
       this._drawHook = null;
       this._plot = null;
       this._pointer = null;
+      if (plot && prevCursor) {
+        try {
+          plot.setCursor(prevCursor);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      this._prevCursor = null;
     }
 
     seekTo(sec) {
       const audio = this._audio;
       if (!audio) return;
       const dur = Number.isFinite(audio.duration) ? audio.duration : Infinity;
-      const compensated = Math.max(0, sec - this._audioOffset);
-      const t = Math.max(0, Math.min(compensated, dur));
-      this._playheadSec = sec;
+      const sessionDur = Math.max(0, dur - this._audioOffset);
+      const s = Math.max(0, Math.min(sec, sessionDur));
+      this._playheadSec = s;
       try {
-        audio.currentTime = t;
+        audio.currentTime = this._audioTimeForSession(s);
       } catch (_) {
         /* ignore seek errors before metadata */
       }
@@ -248,40 +280,47 @@
           playing ? "Пауза" : "Воспроизвести"
         );
       }
-      const cur = this._playheadSec;
-      const audioTime = audio ? (audio.currentTime || 0) + this._audioOffset : 0;
-      const dur = audio && Number.isFinite(audio.duration) ? audio.duration + this._audioOffset : null;
-      
+      const sessionSec = this._sessionSec();
+      const audioDur =
+        audio && Number.isFinite(audio.duration) ? audio.duration : null;
+      const sessionDur =
+        audioDur != null ? Math.max(0, audioDur - this._audioOffset) : null;
+
       if (this._ui.timeEl) {
-        this._ui.timeEl.textContent = dur != null
-          ? `${fmtClock(audioTime)} / ${fmtClock(dur)}`
-          : fmtClock(audioTime);
+        this._ui.timeEl.textContent =
+          sessionDur != null
+            ? `${fmtClock(sessionSec)} / ${fmtClock(sessionDur)}`
+            : fmtClock(sessionSec);
       }
-      
-      if (this._ui.scrubber && !this._scrubbing && dur != null) {
-        this._ui.scrubber.max = String(dur);
-        this._ui.scrubber.value = String(audioTime);
+
+      if (this._ui.scrubber && !this._scrubbing && sessionDur != null) {
+        this._ui.scrubber.max = String(sessionDur);
+        this._ui.scrubber.value = String(sessionSec);
       }
     }
 
     _drawPlayhead(u) {
-      const t = this._audio ? this._audio.currentTime || this._playheadSec : this._playheadSec;
+      const audio = this._audio;
+      const playing = !!(audio && !audio.paused && !audio.ended);
+      // Красная линия только при воспроизведении — не путать с uPlot cursor при hover.
+      if (!playing) return;
+      const t = this._playheadSec;
       if (!Number.isFinite(t)) return;
       const xMin = u.scales.x.min;
       const xMax = u.scales.x.max;
       if (t < xMin || t > xMax) return;
+      // can=true → уже canvas px от левого края холста (включая bbox.left).
       const cx = u.valToPos(t, "x", true);
-      const { left, top, width, height } = u.bbox;
+      const { top, height } = u.bbox;
       const ctx = u.ctx;
       ctx.save();
       ctx.beginPath();
       ctx.strokeStyle = "rgba(220, 80, 60, 0.9)";
       ctx.lineWidth = 2 * (devicePixelRatio || 1);
-      ctx.moveTo(left + cx, top);
-      ctx.lineTo(left + cx, top + height);
+      ctx.moveTo(cx, top);
+      ctx.lineTo(cx, top + height);
       ctx.stroke();
       ctx.restore();
-      void width;
     }
 
     _redrawPlot() {
@@ -299,7 +338,7 @@
       const tick = () => {
         this._raf = null;
         if (!this._audio || this._audio.paused) return;
-        this._playheadSec = this._audio.currentTime || 0;
+        this._playheadSec = this._sessionSec();
         this._syncUi();
         this._redrawPlot();
         this._raf = requestAnimationFrame(tick);

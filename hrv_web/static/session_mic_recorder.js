@@ -71,7 +71,32 @@
       }
     }
 
-    /** Старт MediaRecorder в момент arm (t₀ сессии). */
+    /** Старт записи в arm: новый stream (не ждать с POST), затем MediaRecorder. */
+    async startAtArm() {
+      if (this._started) return false;
+      this._releaseStream();
+      if (!navigator.mediaDevices?.getUserMedia) {
+        this._status = "error";
+        return false;
+      }
+      try {
+        this._stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: false,
+        });
+      } catch (e) {
+        this._status = e?.name === "NotAllowedError" ? "denied" : "error";
+        this._stream = null;
+        return false;
+      }
+      return this.start();
+    }
+
+    /** @deprecated используйте startAtArm — оставлено для совместимости */
     start() {
       if (this._started || !this._stream) return false;
       if (typeof MediaRecorder === "undefined") {
@@ -90,7 +115,7 @@
       this._recorder.ondataavailable = (ev) => {
         if (ev.data && ev.data.size > 0) this._chunks.push(ev.data);
       };
-      this._recorder.start(5000);
+      this._recorder.start(250);
       // Запоминаем локальное время браузера (для вычисления задержки)
       this._startedAt = Date.now();
       this._started = true;

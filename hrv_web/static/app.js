@@ -223,10 +223,11 @@ async function finishMicRecording(sessionId) {
   setMicStatus("");
   if (!blob || !sessionId) return;
   
-  // Вычисляем задержку В СЕКУНДАХ между arm и началом записи (относительно браузера)
-  const delaySeconds = armTimeLocal && recorderStartedAtLocal 
-    ? (recorderStartedAtLocal - armTimeLocal) / 1000 
-    : null;
+  // Задержка arm → MediaRecorder.start() (с startAtArm stream открывается в arm — ≈0).
+  let delaySeconds = null;
+  if (armTimeLocal != null && recorderStartedAtLocal) {
+    delaySeconds = (recorderStartedAtLocal - armTimeLocal) / 1000;
+  }
   
   try {
     await uploadSessionAudio(sessionId, blob, delaySeconds);
@@ -1261,8 +1262,10 @@ function armSession(t0) {
   }
   if (micRecorder && !micRecorder.recording) {
     micRecorderArmTime = Date.now();
-    if (micRecorder.start()) setMicStatus("микрофон: пишет");
-    else setMicStatus("микрофон: ошибка записи");
+    micRecorder.startAtArm().then((ok) => {
+      if (ok) setMicStatus("микрофон: пишет");
+      else setMicStatus("микрофон: ошибка записи");
+    });
   }
 }
 
@@ -1977,6 +1980,7 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   const rrOpts = {
     ...(profile.options.rr || {}),
     ...(rrTimelineUsesFilteredView("arch") ? {} : rrPlotTrimOpts(analysis)),
+    ...(sum?.has_audio ? { noCursor: true } : {}),
   };
 
   if (activePanels.has("rr")) {
@@ -1986,9 +1990,6 @@ function renderArchiveAnalysisCharts(analysis, sum) {
         rrEl, xs, ys, analysis.duration_sec,
         ARCHIVE_PLOT_H, rrOpts
       );
-      if (archRR && sum?.has_audio) {
-        ensureArchAudioPlayer()?.attachToPlot(archRR);
-      }
     } else if (rrEl) {
       charts.setChartEmpty(rrEl, "Нет данных RR");
     }
@@ -2040,7 +2041,7 @@ async function syncArchAudioPlayer(sum) {
   const sid = sum?.id;
   const has = !!sum?.has_audio;
   
-  // Точный offset между sessions.started и recorder.start() из БД
+  // Локальная задержка arm→recorder из БД (обычно <1 с; большие значения плеер игнорит).
   const audioOffset = sum?.audio_offset_sec ?? 0;
   player.setAudioOffset(audioOffset);
   

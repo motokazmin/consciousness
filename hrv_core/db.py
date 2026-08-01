@@ -180,7 +180,35 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
             rmssd_after_30s REAL
         )""")
     conn.commit()
+    _repair_session_timelines(conn)
     return conn
+
+
+def _repair_session_timelines(conn: sqlite3.Connection) -> None:
+    """Поправить sessions.started и битые audio_delay_sec (POST вместо arm, старый API)."""
+    conn.execute(
+        """
+        UPDATE sessions
+        SET started = (
+            SELECT MIN(ts) FROM hrv_points WHERE hrv_points.session_id = sessions.id
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM hrv_points WHERE hrv_points.session_id = sessions.id
+        )
+        AND (
+            SELECT MIN(ts) FROM hrv_points WHERE hrv_points.session_id = sessions.id
+        ) - started > 1.0
+        """
+    )
+    conn.execute(
+        """
+        UPDATE sessions
+        SET audio_delay_sec = NULL
+        WHERE audio_delay_sec IS NOT NULL
+          AND (audio_delay_sec > 2.0 OR audio_delay_sec < 0)
+        """
+    )
+    conn.commit()
 
 
 def load_hour_baseline(conn: sqlite3.Connection, hour: int) -> float | None:
