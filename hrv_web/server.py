@@ -549,8 +549,7 @@ def get_session(session_id: int):
             summary["timeline_skew_sec"] = round(float(first_rr[0]) - float(started), 3)
         if has_audio and audio_delay_sec is not None:
             delay = float(audio_delay_sec)
-            if 0 <= delay <= 120.0:
-                summary["audio_lead_sec"] = delay
+            if 0 <= delay <= 2.0:
                 summary["audio_offset_sec"] = delay
     return summary
 

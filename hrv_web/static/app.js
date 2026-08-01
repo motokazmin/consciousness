@@ -2041,10 +2041,9 @@ async function syncArchAudioPlayer(sum) {
   const sid = sum?.id;
   const has = !!sum?.has_audio;
   
-  // audio_offset_sec / audio_lead_sec — сдвиг начала файла относительно оси RR (сек).
-  const audioLead =
-    sum?.audio_lead_sec ?? sum?.audio_offset_sec ?? sum?.audio_delay_sec ?? 0;
-  player.setAudioOffset(audioLead);
+  // Локальная задержка arm→recorder из БД (обычно <1 с; большие значения плеер игнорит).
+  const audioOffset = sum?.audio_offset_sec ?? 0;
+  player.setAudioOffset(audioOffset);
   
   await player.load(sid, has);
   if (has && archRR) player.attachToPlot(archRR);

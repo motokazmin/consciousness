@@ -1,6 +1,8 @@
 /**
  * Архивный плеер: клик по RR → seek, playhead на uPlot, Play/Pause.
- * Ось RR и audio.currentTime — секунды от arm (t₀); offset — только arm→recorder (<1 с).
+ * Ось RR и audio.currentTime — секунды от arm (t₀).
+ * uPlot.valToPos(v, scale, true) уже в canvas-координатах (с bbox.left/top) —
+ * не прибавлять bbox ещё раз.
  */
 (function (global) {
   const CLICK_MAX_MOVE_PX = 6;
@@ -59,13 +61,13 @@
     }
 
     /**
-     * Сдвиг начала аудиофайла относительно оси RR (сек): t_session = currentTime − leadIn.
-     * Для старых записей (POST→arm в файле) может быть ~15–20 с; для startAtArm — ≈0.
-     * @param {number} leadInSec
+     * Локальная задержка arm → MediaRecorder.start() (сек). Только малые значения;
+     * большие (старый POST→arm) игнорируем — запись с startAtArm синхронна с RR.
+     * @param {number} offsetSec
      */
-    setAudioOffset(leadInSec) {
-      const n = Number(leadInSec);
-      this._audioOffset = Number.isFinite(n) && n > 0 && n <= 120 ? n : 0;
+    setAudioOffset(offsetSec) {
+      const n = Number(offsetSec);
+      this._audioOffset = Number.isFinite(n) && n > 0 && n <= 2 ? n : 0;
     }
 
     _audioNow() {
@@ -307,18 +309,18 @@
       const xMin = u.scales.x.min;
       const xMax = u.scales.x.max;
       if (t < xMin || t > xMax) return;
+      // can=true → уже canvas px от левого края холста (включая bbox.left).
       const cx = u.valToPos(t, "x", true);
-      const { left, top, width, height } = u.bbox;
+      const { top, height } = u.bbox;
       const ctx = u.ctx;
       ctx.save();
       ctx.beginPath();
       ctx.strokeStyle = "rgba(220, 80, 60, 0.9)";
       ctx.lineWidth = 2 * (devicePixelRatio || 1);
-      ctx.moveTo(left + cx, top);
-      ctx.lineTo(left + cx, top + height);
+      ctx.moveTo(cx, top);
+      ctx.lineTo(cx, top + height);
       ctx.stroke();
       ctx.restore();
-      void width;
     }
 
     _redrawPlot() {
