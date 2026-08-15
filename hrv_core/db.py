@@ -9,7 +9,37 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-from hrv_core.constants import DB_PATH
+from hrv_core.constants import DB_PATH, SESSION_AUDIO_DIR
+
+
+def session_audio_path(session_id: int, *, audio_dir: Path | None = None) -> Path:
+    """Путь к файлу записи микрофона сессии."""
+    return (audio_dir or SESSION_AUDIO_DIR) / f"{int(session_id)}.webm"
+
+
+def ensure_session_audio_dir(*, audio_dir: Path | None = None) -> Path:
+    d = audio_dir or SESSION_AUDIO_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def delete_session_audio_file(session_id: int, *, audio_dir: Path | None = None) -> None:
+    path = session_audio_path(session_id, audio_dir=audio_dir)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning("Не удалось удалить аудио сессии %s: %s", session_id, e)
+
+
+def wipe_session_audio_dir(*, audio_dir: Path | None = None) -> None:
+    d = audio_dir or SESSION_AUDIO_DIR
+    if not d.is_dir():
+        return
+    for path in d.glob("*.webm"):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("Не удалось удалить %s: %s", path, e)
 
 
 def init_db(path: Path | None = None) -> sqlite3.Connection:
@@ -126,6 +156,18 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN opt_audio_biofeedback INTEGER NOT NULL DEFAULT 0"
         )
+    if "opt_mic_recording" not in cols:
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN opt_mic_recording INTEGER NOT NULL DEFAULT 0"
+        )
+    if "has_audio" not in cols:
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN has_audio INTEGER NOT NULL DEFAULT 0"
+        )
+    if "audio_delay_sec" not in cols:
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN audio_delay_sec REAL"
+        )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS meditation_phrase_log (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,7 +180,35 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
             rmssd_after_30s REAL
         )""")
     conn.commit()
+    _repair_session_timelines(conn)
     return conn
+
+
+def _repair_session_timelines(conn: sqlite3.Connection) -> None:
+    """Поправить sessions.started и битые audio_delay_sec (POST вместо arm, старый API)."""
+    conn.execute(
+        """
+        UPDATE sessions
+        SET started = (
+            SELECT MIN(ts) FROM hrv_points WHERE hrv_points.session_id = sessions.id
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM hrv_points WHERE hrv_points.session_id = sessions.id
+        )
+        AND (
+            SELECT MIN(ts) FROM hrv_points WHERE hrv_points.session_id = sessions.id
+        ) - started > 1.0
+        """
+    )
+    conn.execute(
+        """
+        UPDATE sessions
+        SET audio_delay_sec = NULL
+        WHERE audio_delay_sec IS NOT NULL
+          AND (audio_delay_sec > 2.0 OR audio_delay_sec < 0)
+        """
+    )
+    conn.commit()
 
 
 def load_hour_baseline(conn: sqlite3.Connection, hour: int) -> float | None:
@@ -222,7 +292,7 @@ def finalize_orphaned_sessions(conn: sqlite3.Connection) -> list[int]:
 
 
 def delete_session(conn: sqlite3.Connection, session_id: int) -> bool:
-    """Удалить сессию и связанные точки/логи фраз. Возвращает True, если сессия была."""
+    """Удалить сессию, точки, логи фраз и файл аудио. Возвращает True, если сессия была."""
     row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
     if not row:
         return False
@@ -232,6 +302,7 @@ def delete_session(conn: sqlite3.Connection, session_id: int) -> bool:
     )
     conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     conn.commit()
+    delete_session_audio_file(session_id)
     return True
 
 
@@ -243,4 +314,23 @@ def wipe_all_history(conn: sqlite3.Connection) -> int:
     conn.execute("DELETE FROM sessions")
     conn.execute("DELETE FROM baseline")
     conn.commit()
+    wipe_session_audio_dir()
     return int(n_sessions)
+
+
+def set_session_has_audio(
+    conn: sqlite3.Connection,
+    session_id: int,
+    has_audio: bool,
+    audio_delay_sec: float | None = None,
+) -> bool:
+    """Выставить has_audio и audio_delay_sec. Возвращает False, если сессии нет."""
+    row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if not row:
+        return False
+    conn.execute(
+        "UPDATE sessions SET has_audio = ?, audio_delay_sec = ? WHERE id = ?",
+        (1 if has_audio else 0, audio_delay_sec, session_id),
+    )
+    conn.commit()
+    return True

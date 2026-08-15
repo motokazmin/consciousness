@@ -284,7 +284,7 @@ masterGain
 - [x] `PolarH10Source` — BLE, реконнект, `start_notify` с таймаутом/ретраями, watchdog по отсутствию RR
 - [x] RMSSD на скользящем окне 60 с
 - [x] **Веб-UI** (`python -m hrv_web`): live-графики RR + RMSSD (uPlot), архив (Poincaré, FFT, SDNN), вкладка «Прогресс» (overlay), guided mp3-фразы с выбором набора; типы активности в БД; теги заметок `#…`; фильтры по периоду и тегам
-- [x] Post-session анализ (`analysis.py`): Poincaré, Welch PSD, coherence, SDNN/RMSSD trends; опция **«Стабильная зона (±1 мин)»**
+- [x] Post-session анализ (`analysis.py`): Poincaré, Welch PSD, coherence, SDNN/RMSSD trends; коррекция артефактов Malik ~20%
 - [x] SQLite: `sessions`, `hrv_points`, `baseline`, `session_types`, `meditation_phrase_log`; опции сессии (`opt_guided_phrases`, `opt_audio_biofeedback`)
 - [x] Drift detection (флаг в WebSocket; `notify-send` в веб-сессии отключён)
 - [x] **Session summary** после «Стоп»: длительность, min/mean/max RMSSD, drift-события, **vs baseline**, включённые опции
@@ -393,15 +393,14 @@ python -m hrv_web
 
 | Параметр | Описание |
 |----------|----------|
-| `stable_zone=true` | Обрезка краёв ±60 с для Poincaré, спектра, SDNN; RR-график — полный, края затемнены |
-| `smooth=true` | Устаревший алиас `stable_zone` |
 | `max_points` | Downsampling точек (архив, по умолчанию 12000) |
+
+Post-session графики всегда на corrected RR (Malik ~20% + интерполяция); сырые RR остаются в `hrv_points`.
 
 ### Опции UI
 
 | Опция | Вкладка | Описание |
 |-------|---------|----------|
-| **Стабильная зона (±1 мин)** | Архив, Прогресс | Синхронизированный чекбокс; состояние в `localStorage` |
 | **Набор фраз** | Запись | Подпапка в `phrases/{prefix}/{set}/`; список: `GET /api/meditation/phrase-sets` |
 | **HRV-реактивные фразы** | Запись | Guided mp3 по RMSSD; лог в `meditation_phrase_log` |
 | **chart_profile** | Архив | Набор панелей по типу сессии (`CHART_PROFILES` в `app.js`) |

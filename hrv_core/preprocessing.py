@@ -1,4 +1,4 @@
-"""RR-interval preprocessing: FFT detrending and Poincaré viewport bounds (raw data preserved)."""
+"""RR-interval preprocessing: artifact correction, FFT detrending, Poincaré viewport (raw preserved)."""
 
 from __future__ import annotations
 
@@ -14,45 +14,94 @@ POINCARE_PERCENTILE_HI = 95
 MIN_RR_FOR_VIEWPORT = 4
 DEFAULT_VIEWPORT = {"min": 600, "max": 1000}
 SDNN_INITIAL_CROP_SEC = 20.0
-STABLE_ZONE_TRIM_SEC = 60.0
-MIN_STABLE_ZONE_SEC = 120.0
 
 
-ECTOPIC_IQR_FACTOR = 2.5
-"""RR-интервалы, отклоняющиеся от медианы более чем на ECTOPIC_IQR_FACTOR * IQR,
-считаются артефактами (эктопические удары, помехи датчика).
-Применяется только к аналитике; raw_rr для таймлайна остаётся нетронутым."""
+# Классическая коррекция артефактов RR (Malik / Kubios-style):
+# относительный порог к последнему принятому интервалу + физиологические границы.
+# Всегда применяется к аналитике; raw в БД и raw_rr_* не трогаем.
+ARTIFACT_REL_THRESHOLD = 0.20
+RR_PHYSIO_MIN_MS = 300.0
+RR_PHYSIO_MAX_MS = 2000.0
 
 
-def ectopic_mask(rr: np.ndarray, iqr_factor: float = ECTOPIC_IQR_FACTOR) -> np.ndarray:
-    """True = валидный удар. Фильтрует точечные выбросы внутри сессии."""
-    if rr.size < 4:
-        return np.ones(rr.size, dtype=bool)
-    q25, q75 = np.percentile(rr, [25, 75])
-    iqr = q75 - q25
-    if iqr == 0:
-        return np.ones(rr.size, dtype=bool)
-    median = np.median(rr)
-    return np.abs(rr - median) <= iqr_factor * iqr
-
-
-def stable_zone_mask(
-    ts: np.ndarray,
+def artifact_mask(
+    rr: np.ndarray,
     *,
-    trim_start_sec: float = STABLE_ZONE_TRIM_SEC,
-    trim_end_sec: float = STABLE_ZONE_TRIM_SEC,
+    rel_threshold: float = ARTIFACT_REL_THRESHOLD,
+    physio_min_ms: float = RR_PHYSIO_MIN_MS,
+    physio_max_ms: float = RR_PHYSIO_MAX_MS,
 ) -> np.ndarray:
-    """Маска ударов внутри [t0+trim_start, t_end-trim_end]. Пустая зона → все True."""
-    ts = np.asarray(ts, dtype=float)
-    if ts.size == 0:
+    """True = валидный удар (Malik: |RRᵢ − RR_last| / RR_last ≤ threshold)."""
+    rr = np.asarray(rr, dtype=float)
+    n = rr.size
+    if n == 0:
         return np.zeros(0, dtype=bool)
-    t0 = float(ts[0])
-    t_end = float(ts[-1])
-    lo = t0 + max(0.0, trim_start_sec)
-    hi = t_end - max(0.0, trim_end_sec)
-    if hi - lo < MIN_STABLE_ZONE_SEC:
-        return np.ones(ts.size, dtype=bool)
-    return (ts >= lo) & (ts <= hi)
+    if n == 1:
+        v = float(rr[0])
+        return np.array([physio_min_ms <= v <= physio_max_ms], dtype=bool)
+
+    valid = np.ones(n, dtype=bool)
+    last_good: float | None = None
+    for i, v in enumerate(rr):
+        val = float(v)
+        if not (physio_min_ms <= val <= physio_max_ms) or not np.isfinite(val):
+            valid[i] = False
+            continue
+        if last_good is None:
+            last_good = val
+            continue
+        if last_good > 0 and abs(val - last_good) / last_good > rel_threshold:
+            valid[i] = False
+            continue
+        last_good = val
+    return valid
+
+
+def correct_rr_artifacts(
+    rr: np.ndarray,
+    *,
+    rel_threshold: float = ARTIFACT_REL_THRESHOLD,
+    physio_min_ms: float = RR_PHYSIO_MIN_MS,
+    physio_max_ms: float = RR_PHYSIO_MAX_MS,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Маска артефактов + линейная интерполяция по индексу (длина ряда сохраняется).
+
+    Returns:
+        corrected_rr, valid_mask (True=исходный валидный), n_corrected
+    """
+    rr = np.asarray(rr, dtype=float).copy()
+    mask = artifact_mask(
+        rr,
+        rel_threshold=rel_threshold,
+        physio_min_ms=physio_min_ms,
+        physio_max_ms=physio_max_ms,
+    )
+    n_bad = int((~mask).sum())
+    if n_bad == 0 or mask.sum() == 0:
+        return rr, mask, n_bad
+
+    idx = np.arange(rr.size, dtype=float)
+    good = mask.astype(bool)
+    rr[~good] = np.interp(idx[~good], idx[good], rr[good])
+    return rr, mask, n_bad
+
+
+def ectopic_mask(
+    rr: np.ndarray,
+    *,
+    rel_threshold: float = ARTIFACT_REL_THRESHOLD,
+    physio_min_ms: float = RR_PHYSIO_MIN_MS,
+    physio_max_ms: float = RR_PHYSIO_MAX_MS,
+    iqr_factor: float | None = None,  # noqa: ARG001 — legacy no-op
+) -> np.ndarray:
+    """Alias: True = валидный удар. См. artifact_mask (Malik ~20%)."""
+    del iqr_factor
+    return artifact_mask(
+        rr,
+        rel_threshold=rel_threshold,
+        physio_min_ms=physio_min_ms,
+        physio_max_ms=physio_max_ms,
+    )
 
 
 def _fft_input(rr: np.ndarray) -> np.ndarray:

@@ -64,6 +64,13 @@ class RunningSession:
             return
         sample = self.state.process_beat(rr_ms, ts)
         if sample is None:
+            # Первый удар (RMSSD ещё 0) — сохраняем для оси RR и sync с аудио.
+            with self.conn_lock:
+                self.conn.execute(
+                    "INSERT INTO hrv_points (session_id, ts, rr_ms, rmssd) VALUES (?, ?, ?, ?)",
+                    (self.session_id, ts, rr_ms, 0.0),
+                )
+                self.conn.commit()
             return
         with self.conn_lock:
             self.conn.execute(
@@ -120,6 +127,7 @@ class SessionManager:
         minutes: float | None,
         opt_guided_phrases: bool = False,
         opt_audio_biofeedback: bool = False,
+        opt_mic_recording: bool = False,
     ) -> RunningSession:
         if source_kind not in ("mock", "ble"):
             raise ValueError(f"неизвестный source: {source_kind}")
@@ -133,8 +141,8 @@ class SessionManager:
         cur = conn.execute(
             "INSERT INTO sessions "
             "(tag, source, session_name, participant, started, drift_events, "
-            "opt_guided_phrases, opt_audio_biofeedback) "
-            "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+            "opt_guided_phrases, opt_audio_biofeedback, opt_mic_recording) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
             (
                 tag,
                 label,
@@ -143,6 +151,7 @@ class SessionManager:
                 started,
                 int(opt_guided_phrases),
                 int(opt_audio_biofeedback),
+                int(opt_mic_recording),
             ),
         )
         session_id = int(cur.lastrowid)

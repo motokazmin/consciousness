@@ -75,17 +75,16 @@
     const xdata = u.data[1];
     const ydata = u.data[2];
     if (!xdata?.length) return;
-    const ox = u.bbox.left;
-    const oy = u.bbox.top;
     const total = xdata.length;
     const radius = opts?.pointRadius ?? 2.2;
     const colorFn = opts?.pointColor || gradientPointColor;
     for (let i = 0; i < total; i++) {
+      // valToPos(..., true) — canvas px от края холста (уже с bbox).
       const x = u.valToPos(xdata[i], "x", true);
       const y = u.valToPos(ydata[i], "y", true);
       ctx.beginPath();
       ctx.fillStyle = colorFn(i, total);
-      ctx.arc(ox + x, oy + y, radius, 0, Math.PI * 2);
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
       ctx.fill();
     }
     const lo = u.scales.x.min;
@@ -98,8 +97,8 @@
     ctx.strokeStyle = T().chartLine("--chart-guide-line", "rgba(255,255,255,0.22)");
     ctx.setLineDash([6, 4]);
     ctx.lineWidth = 1;
-    ctx.moveTo(ox + x0, oy + y0);
-    ctx.lineTo(ox + x1, oy + y1);
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
     ctx.stroke();
     ctx.setLineDash([]);
   }
@@ -171,19 +170,19 @@
     const trim = opts?.trim;
     if (!trim?.applied) return;
     const { ctx } = u;
-    const ox = u.bbox.left;
     const oy = u.bbox.top;
     const h = u.bbox.height;
     const start = trim.start_sec ?? 0;
     const end = (trim.duration_sec ?? 0) - (trim.end_sec ?? 0);
     ctx.save();
     ctx.fillStyle = T().chartLine("--chart-trim-overlay", "rgba(0,0,0,0.28)");
+    // valToPos(..., true) уже включает bbox.left.
     const x0 = u.valToPos(0, "x", true);
     const x1 = u.valToPos(start, "x", true);
     const x2 = u.valToPos(end, "x", true);
     const x3 = u.valToPos(trim.duration_sec ?? end, "x", true);
-    if (start > 0) ctx.fillRect(ox + x0, oy, x1 - x0, h);
-    if (end < (trim.duration_sec ?? end)) ctx.fillRect(ox + x2, oy, x3 - x2, h);
+    if (start > 0) ctx.fillRect(x0, oy, x1 - x0, h);
+    if (end < (trim.duration_sec ?? end)) ctx.fillRect(x2, oy, x3 - x2, h);
     ctx.restore();
   }
 
@@ -220,11 +219,9 @@
           { ...axisStyle(), label: "RR, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
         ],
         hooks: trimOpts?.applied ? { draw: [(u) => drawTrimBands(u, { trim: trimOpts })] } : {},
-        // Native drag-to-select-zoom must be off here too — HrvChartZoom.attach
-        // below binds its own drag-to-pan on the same .u-over element, and the
-        // two were fighting over every drag gesture (see chart_zoom.js / app.js
-        // for the full explanation).
-        cursor: { show: true, x: true, y: false, drag: { setScale: false, x: false, y: false } },
+        cursor: opts?.noCursor
+          ? { show: false, x: false, y: false, points: { show: false } }
+          : { show: true, x: true, y: false, drag: { setScale: false, x: false, y: false } },
         legend: { show: false },
       },
       [rawRrX, rawRr],
@@ -404,14 +401,12 @@
         const xdata = u.data[xIdx];
         const ydata = u.data[xIdx + 1];
         if (!xdata?.length) return;
-        const ox = u.bbox.left;
-        const oy = u.bbox.top;
         ctx.fillStyle = hexToRgba(color, 0.35);
         for (let i = 0; i < xdata.length; i++) {
           const x = u.valToPos(xdata[i], "x", true);
           const y = u.valToPos(ydata[i], "y", true);
           ctx.beginPath();
-          ctx.arc(ox + x, oy + y, 1.8, 0, Math.PI * 2);
+          ctx.arc(x, y, 1.8, 0, Math.PI * 2);
           ctx.fill();
         }
       });
@@ -419,16 +414,14 @@
 
     drawHooks.push((u) => {
       const { ctx } = u;
-      const ox = u.bbox.left;
-      const oy = u.bbox.top;
       const xmin = u.scales.x.min;
       const xmax = u.scales.x.max;
       ctx.beginPath();
       ctx.strokeStyle = T().chartLine("--chart-guide-line", "rgba(255,255,255,0.22)");
       ctx.setLineDash([6, 4]);
       ctx.lineWidth = 1;
-      ctx.moveTo(ox + u.valToPos(xmin, "x", true), oy + u.valToPos(xmin, "y", true));
-      ctx.lineTo(ox + u.valToPos(xmax, "x", true), oy + u.valToPos(xmax, "y", true));
+      ctx.moveTo(u.valToPos(xmin, "x", true), u.valToPos(xmin, "y", true));
+      ctx.lineTo(u.valToPos(xmax, "x", true), u.valToPos(xmax, "y", true));
       ctx.stroke();
       ctx.setLineDash([]);
     });

@@ -1,3 +1,4 @@
+session_audio/
+hrv_data.sqlite
 **/__pycache__/
 *.py[cod]
-hrv_data.sqlite
