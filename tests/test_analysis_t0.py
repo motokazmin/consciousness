@@ -18,12 +18,12 @@ def _points(from_sec: float, n: int = 80, step: float = 0.85) -> list[tuple[floa
 class AnalysisT0Tests(unittest.TestCase):
     def test_first_point_at_zero_when_started_predates_rr(self):
         points = _points(17.0)
-        result = session_analysis(points, started=0.0, ended=120.0, stable_zone=False)
+        result = session_analysis(points, started=0.0, ended=120.0)
         self.assertEqual(result["raw_rr_x"][0], 0.0)
 
     def test_started_used_when_close_to_first_point(self):
         points = _points(16.0)
-        result = session_analysis(points, started=16.0, ended=120.0, stable_zone=False)
+        result = session_analysis(points, started=16.0, ended=120.0)
         self.assertEqual(result["raw_rr_x"][0], 0.0)
 
 

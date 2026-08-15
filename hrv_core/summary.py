@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from hrv_core.analysis import coherence_score, compute_spectrum, mean_rr
-from hrv_core.preprocessing import preprocess_rr_session
+from hrv_core.preprocessing import correct_rr_artifacts, preprocess_rr_session
 
 
 def session_summary_dict(
@@ -68,12 +68,13 @@ def session_summary_dict(
     if rr_rows:
         rr_arr = np.array([r[1] for r in rr_rows], dtype=float)
         ts_arr = np.array([r[0] for r in rr_rows], dtype=float)
-        preprocessed = preprocess_rr_session(rr_arr)
-        raw_rr = np.array(preprocessed["raw_rr"], dtype=float)
+        rr_corr, _, _ = correct_rr_artifacts(rr_arr)
+        preprocessed = preprocess_rr_session(rr_corr)
+        analysis_rr = np.array(preprocessed["raw_rr"], dtype=float)
         fft_rr = np.array(preprocessed["fft_input_rr"], dtype=float)
-        m_rr = mean_rr(raw_rr)
+        m_rr = mean_rr(analysis_rr)
         out["mean_rr"] = round(m_rr, 1) if m_rr is not None else None
-        spec = compute_spectrum(ts_arr, raw_rr, fft_rr=fft_rr)
+        spec = compute_spectrum(ts_arr, analysis_rr, fft_rr=fft_rr)
         if not spec.get("insufficient_data") and spec["freqs"]:
             coherence = coherence_score(
                 np.array(spec["freqs"]),

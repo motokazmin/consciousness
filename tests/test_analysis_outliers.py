@@ -1,10 +1,11 @@
-"""Тесты опционального фильтра единичных выбросов RR в post-session analysis."""
+"""Тесты коррекции артефактов RR (Malik ~20% + интерполяция) в post-session analysis."""
 
 from __future__ import annotations
 
 import numpy as np
 
 from hrv_core.analysis import session_analysis
+from hrv_core.preprocessing import artifact_mask, correct_rr_artifacts
 
 
 def _session_with_spike(duration_sec: int = 600, spike_rr: float = 1400.0) -> list[tuple[float, float, float]]:
@@ -15,24 +16,28 @@ def _session_with_spike(duration_sec: int = 600, spike_rr: float = 1400.0) -> li
     return list(zip(ts.tolist(), rr.tolist(), rmssd.tolist()))
 
 
-def test_filter_outliers_disabled_keeps_spike_in_analysis():
+def test_artifact_mask_flags_relative_spike():
+    rr = np.array([800.0, 810.0, 1400.0, 805.0])
+    mask = artifact_mask(rr)
+    assert mask.tolist() == [True, True, False, True]
+
+
+def test_correct_rr_interpolates_and_keeps_length():
+    rr = np.array([800.0, 810.0, 1400.0, 805.0])
+    corrected, mask, n_bad = correct_rr_artifacts(rr)
+    assert n_bad == 1
+    assert mask.sum() == 3
+    assert corrected.size == rr.size
+    assert 1400.0 not in corrected
+    assert abs(corrected[2] - 807.5) < 1e-6
+
+
+def test_session_analysis_always_corrects_spike():
     points = _session_with_spike()
-    result = session_analysis(points, started=0.0, ended=600.0, filter_outliers=False)
+    result = session_analysis(points, started=0.0, ended=600.0)
 
-    assert result["filter_outliers"] is False
-    assert result["outliers"]["applied"] is False
-    assert result["outliers"]["removed"] == 0
-    assert 1400.0 in result["analysis_rr"]
-
-
-def test_filter_outliers_removes_single_spike():
-    points = _session_with_spike()
-    raw = session_analysis(points, started=0.0, ended=600.0, filter_outliers=False)
-    filtered = session_analysis(points, started=0.0, ended=600.0, filter_outliers=True)
-
-    assert filtered["filter_outliers"] is True
-    assert filtered["outliers"]["applied"] is True
-    assert filtered["outliers"]["removed"] == 1
-    assert 1400.0 not in filtered["analysis_rr"]
-    assert len(filtered["raw_rr"]) == len(raw["raw_rr"])
-    assert filtered["mean_rr"] != raw["mean_rr"]
+    assert result["outliers"]["applied"] is True
+    assert result["outliers"]["removed"] == 1
+    assert 1400.0 in result["raw_rr"]
+    assert 1400.0 not in result["analysis_rr"]
+    assert len(result["analysis_rr"]) == len(result["raw_rr"])

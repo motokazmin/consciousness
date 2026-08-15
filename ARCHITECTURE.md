@@ -100,7 +100,7 @@ flowchart LR
 | `session_types.py` | Системные типы сессий (seed в БД при первом запуске): slug, label, mock-профиль, phrase_prefix |
 | `tags.py` | Нормализация метки `tag` при старте сессии |
 | `summary.py` | Session summary (JSON API) |
-| `preprocessing.py` | Маска стабильной зоны, detrend для FFT, границы viewport Poincaré |
+| `preprocessing.py` | Коррекция артефактов RR (Malik ~20% + интерполяция), detrend для FFT, границы viewport Poincaré |
 | `analysis.py` | Post-session: Poincaré, Welch PSD, SDNN/RMSSD trends, coherence |
 | `ble_scan.py` | BLE-сканирование Polar, проверка BlueZ/bleak (подключение) |
 
@@ -210,9 +210,9 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 | `/api/sessions/{id}/audio` | PUT | Сохранить запись микрофона (raw body webm/ogg, после stop) |
 | `/api/sessions/{id}/audio` | GET | Отдать файл записи (`audio/webm`) |
 | `/api/sessions/{id}/points` | GET | Точки (с downsampling) |
-| `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); `?stable_zone=true`, `max_points` |
+| `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); `max_points` |
 | `/api/progress` | GET | Наложение RMSSD-кривых завершённых сессий |
-| `/api/progress/analysis` | GET | Overlay Poincaré / спектр / SDNN; фильтры + `?stable_zone=true` |
+| `/api/progress/analysis` | GET | Overlay Poincaré / спектр / SDNN; фильтры сессий |
 | `/api/history` | DELETE | Очистка всей истории |
 | `/api/meditation/phrase-sets` | GET | Список наборов фраз (`?prefix=sit\|lay`) |
 | `/api/meditation/phrase-manifest` | GET | Список mp3 в `static/phrases/{prefix}/{set}/` |
@@ -231,45 +231,38 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 
 **Ось времени (t₀):** `raw_rr_x` — секунды от t₀; t₀ = timestamp первой сохранённой RR-точки (≈ arm). Sync с аудио: `audio.currentTime = x` от arm. При старте `init_db()` сессии с `started` >1 с раньше первой точки (POST до Polar) **авто-чинятся** в БД.
 
-**Аудио:** `audio_delay_sec` — локальная задержка arm→recorder (<2 с); в summary как `audio_offset_sec`. Плеер: `session_t = audio.currentTime − offset`. Playhead: `uPlot.valToPos(t, "x", true)` уже в canvas-координатах — без повторного `bbox.left`. Опции «Стабильная зона» / «Без выбросов» на raw RR и playhead не влияют, когда выключены.
+**Аудио:** `audio_delay_sec` — локальная задержка arm→recorder (<2 с); в summary как `audio_offset_sec`. Плеер: `session_t = audio.currentTime − offset`. Playhead: `uPlot.valToPos(t, "x", true)` уже в canvas-координатах — без повторного `bbox.left`. Графики архива — на corrected RR; сырой ряд остаётся в БД (`hrv_points` / `raw_rr`).
 
 ### Поток данных
 
 ```
-hrv_points (ts, rr_ms, rmssd)
-  → session_analysis() / progress_session_analysis()
-  → JSON → analysis_charts.js (uPlot)
+hrv_points (ts, rr_ms, rmssd)  — сырые RR в БД
+  → correct_rr_artifacts() → session_analysis() / progress_session_analysis()
+  → JSON (analysis_rr_*, poincare, spectrum, …) → analysis_charts.js (uPlot)
 ```
 
 ### Графики и расчёт
 
 | График | Модуль | Алгоритм |
 |--------|--------|----------|
-| **RR** | `raw_rr_timeline` | Сырые RR, ось X = секунды от t₀; без сглаживания |
-| **Poincaré** | `poincare_pairs` | Пары (RRₙ, RRₙ₊₁), SD1/SD2; decimate до 2500 точек; viewport p5–p95 |
-| **Спектр (FFT)** | `compute_spectrum` | Интерполяция 4 Гц → detrend → Welch PSD; пик в 0.04–0.15 Гц |
+| **RR** | `analysis_rr_*` | Corrected tachogram (Malik); ось X = секунды от t₀ |
+| **Poincaré** | `poincare_pairs` | Пары (RRₙ, RRₙ₊₁) по corrected, SD1/SD2; decimate до 2500; viewport p5–p95 |
+| **Спектр (FFT)** | `compute_spectrum` | Corrected → интерполяция 4 Гц → detrend → Welch PSD; пик в 0.04–0.15 Гц |
 | **Coherence** | `coherence_score` | Доля мощности в 0.08–0.12 Гц от суммы 0–0.5 Гц (%) |
-| **SDNN trend** | `moving_sdnn` | std(RR) в окне 60 с; первые 20 с не рисуются |
-| **RMSSD trend** | `rmssd_trend` | Сохранённые значения `rmssd` по времени |
+| **SDNN trend** | `moving_sdnn` | std(corrected RR) в окне 60 с; первые 20 с не рисуются |
+| **RMSSD trend** | `rmssd_trend` | Сохранённые значения `rmssd` по времени (как писались в live) |
 
-Константы: `STABLE_ZONE_TRIM_SEC=60`, `MIN_STABLE_ZONE_SEC=120`, `MIN_SPECTRAL_SEC=60`, `SDNN_INITIAL_CROP_SEC=20`.
+Константы: `ARTIFACT_REL_THRESHOLD=0.20`, `RR_PHYSIO_MIN_MS=300`, `RR_PHYSIO_MAX_MS=2000`, `MIN_SPECTRAL_SEC=60`, `SDNN_INITIAL_CROP_SEC=20`.
 
-### Опция «Стабильная зона (±1 мин)»
+### Коррекция артефактов (всегда)
 
-Параметр API: `stable_zone=true` (алиас `smooth=true` — устаревший). Чекбокс в UI синхронизирован между Архивом и Прогрессом (`localStorage`: `hrv_stable_zone`).
+Все post-session графики и метрики строятся на corrected RR. Сырые значения пишутся в БД без изменений.
 
-| Компонент | Поведение при `stable_zone=true` |
-|-----------|----------------------------------|
-| RR-график | Полная сессия; края ±60 с **затемнены** на клиенте |
-| Poincaré, спектр, SDNN, mean RR, coherence | Только удары в `[t₀+60 с, t_end−60 с]` |
-| RMSSD trend | Всегда полная сессия |
-| Trim не применяется | Если эффективная зона < 120 с или сессия < ~4 мин |
-
-Маска: [`stable_zone_mask()`](hrv_core/preprocessing.py). Фильтр артефактов и скользящее среднее по RR **не** используются — внутрисессионные скачки сохраняются.
+Алгоритм ([`correct_rr_artifacts()`](hrv_core/preprocessing.py)): классический **Malik ~20%** — интервал-артефакт, если вне **300–2000 ms** или \(|RR_i - RR_{\mathrm{last}}| / RR_{\mathrm{last}} > 0.20\); затем линейная интерполяция по индексу. Поле ответа `outliers: {applied, removed}`.
 
 ### Ответ `/api/sessions/{id}/analysis`
 
-Ключевые поля: `raw_rr`, `raw_rr_x`, `poincare`, `spectrum`, `sdnn_trend`, `rmssd_trend`, `mean_rr`, `coherence_score`, `stable_zone`, `trim: {start_sec, end_sec, applied}`.
+Ключевые поля: `raw_rr`, `raw_rr_x`, `analysis_rr`, `analysis_rr_x`, `poincare`, `spectrum`, `sdnn_trend`, `rmssd_trend`, `mean_rr`, `coherence_score`, `outliers`.
 
 ### Guided meditation и release-протокол
 
