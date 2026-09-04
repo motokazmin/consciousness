@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${CLAUDE_PROJECT_DIR:-.}/research/STATE.md\"; [ -f \"$f\" ] && jq -n --rawfile s \"$f\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:(\"=== research/STATE.md — память исследования, точка входа ===\\n\" + $s)}}' || true",
+            "timeout": 10,
+            "statusMessage": "Загружаю память исследования"
+          }
+        ]
+      }
+    ]
+  }
+}
