@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import re
 import sqlite3
 from pathlib import Path
 
@@ -33,18 +34,28 @@ MIN_BEATS = 600
 # удары, поэтому их не чиним, а выбрасываем. 5% — обычный порог в HRV-работах.
 MAX_ARTIFACT_PCT = 5.0
 MIN_COVERAGE_PCT = 90.0
+# Метки, при которых сессия не описывает обычное состояние испытуемого и в
+# baseline не входит. Ставятся самим Романом в session_name (см. ADR-006).
+PHARMA_MARKS = ("#травка",)
 BAND = (0.04, 0.40)   # вся полоса, в которой ищем доминирующее колебание
 HF = (0.15, 0.40)     # классическая дыхательная полоса: 9-24 дых/мин
 
 
+def marks_of(session_name: str | None) -> list[str]:
+    """Хэштеги, проставленные испытуемым в session_name: разметка, а не заголовок."""
+    return re.findall(r"#[^\s#]+", session_name or "")
+
+
 def load_sessions(conn: sqlite3.Connection, until: float | None) -> list[dict]:
-    sql = "select id, tag, started, ended from sessions where ended - started > ?"
+    sql = ("select id, tag, started, ended, session_name from sessions "
+           "where ended - started > ?")
     args: list = [MIN_SESSION_SEC]
     if until is not None:
         sql += " and started < ?"
         args.append(until)
     return [
-        dict(id=r[0], tag=r[1] or "(без тега)", started=r[2], ended=r[3])
+        dict(id=r[0], tag=r[1] or "(без тега)", started=r[2], ended=r[3],
+             marks=marks_of(r[4]))
         for r in conn.execute(sql + " order by started", args)
     ]
 
@@ -65,6 +76,7 @@ def session_metrics(conn: sqlite3.Connection, s: dict) -> dict | None:
     m = dict(
         id=s["id"],
         tag=s["tag"],
+        marks=s["marks"],
         started=s["started"],
         minutes=duration / 60.0,
         beats=len(rr),
@@ -73,6 +85,10 @@ def session_metrics(conn: sqlite3.Connection, s: dict) -> dict | None:
         hr=60000.0 / float(np.mean(rr)),
         rmssd=float(np.sqrt(np.mean(np.diff(rr) ** 2))),
         sdnn=float(np.std(rr)),
+        # Медиана |ΔRR| от удара к удару. Отличает живой ритм (единицы-десятки мс)
+        # от почти постоянного (≈1 мс — один квант Polar, 1/1024 с). Артефактный
+        # процент такой ряд не ловит: по Malik он безупречно чистый.
+        drr_median=float(np.median(np.abs(np.diff(rr)))),
     )
 
     beat_t = np.cumsum(rr) / 1000.0
@@ -165,6 +181,10 @@ def report(items: list[dict]) -> str:
                f"(порог бракования в HRV-работах обычно 5%);")
     out.append(f"- покрытие сессии интервалами: медиана {np.median(cov):.1f}%, "
                f"минимум {cov.min():.1f}%.")
+    drr = np.array([x["drr_median"] for x in items])
+    out.append(f"- живость ритма (медиана |ΔRR| от удара к удару): медиана "
+               f"{np.median(drr):.1f} мс, минимум {drr.min():.1f} мс; сессий с "
+               f"|ΔRR| ≤ 3 мс — {int((drr <= 3).sum())}.")
     out.append("")
 
     out.append("**Тренд внутри одного типа** (там, где тип постоянен и n достаточно):")
@@ -203,15 +223,37 @@ def main() -> None:
 
     conn = sqlite3.connect(args.db)
     measured = [m for s in load_sessions(conn, until) if (m := session_metrics(conn, s))]
-    items, rejected = [], []
+    items, rejected, pharma = [], [], []
     for m in measured:
         if m["artifact_pct"] > MAX_ARTIFACT_PCT or m["coverage_pct"] < MIN_COVERAGE_PCT:
             rejected.append(m)
+        elif any(mark in m["marks"] for mark in PHARMA_MARKS):
+            pharma.append(m)
         else:
             items.append(m)
     if not items:
         raise SystemExit("нет сессий, подходящих под критерии")
     print(report(items))
+
+    marked = collections.Counter(mk for m in measured for mk in m["marks"])
+    if marked:
+        print()
+        print("**Разметка, проставленная испытуемым в `session_name`** (сессий с меткой):")
+        print(", ".join(f"`{mk}` — {n}" for mk, n in marked.most_common()))
+
+    if pharma:
+        print()
+        print(f"**Вынесено из baseline по метке {'/'.join(PHARMA_MARKS)}: "
+              f"{len(pharma)} сессий** (ADR-006). Считаются отдельно:")
+        print()
+        print("| величина | под веществом | baseline |")
+        print("|---|---|---|")
+        for key, label, d in (("rmssd", "RMSSD, мс", 1), ("hr", "ЧСС, уд/мин", 0),
+                              ("hf_pct", "HF, %", 1), ("drr_median", "медиана |ΔRR|, мс", 1)):
+            print(f"| {label} | {fmt(median(pharma, key), d)} | {fmt(median(items, key), d)} |")
+        days = sorted({dt.datetime.fromtimestamp(m["started"]).date() for m in pharma})
+        print()
+        print(f"Окно: {days[0]} — {days[-1]}, дней {len(days)}.")
     if rejected:
         print()
         print(f"**Забраковано по качеству сигнала: {len(rejected)} из {len(measured)}** "
