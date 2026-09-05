@@ -252,13 +252,15 @@ hrv_points (ts, rr_ms, rmssd)  — сырые RR в БД
 | **SDNN trend** | `moving_sdnn` | std(corrected RR) в окне 60 с; первые 20 с не рисуются |
 | **RMSSD trend** | `rmssd_trend` | Сохранённые значения `rmssd` по времени (как писались в live) |
 
-Константы: `ARTIFACT_REL_THRESHOLD=0.20`, `RR_PHYSIO_MIN_MS=300`, `RR_PHYSIO_MAX_MS=2000`, `MIN_SPECTRAL_SEC=60`, `SDNN_INITIAL_CROP_SEC=20`.
+Константы: `ARTIFACT_REL_THRESHOLD=0.20`, `ARTIFACT_MEDIAN_WINDOW=5`, `RR_PHYSIO_MIN_MS=300`, `RR_PHYSIO_MAX_MS=2000`, `MIN_SPECTRAL_SEC=60`, `SDNN_INITIAL_CROP_SEC=20`.
 
 ### Коррекция артефактов (всегда)
 
 Все post-session графики и метрики строятся на corrected RR. Сырые значения пишутся в БД без изменений.
 
-Алгоритм ([`correct_rr_artifacts()`](hrv_core/preprocessing.py)): классический **Malik ~20%** — интервал-артефакт, если вне **300–2000 ms** или \(|RR_i - RR_{\mathrm{last}}| / RR_{\mathrm{last}} > 0.20\); затем линейная интерполяция по индексу. Поле ответа `outliers: {applied, removed}`.
+Алгоритм ([`correct_rr_artifacts()`](hrv_core/preprocessing.py)): **Malik ~20% к локальной медиане** — интервал-артефакт, если вне **300–2000 ms** или \(|RR_i - \mathrm{med}_i| / \mathrm{med}_i > 0.20\), где \(\mathrm{med}_i\) — скользящая медиана по окну `ARTIFACT_MEDIAN_WINDOW=5`; затем линейная интерполяция по индексу. Поле ответа `outliers: {applied, removed}`.
+
+Опора именно медианная, а не «последний принятый интервал»: последняя работает как храповик — при медленном дрейфе ЧСС первый же отказ замораживает опору, и остаток записи бракуется целиком (на реальных сессиях доходило до 100% ударов, после интерполяции ряд превращался в прямую и RMSSD давал 0).
 
 ### Ответ `/api/sessions/{id}/analysis`
 

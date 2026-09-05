@@ -17,11 +17,32 @@ SDNN_INITIAL_CROP_SEC = 20.0
 
 
 # Классическая коррекция артефактов RR (Malik / Kubios-style):
-# относительный порог к последнему принятому интервалу + физиологические границы.
+# относительный порог к локальной медиане + физиологические границы.
 # Всегда применяется к аналитике; raw в БД и raw_rr_* не трогаем.
+#
+# Опора — скользящая медиана, а не последний принятый интервал. Опора по
+# последнему принятому работает как храповик: при медленном дрейфе пульса
+# первый же отказ замораживает опору, ряд уходит от неё всё дальше и
+# бракуется целиком (сессия #117: разрывов записи нет, реальных артефактов
+# 0.1%, каскад давал 100% и превращал ряд в прямую после интерполяции).
 ARTIFACT_REL_THRESHOLD = 0.20
 RR_PHYSIO_MIN_MS = 300.0
 RR_PHYSIO_MAX_MS = 2000.0
+ARTIFACT_MEDIAN_WINDOW = 5
+
+
+def _local_median(rr: np.ndarray, window: int) -> np.ndarray:
+    """Скользящая медиана по окну (нечётному), края достраиваются краевым значением."""
+    n = rr.size
+    w = window if window % 2 else window + 1
+    if n < w:
+        w = n if n % 2 else n - 1
+    if w < 3:
+        return np.full(n, float(np.median(rr)))
+    half = w // 2
+    padded = np.pad(rr, half, mode="edge")
+    views = np.lib.stride_tricks.sliding_window_view(padded, w)
+    return np.median(views, axis=1)
 
 
 def artifact_mask(
@@ -30,30 +51,20 @@ def artifact_mask(
     rel_threshold: float = ARTIFACT_REL_THRESHOLD,
     physio_min_ms: float = RR_PHYSIO_MIN_MS,
     physio_max_ms: float = RR_PHYSIO_MAX_MS,
+    median_window: int = ARTIFACT_MEDIAN_WINDOW,
 ) -> np.ndarray:
-    """True = валидный удар (Malik: |RRᵢ − RR_last| / RR_last ≤ threshold)."""
+    """True = валидный удар (Malik: |RRᵢ − med| / med ≤ threshold, med — локальная медиана)."""
     rr = np.asarray(rr, dtype=float)
     n = rr.size
     if n == 0:
         return np.zeros(0, dtype=bool)
-    if n == 1:
-        v = float(rr[0])
-        return np.array([physio_min_ms <= v <= physio_max_ms], dtype=bool)
 
-    valid = np.ones(n, dtype=bool)
-    last_good: float | None = None
-    for i, v in enumerate(rr):
-        val = float(v)
-        if not (physio_min_ms <= val <= physio_max_ms) or not np.isfinite(val):
-            valid[i] = False
-            continue
-        if last_good is None:
-            last_good = val
-            continue
-        if last_good > 0 and abs(val - last_good) / last_good > rel_threshold:
-            valid[i] = False
-            continue
-        last_good = val
+    valid = np.isfinite(rr) & (rr >= physio_min_ms) & (rr <= physio_max_ms)
+    if n == 1:
+        return valid
+
+    reference = _local_median(rr, median_window)
+    valid &= np.abs(rr - reference) <= rel_threshold * reference
     return valid
 
 
@@ -63,6 +74,7 @@ def correct_rr_artifacts(
     rel_threshold: float = ARTIFACT_REL_THRESHOLD,
     physio_min_ms: float = RR_PHYSIO_MIN_MS,
     physio_max_ms: float = RR_PHYSIO_MAX_MS,
+    median_window: int = ARTIFACT_MEDIAN_WINDOW,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Маска артефактов + линейная интерполяция по индексу (длина ряда сохраняется).
 
@@ -75,6 +87,7 @@ def correct_rr_artifacts(
         rel_threshold=rel_threshold,
         physio_min_ms=physio_min_ms,
         physio_max_ms=physio_max_ms,
+        median_window=median_window,
     )
     n_bad = int((~mask).sum())
     if n_bad == 0 or mask.sum() == 0:
@@ -92,6 +105,7 @@ def ectopic_mask(
     rel_threshold: float = ARTIFACT_REL_THRESHOLD,
     physio_min_ms: float = RR_PHYSIO_MIN_MS,
     physio_max_ms: float = RR_PHYSIO_MAX_MS,
+    median_window: int = ARTIFACT_MEDIAN_WINDOW,
     iqr_factor: float | None = None,  # noqa: ARG001 — legacy no-op
 ) -> np.ndarray:
     """Alias: True = валидный удар. См. artifact_mask (Malik ~20%)."""
@@ -101,6 +115,7 @@ def ectopic_mask(
         rel_threshold=rel_threshold,
         physio_min_ms=physio_min_ms,
         physio_max_ms=physio_max_ms,
+        median_window=median_window,
     )
 
 
