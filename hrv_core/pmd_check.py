@@ -1,11 +1,16 @@
 """Проверочная команда для человека: PMD-акселерометр на живом Polar H10.
 
-**Важно.** Разбор кадров данных (`hrv_core.pmd.parse_acc_frame`) и команда
-start measurement ни разу не видели реального устройства — подтверждены
-только перечисление сервисов и чтение маски возможностей (см.
-`hrv_core/pmd.py`). Поэтому эта команда не просто говорит «работает» или «не
-работает» — она печатает сырьё на каждом шаге, чтобы по одному прогону было
-видно, где именно разбор разошёлся с реальностью, если разошёлся.
+**Важно.** Второй живой прогон подтвердил разбор настроек (заголовок ответа —
+5 байт, счётчик значений в блоке — 1 байт) и опроверг гипотезу о недостающей
+настройке `channels`: она устройством не объявляется, а если добавить её в
+команду — старт отвергается (INVALID_PARAMETER). Команда старта без channels
+получила SUCCESS, и последующий стоп тоже вернул SUCCESS (а не
+ALREADY_IN_STATE) — значит измерение реально запускалось. При этом ни одного
+кадра данных так и не пришло. Открытый вопрос теперь — доставка BLE-уведомлений
+(см. `hrv_core/pmd.py`, `_ensure_data_after_start` — три варианта подписки).
+Поэтому эта команда не просто говорит «работает» или «не работает» — она
+печатает сырьё на каждом шаге, чтобы по одному прогону было видно, где именно
+разбор разошёлся с реальностью, если разошёлся.
 
 Запуск (ремень надет, не занят другим клиентом BLE):
     python -m hrv_core.pmd_check [--mac AA:BB:..] [--seconds 30]
@@ -27,6 +32,8 @@ from hrv_core.ble_scan import (
     format_bleak_connect_error,
 )
 from hrv_core.pmd import (
+    PMD_CONTROL,
+    PMD_DATA,
     PMD_SERVICE,
     PAIRING_HINT,
     PmdAccStream,
@@ -67,6 +74,25 @@ async def check(mac: str | None, seconds: float) -> int:
         if not has_pmd:
             print("Сервиса PMD на устройстве нет. Дальше идти некуда.")
             return 2
+
+        for service in client.services:
+            if service.uuid.lower() != PMD_SERVICE:
+                continue
+            for ch in service.characteristics:
+                uuid = ch.uuid.lower()
+                if uuid == PMD_CONTROL:
+                    label = "control point"
+                elif uuid == PMD_DATA:
+                    label = "data"
+                else:
+                    continue
+                props = ",".join(ch.properties)
+                print(f"Характеристика {label}: свойства=[{props}]")
+                if uuid == PMD_DATA and "notify" not in ch.properties:
+                    print(
+                        "ВНИМАНИЕ: у data-характеристики нет notify — поток "
+                        "физически не может подписаться, дело не в команде старта."
+                    )
 
         batches: list[tuple[float, list[tuple[int, int, int]], float]] = []
 
@@ -109,9 +135,10 @@ async def check(mac: str | None, seconds: float) -> int:
         print(f"\nИтого за {elapsed:.1f}s: кадров {stream.total_frames}, "
               f"отсчётов {stream.total_samples} (из них в пачках для БД: {len(samples)})")
         if stream.total_samples == 0:
-            print("Поток не пошёл: договорились о частоте, но данных нет. "
-                  "Смотреть hex кадров control point выше — вероятно, старт не принят "
-                  "на самом деле, несмотря на статус.")
+            print("Поток не пошёл: договорились о частоте, старт и стоп подтверждены "
+                  "control point'ом (см. статусы выше), а кадров данных всё равно нет. "
+                  "Смотреть вывод трёх вариантов подписки на PMD_DATA выше — какой из них "
+                  "дал кадры, если хоть один.")
             return 5
 
         fs_actual = stream.total_samples / elapsed
