@@ -4,12 +4,28 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import struct
 import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 from hrv_core.constants import DB_PATH, SESSION_AUDIO_DIR
+
+
+def pack_accel_samples(samples: list[tuple[int, int, int]]) -> bytes:
+    """Пачка отсчётов (x, y, z) в mg → blob int16 little-endian, оси подряд."""
+    flat: list[int] = []
+    for x, y, z in samples:
+        flat.extend((x, y, z))
+    return struct.pack(f"<{len(flat)}h", *flat)
+
+
+def unpack_accel_samples(blob: bytes) -> list[tuple[int, int, int]]:
+    """Обратное к `pack_accel_samples`."""
+    n = len(blob) // 2
+    flat = struct.unpack(f"<{n}h", blob)
+    return [tuple(flat[i:i + 3]) for i in range(0, len(flat) - 2, 3)]
 
 
 def session_audio_path(session_id: int, *, audio_dir: Path | None = None) -> Path:
@@ -60,6 +76,15 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
             ts         REAL,
             rr_ms      REAL,
             rmssd      REAL
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS hrv_accel_batches (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER,
+            ts         REAL,
+            hz         REAL,
+            n_samples  INTEGER,
+            data       BLOB
         )""")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS baseline (
@@ -159,6 +184,10 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
     if "opt_mic_recording" not in cols:
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN opt_mic_recording INTEGER NOT NULL DEFAULT 0"
+        )
+    if "opt_acc_recording" not in cols:
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN opt_acc_recording INTEGER NOT NULL DEFAULT 0"
         )
     if "has_audio" not in cols:
         conn.execute(
@@ -297,6 +326,7 @@ def delete_session(conn: sqlite3.Connection, session_id: int) -> bool:
     if not row:
         return False
     conn.execute("DELETE FROM hrv_points WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM hrv_accel_batches WHERE session_id = ?", (session_id,))
     conn.execute(
         "DELETE FROM meditation_phrase_log WHERE session_id = ?", (session_id,)
     )
@@ -310,6 +340,7 @@ def wipe_all_history(conn: sqlite3.Connection) -> int:
     """Удалить всю историю. Возвращает число удалённых сессий."""
     n_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     conn.execute("DELETE FROM hrv_points")
+    conn.execute("DELETE FROM hrv_accel_batches")
     conn.execute("DELETE FROM meditation_phrase_log")
     conn.execute("DELETE FROM sessions")
     conn.execute("DELETE FROM baseline")
@@ -334,3 +365,43 @@ def set_session_has_audio(
     )
     conn.commit()
     return True
+
+
+def insert_accel_batch(
+    conn: sqlite3.Connection,
+    session_id: int,
+    batch_ts: float,
+    samples: list[tuple[int, int, int]],
+    hz: float,
+) -> None:
+    """Одна пачка отсчётов акселерометра (~1 с). `batch_ts` — та же шкала, что
+    `hrv_points.ts` (time.time() эпоха), чтобы обе оси совпадали при `ts - sessions.started`."""
+    if not samples:
+        return
+    conn.execute(
+        "INSERT INTO hrv_accel_batches (session_id, ts, hz, n_samples, data) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (session_id, batch_ts, hz, len(samples), pack_accel_samples(samples)),
+    )
+    conn.commit()
+
+
+def load_accel_samples(
+    conn: sqlite3.Connection, session_id: int
+) -> list[tuple[float, int, int, int]]:
+    """Все отсчёты акселерометра сессии → [(ts, x, y, z), …] по возрастанию времени.
+
+    Время каждого отсчёта восстанавливается из времени начала его пачки и
+    фактической частоты этой пачки (частота могла отличаться между пачками,
+    если бы менялась переподключением — на практике одна на сессию).
+    """
+    rows = conn.execute(
+        "SELECT ts, hz, data FROM hrv_accel_batches WHERE session_id = ? ORDER BY ts",
+        (session_id,),
+    ).fetchall()
+    out: list[tuple[float, int, int, int]] = []
+    for batch_ts, hz, blob in rows:
+        step = 1.0 / hz if hz else 0.0
+        for i, (x, y, z) in enumerate(unpack_accel_samples(blob)):
+            out.append((batch_ts + i * step, x, y, z))
+    return out

@@ -1499,6 +1499,17 @@
                 По умолчанию выкл. Нужно разрешение браузера на микрофон. В архиве — клик по RR, чтобы послушать момент.
               </p>
             </div>
+            <div class="biofeedback-options">
+              <div class="biofeedback-options-title">Акселерометр (PMD, только BLE Polar H10)</div>
+              <label class="check-label">
+                <input type="checkbox" id="opt_acc_recording" />
+                Писать поток акселерометра для дыхания (сырые отсчёты, без live-графика)
+              </label>
+              <p style="font-size:.75rem;color:var(--text-muted);margin:6px 0 0;line-height:1.45">
+                Экспериментально, по умолчанию выкл. Не отображается во время записи — только хранится для расчёта
+                метрики дыхания позже. При отказе PMD (нет сопряжения и т.п.) запись RR продолжается как обычно.
+              </p>
+            </div>
             <div class="btn-row">
               <button type="button" class="btn btn-primary" id="btn_start">▶ Старт</button>
               <button type="button" class="btn btn-danger" id="btn_stop" disabled>■ Стоп</button>

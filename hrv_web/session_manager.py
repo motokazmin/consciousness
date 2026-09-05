@@ -10,7 +10,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from hrv_core.db import init_db, load_hour_baseline, update_session_baseline
+from hrv_core.constants import DEFAULT_OPT_ACC_RECORDING
+from hrv_core.db import (
+    init_db,
+    insert_accel_batch,
+    load_hour_baseline,
+    update_session_baseline,
+)
 from hrv_core.pipeline import HRVSessionState
 from hrv_core.sources import build_source
 from hrv_core.session_types import SESSION_TYPES
@@ -90,6 +96,19 @@ class RunningSession:
         }
         self._enqueue_ws(payload)
 
+    def on_accel_batch(
+        self, batch_ts: float, samples: list[tuple[int, int, int]], hz: float
+    ) -> None:
+        """Пачка отсчётов PMD-акселерометра (~1 с). RR неприкосновенен: любая
+        ошибка здесь логируется и проглатывается, запись RR не прерывается."""
+        if self.stop_event.is_set():
+            return
+        try:
+            with self.conn_lock:
+                insert_accel_batch(self.conn, self.session_id, batch_ts, samples, hz)
+        except Exception as exc:
+            print(f"PMD: не удалось записать пачку акселерометра (игнорирую): {exc}")
+
     def stop_source_only(self) -> None:
         self.stop_event.set()
         try:
@@ -128,6 +147,7 @@ class SessionManager:
         opt_guided_phrases: bool = False,
         opt_audio_biofeedback: bool = False,
         opt_mic_recording: bool = False,
+        opt_acc_recording: bool = DEFAULT_OPT_ACC_RECORDING,
     ) -> RunningSession:
         if source_kind not in ("mock", "ble"):
             raise ValueError(f"неизвестный source: {source_kind}")
@@ -141,8 +161,9 @@ class SessionManager:
         cur = conn.execute(
             "INSERT INTO sessions "
             "(tag, source, session_name, participant, started, drift_events, "
-            "opt_guided_phrases, opt_audio_biofeedback, opt_mic_recording) "
-            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+            "opt_guided_phrases, opt_audio_biofeedback, opt_mic_recording, "
+            "opt_acc_recording) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
             (
                 tag,
                 label,
@@ -152,6 +173,7 @@ class SessionManager:
                 int(opt_guided_phrases),
                 int(opt_audio_biofeedback),
                 int(opt_mic_recording),
+                int(opt_acc_recording),
             ),
         )
         session_id = int(cur.lastrowid)
@@ -185,6 +207,9 @@ class SessionManager:
                 self._arm(rs, ts)
             rs.on_beat(rr, ts)
 
+        def _accel(batch_ts: float, samples: list[tuple[int, int, int]], hz: float) -> None:
+            rs.on_accel_batch(batch_ts, samples, hz)
+
         with self._lock:
             if self._running is not None:
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -193,7 +218,7 @@ class SessionManager:
                 raise RuntimeError("already_running")
             self._running = rs
 
-        source.start(_beat)
+        source.start(_beat, _accel if opt_acc_recording else None)
 
         def _arm_timeout() -> None:
             self.stop(session_id)

@@ -93,10 +93,12 @@ flowchart LR
 
 | Модуль | Роль |
 |--------|------|
-| `constants.py` | Пороги, таймауты, пути (`DB_PATH`, `DRIFT_THRESHOLD=0.80`, окно RMSSD 60 с) |
+| `constants.py` | Пороги, таймауты, пути (`DB_PATH`, `DRIFT_THRESHOLD=0.80`, окно RMSSD 60 с, `DEFAULT_OPT_ACC_RECORDING`) |
 | `sources.py` | Абстракция `HRVSource`, реализации mock/BLE, фабрика `build_source()` |
+| `pmd.py` | Протокол PMD Polar H10 (акселерометр): UUID, маска возможностей, разбор кадров, `PmdAccStream` |
+| `pmd_check.py` | `python -m hrv_core.pmd_check` — ручная диагностика PMD с надетым ремнём |
 | `pipeline.py` | `compute_rmssd()`, `HRVSessionState`, детекция drift (опц. `notify-send`) |
-| `db.py` | Схема SQLite, миграции, baseline по часу 0–23, удаление сессий |
+| `db.py` | Схема SQLite, миграции, baseline по часу 0–23, удаление сессий, пачки акселерометра |
 | `session_types.py` | Системные типы сессий (seed в БД при первом запуске): slug, label, mock-профиль, phrase_prefix |
 | `tags.py` | Нормализация метки `tag` при старте сессии |
 | `summary.py` | Session summary (JSON API) |
@@ -124,6 +126,7 @@ flowchart LR
 | Команда | Назначение |
 |---------|------------|
 | `python -m hrv_web` | Основной UI: http://127.0.0.1:8765/ |
+| `python -m hrv_core.pmd_check [--mac AA:BB:..] [--seconds 30]` | Ручная проверка PMD-акселерометра с надетым ремнём (см. § PMD-акселерометр) |
 
 ---
 
@@ -131,16 +134,62 @@ flowchart LR
 
 ```python
 class HRVSource(ABC):
-    def start(self, callback): ...  # callback(rr_ms: float, ts: float)
+    def start(self, callback, acc_callback=None): ...
+    # callback(rr_ms: float, ts: float) — на каждый RR
+    # acc_callback(batch_ts: float, samples: list[(x,y,z)], hz: float) — опционально,
+    #   пачка отсчётов акселерометра (~1 с в mg); RR от него не зависит
     def stop(self): ...
 ```
 
 | Реализация | Описание |
 |------------|----------|
-| `MockHRVSource` | AR(1)-симуляция; цикл focused→drift→recovering или профиль медитации (RSA) |
-| `PolarH10Source` | BLE GATT 0x2A37, reconnect, watchdog по отсутствию RR |
+| `MockHRVSource` | AR(1)-симуляция; цикл focused→drift→recovering или профиль медитации (RSA); `acc_callback` игнорирует |
+| `PolarH10Source` | BLE GATT 0x2A37, reconnect, watchdog по отсутствию RR; опционально поднимает PMD-акселерометр на **том же** `BleakClient` |
 
 Переключение: поле `source` в веб-форме (`mock`, `ble`).
+
+### PMD-акселерометр (дыхание — механический канал)
+
+Дыхание из ряда RR в этом проекте выводить запрещено (см. решения в
+`research/`) — нужен независимый механический канал. Им служит акселерометр
+Polar H10 через нестандартный сервис PMD (Polar Measurement Data), протокол —
+`hrv_core/pmd.py`.
+
+- **Одно BLE-соединение.** Второе соединение к H10 не открывается — акселерометр
+  подписывается (`start_notify`) на том же `BleakClient`, что и HR-нотификации.
+  `PmdAccStream.start()` включает control point, читает маску возможностей,
+  затем пробует договориться о частоте по возрастанию `ACC_CANDIDATE_HZ =
+  (25, 50, 100, 200)` — 25 Гц с запасом хватает на полосу дыхания (0.05–0.6 Гц)
+  и в 8 раз снижает трафик/расход батареи против 200 Гц; резолюция 16 бит,
+  диапазон 8g.
+- **RR неприкосновенен.** Любая ошибка PMD (нет сопряжения — прошивка 5.0.0
+  отвечает ATT 0x0e без bonding, маска без бита акселерометра, поток не пошёл,
+  кадр не разобрался) — это `PmdError`/`PmdPairingRequiredError`, пойманная и
+  залогированная в `PolarH10Source._start_pmd_accel`; RR-цикл (`_loop`) её не
+  видит и продолжает работать как без акселерометра, включая reconnect.
+- **Опция сессии** `opt_acc_recording` (колонка `sessions`, чекбокс в форме
+  старта рядом с «Запись микрофона») — по умолчанию выключена
+  (`DEFAULT_OPT_ACC_RECORDING` в `constants.py`, единственное место дефолта).
+  Включена — `SessionManager` передаёт `acc_callback` в `source.start()`.
+- **Хранилище — пачками, не построчно.** `RunningSession.on_accel_batch`
+  копит отсчёты в `PmdAccStream` (~1 с на пачку) и пишет строку в
+  `hrv_accel_batches` через `db.insert_accel_batch`; ошибка записи логируется
+  и глотается, RR не страдает. Чтение обратно — `db.load_accel_samples(conn,
+  session_id) → [(ts, x, y, z), …]`.
+- **Только регистрация.** Сырые отсчёты не выводятся на live-график, не
+  участвуют в post-session анализе и не дают метрику дыхания в реальном
+  времени — это отдельная задача после того, как канал подтвердится на живом
+  устройстве.
+- **Проверка человеком:** `python -m hrv_core.pmd_check` — связь, сопряжение,
+  маска возможностей, 30 с потока, фактическая частота, разброс по осям,
+  диагностика дыхания (не метрика). При ATT 0x0e печатает то же сообщение
+  про `bluetoothctl pair`, что и лог боевой сессии.
+
+**Не проверено на живом устройстве:** start measurement и разбор кадров данных
+(в т.ч. дельта-кадров) — из пробы `research/tools/pmd_probe.py`, которая сама
+их вживую не запускала. Подтверждены только перечисление сервисов и чтение
+маски (`0x05` = ЭКГ + акселерометр). `PmdAccStream` и `pmd_check` печатают сырые
+данные на каждом шаге (`on_event`) именно поэтому.
 
 ---
 
@@ -163,12 +212,20 @@ Persistent baseline накапливается между сессиями ин�
 ```sql
 sessions        (id, tag, source, session_name, participant, started, ended,
                  drift_events, opt_guided_phrases, opt_audio_biofeedback,
-                 opt_mic_recording, has_audio)
+                 opt_mic_recording, opt_acc_recording, has_audio)
 hrv_points      (id, session_id, ts, rr_ms, rmssd)
+hrv_accel_batches (id, session_id, ts, hz, n_samples, data)  -- data: blob int16 x,y,z…
 baseline        (hour, rmssd_mean, n_samples, updated_at)   -- hour 0–23
 session_types   (slug, label, phrase_prefix, mock_profile, chart_profile, is_custom)
 meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_before, …)
 ```
+
+`hrv_accel_batches`: одна строка ≈ 1 секунда потока (не по отсчёту — иначе 25 Гц ×
+3 оси × 40 мин раздувают таблицу до ~60 тыс. строк за сессию). `ts` — та же
+шкала эпохи, что `hrv_points.ts` (для общей оси `ts - sessions.started`). `data`
+— `struct.pack("<Nh", …)`, N = 3 × n_samples, оси подряд (x0,y0,z0,x1,…);
+пакует/распаковывает `hrv_core.db.pack_accel_samples`/`unpack_accel_samples`.
+Чтение обратно — `hrv_core.db.load_accel_samples(conn, session_id)`.
 
 **Файлы:** `session_audio/{session_id}.webm` — записи микрофона рядом с БД.
 

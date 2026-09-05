@@ -23,8 +23,14 @@ from hrv_core.constants import (
 
 class HRVSource(ABC):
     @abstractmethod
-    def start(self, callback):
-        """callback(rr_ms: float, ts: float) — на каждый RR."""
+    def start(self, callback, acc_callback=None):
+        """callback(rr_ms: float, ts: float) — на каждый RR.
+
+        acc_callback(batch_ts: float, samples: list[tuple[int,int,int]], hz: float) —
+        опционально, пачка отсчётов акселерометра (~1 с). RR не зависит от него:
+        источники, которые акселерометр не умеют (mock) или не смогли поднять
+        PMD (BLE без сопряжения и т.п.), просто его не вызывают.
+        """
 
     @abstractmethod
     def stop(self):
@@ -131,7 +137,9 @@ class MockHRVSource(HRVSource):
             beat_sec = rr / 1000.0
             time.sleep(max(0.3, beat_sec + random.gauss(0, 0.015)))
 
-    def start(self, callback):
+    def start(self, callback, acc_callback=None):
+        # Mock не умеет акселерометр: дыхание из RR выводить запрещено (ADR-003
+        # в research/), а имитировать механический канал тут не задача.
         self._running = True
         self._t0 = time.time()
         self._thread = threading.Thread(target=self._run, args=(callback,), daemon=True)
@@ -153,6 +161,7 @@ class PolarH10Source(HRVSource):
         self.address = address
         self._session_stop = session_stop
         self._callback = None
+        self._acc_callback = None
         self._last_rr_ts: float | None = None
 
     @staticmethod
@@ -219,6 +228,41 @@ class PolarH10Source(HRVSource):
         assert last_exc is not None
         raise last_exc
 
+    async def _start_pmd_accel(self, client):
+        """Поднять поток акселерометра PMD на том же клиенте, что и RR.
+
+        Любая ошибка (нет сопряжения, маска без акселерометра, поток не пошёл)
+        логируется и проглатывается: возвращает None, RR продолжает идти как
+        обычно. Второе BLE-соединение не открывается — H10 его не даст.
+        """
+        if self._acc_callback is None:
+            return None
+        from hrv_core.pmd import PmdAccStream, PmdError, PmdPairingRequiredError
+
+        stream = PmdAccStream(client, self._acc_callback)
+        try:
+            hz = await stream.start()
+        except PmdPairingRequiredError as exc:
+            print(f"PMD: {exc}")
+            return None
+        except PmdError as exc:
+            print(f"PMD акселерометр недоступен: {exc}")
+            return None
+        except Exception as exc:
+            print(f"PMD акселерометр: непредвиденная ошибка, отключаю: {exc}")
+            return None
+        print(f"PMD акселерометр ✓ ({hz:.0f} Гц)")
+        return stream
+
+    @staticmethod
+    async def _stop_pmd_accel(stream) -> None:
+        if stream is None:
+            return
+        try:
+            await stream.stop()
+        except Exception as exc:
+            print(f"PMD акселерометр: ошибка при остановке (игнорирую): {exc}")
+
     async def _loop(self):
         from bleak import BleakClient
 
@@ -250,15 +294,28 @@ class PolarH10Source(HRVSource):
                         f"Notifications ✓  (watchdog: нет RR {RR_WATCHDOG_SEC:.0f}s → "
                         f"переподключение)"
                     )
+                    pmd_stream = await self._start_pmd_accel(client)
                     session_start = time.time()
-                    while not self._session_stop.is_set():
-                        await asyncio.sleep(0.5)
-                        now = time.time()
-                        if self._last_rr_ts is None:
-                            if now - session_start > BLE_FIRST_RR_GRACE_SEC:
+                    try:
+                        while not self._session_stop.is_set():
+                            await asyncio.sleep(0.5)
+                            now = time.time()
+                            if self._last_rr_ts is None:
+                                if now - session_start > BLE_FIRST_RR_GRACE_SEC:
+                                    print(
+                                        f"\nНет RR за {BLE_FIRST_RR_GRACE_SEC:.0f}s после подключения. "
+                                        f"{BUSY_DEVICE_HINT}"
+                                    )
+                                    reconnect_pause = True
+                                    try:
+                                        await client.disconnect()
+                                    except Exception:
+                                        pass
+                                    break
+                            elif now - self._last_rr_ts > RR_WATCHDOG_SEC:
                                 print(
-                                    f"\nНет RR за {BLE_FIRST_RR_GRACE_SEC:.0f}s после подключения. "
-                                    f"{BUSY_DEVICE_HINT}"
+                                    f"\nWatchdog: нет RR {RR_WATCHDOG_SEC:.0f}s "
+                                    f"(silent gap / потеря уведомлений). Переподключение…"
                                 )
                                 reconnect_pause = True
                                 try:
@@ -266,22 +323,13 @@ class PolarH10Source(HRVSource):
                                 except Exception:
                                     pass
                                 break
-                        elif now - self._last_rr_ts > RR_WATCHDOG_SEC:
-                            print(
-                                f"\nWatchdog: нет RR {RR_WATCHDOG_SEC:.0f}s "
-                                f"(silent gap / потеря уведомлений). Переподключение…"
-                            )
-                            reconnect_pause = True
+                        else:
                             try:
-                                await client.disconnect()
+                                await client.stop_notify(HR_UUID)
                             except Exception:
                                 pass
-                            break
-                    else:
-                        try:
-                            await client.stop_notify(HR_UUID)
-                        except Exception:
-                            pass
+                    finally:
+                        await self._stop_pmd_accel(pmd_stream)
             except Exception as exc:
                 hint = format_bleak_connect_error(exc)
                 if hint:
@@ -302,8 +350,9 @@ class PolarH10Source(HRVSource):
                 if reconnect_pause and not self._session_stop.is_set():
                     await asyncio.sleep(RECONNECT_DELAY)
 
-    def start(self, callback):
+    def start(self, callback, acc_callback=None):
         self._callback = callback
+        self._acc_callback = acc_callback
         threading.Thread(
             target=lambda: asyncio.run(self._loop()),
             daemon=True,

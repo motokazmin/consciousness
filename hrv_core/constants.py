@@ -50,6 +50,11 @@ DB_PATH = Path("hrv_data.sqlite")
 # Записи микрофона сессий (рядом с БД): session_audio/{id}.webm
 SESSION_AUDIO_DIR = Path("session_audio")
 
+# Поток акселерометра PMD (Polar H10) по умолчанию выключен: включить, когда
+# Роман подтвердит на живом ремне, что канал не мешает RR. Единственное место
+# переключения дефолта.
+DEFAULT_OPT_ACC_RECORDING = False
+
 # Допустимые метки типа активности при старте сессии
 # Источник правды — hrv_core/session_types.py
 from hrv_core.session_types import SESSION_SLUGS as SESSION_TAGS  # noqa: F401

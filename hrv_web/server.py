@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 import numpy as np
 
 from hrv_core.analysis import progress_session_analysis, session_analysis, session_sd1
-from hrv_core.constants import DB_PATH
+from hrv_core.constants import DB_PATH, DEFAULT_OPT_ACC_RECORDING
 from hrv_core.db import (
     delete_session,
     ensure_session_audio_dir,
@@ -67,6 +67,7 @@ class StartSessionBody(BaseModel):
     opt_guided_phrases: bool = False
     opt_audio_biofeedback: bool = False
     opt_mic_recording: bool = False
+    opt_acc_recording: bool = DEFAULT_OPT_ACC_RECORDING
 
 
 class PhraseLogBody(BaseModel):
@@ -279,6 +280,7 @@ def start_session(body: StartSessionBody):
             opt_guided_phrases=body.opt_guided_phrases,
             opt_audio_biofeedback=body.opt_audio_biofeedback,
             opt_mic_recording=body.opt_mic_recording,
+            opt_acc_recording=body.opt_acc_recording,
         )
     except RuntimeError as e:
         if "already_running" in str(e):
@@ -507,7 +509,7 @@ def get_session(session_id: int):
     row = conn.execute(
         "SELECT tag, session_name, participant, source, started, ended, drift_events, "
         "opt_guided_phrases, opt_audio_biofeedback, opt_mic_recording, has_audio, "
-        "audio_delay_sec "
+        "audio_delay_sec, opt_acc_recording "
         "FROM sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
@@ -527,6 +529,7 @@ def get_session(session_id: int):
         opt_mic,
         has_audio,
         audio_delay_sec,
+        opt_acc,
     ) = row
     if ended is None:
         conn.close()
@@ -542,6 +545,7 @@ def get_session(session_id: int):
         summary["opt_guided_phrases"] = bool(opt_guided)
         summary["opt_audio_biofeedback"] = bool(opt_audio)
         summary["opt_mic_recording"] = bool(opt_mic)
+        summary["opt_acc_recording"] = bool(opt_acc)
         summary["has_audio"] = bool(has_audio)
         summary["note_tags"] = parse_note_tags(session_name)
         if first_rr and first_rr[0] is not None:

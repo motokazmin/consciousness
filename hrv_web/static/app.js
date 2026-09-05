@@ -163,6 +163,11 @@ function micOptions() {
   return { micRecording: el ? el.checked : false };
 }
 
+function accOptions() {
+  const el = $("opt_acc_recording");
+  return { accRecording: el ? el.checked : false };
+}
+
 function setMicStatus(text) {
   const el = $("mic_status");
   if (!el) return;
@@ -1441,11 +1446,13 @@ function setBiofeedbackControlsEnabled(on) {
   const intervalEl = $("guided_phrase_interval");
   const setEl = $("guided_phrase_set");
   const micEl = $("opt_mic_recording");
+  const accEl = $("opt_acc_recording");
   if (audioEl) audioEl.disabled = !on;
   if (guidedEl) guidedEl.disabled = !on;
   if (intervalEl) intervalEl.disabled = !on;
   if (setEl) setEl.disabled = !on || !phraseSetsForPrefix(phrasePrefixForTag($("tag")?.value)).length;
   if (micEl) micEl.disabled = !on;
+  if (accEl) accEl.disabled = !on;
 }
 
 function syncSourceFields() {
@@ -1478,7 +1485,7 @@ async function startLive() {
     return;
   }
   const isRelease = isReleaseTag(tag);
-  const opts = { ...audioOptions(), ...guidedPhraseOptions(), ...micOptions() };
+  const opts = { ...audioOptions(), ...guidedPhraseOptions(), ...micOptions(), ...accOptions() };
   if (isRelease) {
     opts.guidedPhrases = true;
     opts.phraseSet = opts.phraseSet || "soft";
@@ -1493,6 +1500,7 @@ async function startLive() {
     opt_guided_phrases: isRelease ? true : opts.guidedPhrases,
     opt_audio_biofeedback: opts.audioBiofeedback,
     opt_mic_recording: opts.micRecording,
+    opt_acc_recording: opts.accRecording,
   };
 
   try {
@@ -1776,6 +1784,7 @@ function renderSummaryGrid(sum) {
     ["Guided meditation", sum.opt_guided_phrases ? "да" : "нет"],
     ["Аудио-биофидбек", sum.opt_audio_biofeedback ? "да" : "нет"],
     ["Запись микрофона", sum.has_audio ? "есть файл" : (sum.opt_mic_recording ? "запрошена" : "нет")],
+    ["Акселерометр PMD", sum.opt_acc_recording ? "да" : "нет"],
   ];
   for (const [label, value] of fields) {
     const cell = document.createElement("div");
