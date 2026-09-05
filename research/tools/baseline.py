@@ -37,6 +37,14 @@ MIN_COVERAGE_PCT = 90.0
 # Метки, при которых сессия не описывает обычное состояние испытуемого и в
 # baseline не входит. Ставятся самим Романом в session_name (см. ADR-006).
 PHARMA_MARKS = ("#травка",)
+# Сессии, чья разметка недостоверна: в baseline не входят и как разметка
+# испытуемого не считаются. Правило Романа — сомнительное не учитывать.
+#   98, 105, 161 — сигнатура каннабисного окна (|dRR| 1-3 мс, ЧСС 93-122),
+#     метки нет; 98 и 105 вдобавок стоят внутри окна.
+#   92, 93 — хэштеги стоят в хвосте текста, написанного Claude: чьи они, неизвестно.
+# Цена решения названа в ADR-008: если это настоящие плохие сессии испытуемого,
+# baseline завышен, потому что мы убрали его худшее по подозрению.
+DOUBTFUL = (92, 93, 98, 105, 161)
 BAND = (0.04, 0.40)   # вся полоса, в которой ищем доминирующее колебание
 HF = (0.15, 0.40)     # классическая дыхательная полоса: 9-24 дых/мин
 
@@ -224,9 +232,12 @@ def main() -> None:
     conn = sqlite3.connect(args.db)
     measured = [m for s in load_sessions(conn, until) if (m := session_metrics(conn, s))]
     items, rejected, pharma = [], [], []
+    doubtful = []
     for m in measured:
         if m["artifact_pct"] > MAX_ARTIFACT_PCT or m["coverage_pct"] < MIN_COVERAGE_PCT:
             rejected.append(m)
+        elif m["id"] in DOUBTFUL:
+            doubtful.append(m)
         elif any(mark in m["marks"] for mark in PHARMA_MARKS):
             pharma.append(m)
         else:
@@ -235,7 +246,9 @@ def main() -> None:
         raise SystemExit("нет сессий, подходящих под критерии")
     print(report(items))
 
-    marked = collections.Counter(mk for m in measured for mk in m["marks"])
+    marked = collections.Counter(
+        mk for m in measured if m["id"] not in DOUBTFUL for mk in m["marks"]
+    )
     if marked:
         print()
         print("**Разметка, проставленная испытуемым в `session_name`** (сессий с меткой):")
@@ -254,6 +267,11 @@ def main() -> None:
         days = sorted({dt.datetime.fromtimestamp(m["started"]).date() for m in pharma})
         print()
         print(f"Окно: {days[0]} — {days[-1]}, дней {len(days)}.")
+    if doubtful:
+        print()
+        print(f"**Исключено как недостоверное: {len(doubtful)} сессий** "
+              f"(разметка сомнительна, см. DOUBTFUL): "
+              + ", ".join(f"#{m['id']}" for m in doubtful))
     if rejected:
         print()
         print(f"**Забраковано по качеству сигнала: {len(rejected)} из {len(measured)}** "
