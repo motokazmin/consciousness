@@ -22,12 +22,15 @@ from hrv_core.breathing import analyze_breathing, decimate_for_transport
 from hrv_core.constants import DB_PATH
 from hrv_core.db import (
     delete_session,
+    delete_session_explanation,
     ensure_session_audio_dir,
     finalize_orphaned_sessions,
     finalize_session,
     init_db,
     load_accel_samples,
     load_hour_baseline,
+    load_session_explanation,
+    save_session_explanation,
     session_audio_path,
     set_session_has_audio,
     wipe_all_history,
@@ -89,6 +92,14 @@ class PhraseLogPatchBody(BaseModel):
 
 class PatchSessionNotesBody(BaseModel):
     session_name: str | None = Field(None, max_length=12000)
+
+
+EXPLANATION_MAX_LEN = 20_000
+
+
+class PutExplanationBody(BaseModel):
+    body: str = Field(..., min_length=1, max_length=EXPLANATION_MAX_LEN)
+    author: str = Field("claude", min_length=1, max_length=40)
 
 
 class CreateSessionTypeBody(BaseModel):
@@ -385,7 +396,8 @@ def list_sessions(
     q = (
         "SELECT id, tag, session_name, participant, source, started, ended, "
         "drift_events, opt_guided_phrases, opt_audio_biofeedback, "
-        "opt_mic_recording, has_audio"
+        "opt_mic_recording, has_audio, "
+        "EXISTS(SELECT 1 FROM session_explanations e WHERE e.session_id = sessions.id)"
         + filt
         + " ORDER BY id DESC LIMIT ?"
     )
@@ -415,6 +427,7 @@ def list_sessions(
                 "opt_audio_biofeedback": bool(r[9]),
                 "opt_mic_recording": bool(r[10]),
                 "has_audio": bool(r[11]),
+                "has_explanation": bool(r[12]),
                 "note_tags": parse_note_tags(r[2]),
                 "sd1": sd1,
             }
@@ -545,6 +558,7 @@ def get_session(session_id: int):
     first_rr = conn.execute(
         "SELECT MIN(ts) FROM hrv_points WHERE session_id = ?", (session_id,)
     ).fetchone()
+    explanation = load_session_explanation(conn, session_id)
     conn.close()
     if summary is not None:
         summary["opt_guided_phrases"] = bool(opt_guided)
@@ -553,6 +567,7 @@ def get_session(session_id: int):
         summary["opt_acc_recording"] = bool(opt_acc)
         summary["has_audio"] = bool(has_audio)
         summary["note_tags"] = parse_note_tags(session_name)
+        summary["explanation"] = explanation
         if first_rr and first_rr[0] is not None:
             summary["first_rr_ts"] = float(first_rr[0])
             summary["timeline_skew_sec"] = round(float(first_rr[0]) - float(started), 3)
@@ -561,6 +576,76 @@ def get_session(session_id: int):
             if 0 <= delay <= 2.0:
                 summary["audio_offset_sec"] = delay
     return summary
+
+
+def _require_session(conn, session_id: int) -> None:
+    row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Сессия не найдена")
+
+
+@app.get("/api/sessions/{session_id}/explanation")
+def get_session_explanation(session_id: int):
+    """Разбор сессии: качественное объяснение графиков, написанное Claude."""
+    conn = init_db()
+    try:
+        _require_session(conn, session_id)
+        return {"explanation": load_session_explanation(conn, session_id)}
+    finally:
+        conn.close()
+
+
+@app.put("/api/sessions/{session_id}/explanation")
+async def put_session_explanation(session_id: int, request: Request):
+    """Записать разбор. Тело — JSON {body, author} или сырой markdown-текст.
+
+    Сырой текст нужен, чтобы разбор можно было положить одной командой
+    (`curl --data-binary @file`), не экранируя markdown в JSON.
+    """
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
+    author = "claude"
+    if ctype == "application/json":
+        try:
+            payload = await request.json()
+        except Exception as e:
+            raise HTTPException(400, "Тело не разобралось как JSON") from e
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "Ожидался объект {body, author}")
+        parsed = PutExplanationBody(**payload)
+        text = parsed.body
+        author = parsed.author
+    else:
+        raw = await request.body()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise HTTPException(400, "Текст должен быть в UTF-8") from e
+        author = (request.query_params.get("author") or "claude").strip() or "claude"
+    text = text.strip()
+    if not text:
+        raise HTTPException(400, "Пустой разбор")
+    if len(text) > EXPLANATION_MAX_LEN:
+        raise HTTPException(
+            413, f"Разбор длиннее {EXPLANATION_MAX_LEN} символов"
+        )
+    conn = init_db()
+    try:
+        _require_session(conn, session_id)
+        saved = save_session_explanation(conn, session_id, text, author[:40])
+    finally:
+        conn.close()
+    return {"ok": True, "explanation": saved}
+
+
+@app.delete("/api/sessions/{session_id}/explanation")
+def delete_session_explanation_endpoint(session_id: int):
+    conn = init_db()
+    try:
+        _require_session(conn, session_id)
+        deleted = delete_session_explanation(conn, session_id)
+    finally:
+        conn.close()
+    return {"ok": True, "deleted": deleted}
 
 
 _AUDIO_MAX_BYTES = 500 * 1024 * 1024  # 500 MiB

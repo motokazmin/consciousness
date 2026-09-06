@@ -208,6 +208,14 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
             rn_after_30s    REAL,
             rmssd_after_30s REAL
         )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS session_explanations (
+            session_id INTEGER PRIMARY KEY,
+            body       TEXT NOT NULL,
+            author     TEXT NOT NULL DEFAULT 'claude',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )""")
     # Индексы по session_id: без них каждый запрос точек сессии — полный скан
     # всей таблицы. Отдельно ts, чтобы ORDER BY ts и MIN/MAX(ts) шли по индексу.
     conn.execute(
@@ -344,6 +352,7 @@ def delete_session(conn: sqlite3.Connection, session_id: int) -> bool:
     conn.execute(
         "DELETE FROM meditation_phrase_log WHERE session_id = ?", (session_id,)
     )
+    conn.execute("DELETE FROM session_explanations WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     conn.commit()
     delete_session_audio_file(session_id)
@@ -356,11 +365,70 @@ def wipe_all_history(conn: sqlite3.Connection) -> int:
     conn.execute("DELETE FROM hrv_points")
     conn.execute("DELETE FROM hrv_accel_batches")
     conn.execute("DELETE FROM meditation_phrase_log")
+    conn.execute("DELETE FROM session_explanations")
     conn.execute("DELETE FROM sessions")
     conn.execute("DELETE FROM baseline")
     conn.commit()
     wipe_session_audio_dir()
     return int(n_sessions)
+
+
+def load_session_explanation(conn: sqlite3.Connection, session_id: int) -> dict | None:
+    """Разбор сессии (текст Claude) или None, если его нет."""
+    row = conn.execute(
+        "SELECT body, author, created_at, updated_at "
+        "FROM session_explanations WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "session_id": int(session_id),
+        "body": row[0],
+        "author": row[1],
+        "created_at": float(row[2]),
+        "updated_at": float(row[3]),
+    }
+
+
+def save_session_explanation(
+    conn: sqlite3.Connection,
+    session_id: int,
+    body: str,
+    author: str = "claude",
+) -> dict:
+    """Записать/переписать разбор сессии. created_at первой записи сохраняется."""
+    now = time.time()
+    existing = conn.execute(
+        "SELECT created_at FROM session_explanations WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    created = float(existing[0]) if existing else now
+    conn.execute(
+        "INSERT INTO session_explanations "
+        "(session_id, body, author, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(session_id) DO UPDATE SET "
+        "body = excluded.body, author = excluded.author, updated_at = excluded.updated_at",
+        (session_id, body, author, created, now),
+    )
+    conn.commit()
+    return {
+        "session_id": int(session_id),
+        "body": body,
+        "author": author,
+        "created_at": created,
+        "updated_at": now,
+    }
+
+
+def delete_session_explanation(conn: sqlite3.Connection, session_id: int) -> bool:
+    """Удалить разбор. False, если его и не было."""
+    cur = conn.execute(
+        "DELETE FROM session_explanations WHERE session_id = ?", (session_id,)
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def set_session_has_audio(

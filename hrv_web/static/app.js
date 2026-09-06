@@ -862,6 +862,16 @@ function noteBodyHtml(body) {
   return escapeHtml(body).replace(/\n/g, "<br>");
 }
 
+function explanationBodyHtml(body) {
+  // Разбор — связный текст, а не заметка: одиночный перенос строки в исходнике
+  // не должен становиться <br> (в заметках Романа — должен, там так пишется).
+  if (!body) return "";
+  if (typeof marked === "undefined") return escapeHtml(body).replace(/\n/g, "<br>");
+  ensureNoteMarkdown();
+  const html = marked.parse(body, { async: false, breaks: false });
+  return typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(html) : html;
+}
+
 function renderNoteContentHtml(raw) {
   const notes = (raw || "").trim();
   if (!notes) return '<span class="note-empty">—</span>';
@@ -1764,7 +1774,9 @@ async function loadArchive() {
     const isActive = !s.ended;
     const tr = document.createElement("tr");
     tr.innerHTML =
-      `<td style="color:var(--text-dim);font-family:var(--mono);font-size:.8rem">${s.id}</td>` +
+      `<td style="color:var(--text-dim);font-family:var(--mono);font-size:.8rem">${s.id}` +
+      (s.has_explanation ? `<span class="expl-badge" title="Есть разбор Claude">разбор</span>` : "") +
+      `</td>` +
       `<td>${escapeHtml(s.participant || "")}</td>` +
       `<td>${tagPill(s.tag)}</td>` +
       `<td>${noteTagsHtml(tags)}</td>` +
@@ -1838,6 +1850,37 @@ function renderArchNotes(sum) {
   if (editBtn) {
     editBtn.textContent = body || tags.length ? "Изменить" : "Добавить";
   }
+}
+
+function renderArchExplanation(sum) {
+  const block = $("arch_expl_block");
+  const textEl = $("arch_expl_text");
+  const metaEl = $("arch_expl_meta");
+  const editBtn = $("btn_edit_arch_expl");
+  const delBtn = $("btn_delete_arch_expl");
+  if (!block || !textEl) return;
+  block.hidden = false;
+  const expl = sum?.explanation || null;
+  const body = (expl?.body || "").trim();
+  block.classList.toggle("is-empty", !body);
+  if (body) {
+    textEl.innerHTML = `<div class="note-md">${explanationBodyHtml(body)}</div>`;
+  } else {
+    textEl.innerHTML =
+      '<span class="note-empty">Разбора нет. Попросите Claude объяснить эту сессию по номеру ' +
+      `— он запишет разбор сюда (сессия ${sum?.id ?? "—"}).</span>`;
+  }
+  if (metaEl) {
+    if (expl?.updated_at) {
+      metaEl.hidden = false;
+      metaEl.textContent = `${expl.author || "claude"} · обновлено ${fmtTime(expl.updated_at)}`;
+    } else {
+      metaEl.hidden = true;
+      metaEl.textContent = "";
+    }
+  }
+  if (editBtn) editBtn.textContent = body ? "Изменить" : "Написать вручную";
+  if (delBtn) delBtn.hidden = !body;
 }
 
 function renderSummaryGrid(sum) {
@@ -2127,6 +2170,8 @@ async function openArchiveSession(id) {
     $("arch_summary_grid").innerHTML = "<p style='color:var(--text-dim);font-size:.8rem'>Сводка недоступна (сессия ещё идёт?)</p>";
     const notesBlock = $("arch_notes_block");
     if (notesBlock) notesBlock.hidden = true;
+    const explBlock = $("arch_expl_block");
+    if (explBlock) explBlock.hidden = true;
   }
 
   let analysis = null;
@@ -2146,6 +2191,7 @@ async function openArchiveSession(id) {
   if (sum) {
     archSummaryCache = sum;
     renderSummaryGrid(sum);
+    renderArchExplanation(sum);
     renderArchNotes(sum);
   } else {
     ensureArchAudioPlayer()?.load(null, false);
@@ -2183,6 +2229,102 @@ $("btn_edit_arch_notes")?.addEventListener("click", (e) => {
     fromArchive: true,
     sessionName: archSummaryCache.session_name,
   });
+});
+
+// ── Разбор сессии (пишет Claude, правится здесь) ──────────────────────────
+const EXPL_MAX_LEN = 20000;
+let _explModalSessionId = null;
+
+function closeSessionExplModal() {
+  $("session_expl_modal")?.classList.remove("visible");
+  _explModalSessionId = null;
+}
+
+function showSessionExplModal(sessionId, body) {
+  const modal = $("session_expl_modal");
+  const input = $("session_expl_input");
+  if (!modal || !input) return;
+  _explModalSessionId = sessionId;
+  const idEl = $("session_expl_id");
+  if (idEl) idEl.textContent = String(sessionId);
+  input.value = body || "";
+  updateExplCounter();
+  input.oninput = () => updateExplCounter();
+  modal.classList.add("visible");
+  input.focus();
+}
+
+function updateExplCounter() {
+  const countEl = $("expl_char_count");
+  const input = $("session_expl_input");
+  if (!countEl || !input) return;
+  const len = (input.value || "").length;
+  countEl.textContent = String(len);
+  countEl.style.color = len > EXPL_MAX_LEN ? "var(--danger)" : "var(--text-muted)";
+}
+
+async function saveSessionExplanation() {
+  const sessionId = _explModalSessionId;
+  if (!sessionId) {
+    closeSessionExplModal();
+    return;
+  }
+  const text = ($("session_expl_input")?.value || "").trim();
+  if (text.length > EXPL_MAX_LEN) {
+    setErr(`Разбор слишком длинный: ${text.length}/${EXPL_MAX_LEN}.`);
+    return;
+  }
+  try {
+    if (!text) {
+      await api(`/api/sessions/${sessionId}/explanation`, { method: "DELETE" });
+      if (archSummaryCache?.id === sessionId) archSummaryCache.explanation = null;
+    } else {
+      const res = await api(`/api/sessions/${sessionId}/explanation`, {
+        method: "PUT",
+        body: JSON.stringify({ body: text, author: "roman" }),
+      });
+      if (archSummaryCache?.id === sessionId) {
+        archSummaryCache.explanation = res.explanation || null;
+      }
+    }
+    closeSessionExplModal();
+    if (archSummaryCache?.id === sessionId) renderArchExplanation(archSummaryCache);
+    loadArchive().catch(() => {});
+  } catch (e) {
+    setErr(String(e.message || e));
+  }
+}
+
+async function deleteSessionExplanation(sessionId) {
+  if (!confirm(`Удалить разбор сессии ${sessionId}?`)) return;
+  try {
+    await api(`/api/sessions/${sessionId}/explanation`, { method: "DELETE" });
+    if (archSummaryCache?.id === sessionId) {
+      archSummaryCache.explanation = null;
+      renderArchExplanation(archSummaryCache);
+    }
+    loadArchive().catch(() => {});
+  } catch (e) {
+    setErr(String(e.message || e));
+  }
+}
+
+$("btn_edit_arch_expl")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!archSummaryCache?.id) return;
+  showSessionExplModal(archSummaryCache.id, archSummaryCache.explanation?.body || "");
+});
+
+$("btn_delete_arch_expl")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!archSummaryCache?.id) return;
+  deleteSessionExplanation(archSummaryCache.id);
+});
+
+$("session_expl_save")?.addEventListener("click", () => saveSessionExplanation());
+$("session_expl_cancel")?.addEventListener("click", () => closeSessionExplModal());
+$("session_expl_modal")?.addEventListener("click", (e) => {
+  if (e.target === $("session_expl_modal")) closeSessionExplModal();
 });
 
 $("arch_rmssd_mode")?.addEventListener("change", () => {

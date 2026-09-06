@@ -1198,6 +1198,60 @@
       line-height: 1.55;
       color: var(--text);
     }
+    .arch-expl-block {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 8px;
+      padding: 16px 18px;
+      margin-bottom: 20px;
+    }
+    .arch-expl-block.is-empty {
+      border-left-color: var(--border2);
+    }
+    .arch-expl-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .arch-expl-block .s-label {
+      font-family: var(--mono);
+      font-size: 0.6rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 0;
+    }
+    .arch-expl-block.is-empty .s-label { color: var(--text-dim); }
+    .arch-expl-meta {
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      color: var(--text-muted);
+      margin-top: 10px;
+    }
+    .arch-expl-text {
+      font-size: 0.92rem;
+      line-height: 1.62;
+      color: var(--text);
+      max-width: 76ch;
+    }
+    .arch-expl-text .note-md h2 { font-size: 1.0rem; }
+    .arch-expl-text .note-md h3 { font-size: 0.94rem; }
+    .expl-badge {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 6px;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 0.58rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
     .note-tags-row {
       margin-bottom: 6px;
     }
@@ -1749,6 +1803,17 @@
         <div class="card-body">
           <div class="status-bar" id="arch_status"></div>
           <div class="err-bar" id="arch_err"></div>
+          <div class="arch-expl-block" id="arch_expl_block" hidden>
+            <div class="arch-expl-header">
+              <div class="s-label">Разбор сессии · пишет Claude</div>
+              <div style="display:flex;gap:8px">
+                <button type="button" class="btn btn-secondary" id="btn_edit_arch_expl" style="font-size:.72rem;padding:4px 12px">Изменить</button>
+                <button type="button" class="btn btn-danger" id="btn_delete_arch_expl" style="font-size:.72rem;padding:4px 12px" hidden>Удалить</button>
+              </div>
+            </div>
+            <div class="arch-expl-text" id="arch_expl_text"></div>
+            <div class="arch-expl-meta" id="arch_expl_meta" hidden></div>
+          </div>
           <div class="summary-grid" id="arch_summary_grid"></div>
           <div class="arch-notes-block" id="arch_notes_block" hidden>
             <div class="arch-notes-header">
@@ -1968,6 +2033,23 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="session_expl_modal" role="dialog" aria-modal="true" aria-labelledby="session_expl_title">
+  <div class="modal-card" style="width:min(760px,100%)">
+    <div class="modal-title">Сессия #<span id="session_expl_id"></span></div>
+    <h2 id="session_expl_title">Разбор сессии</h2>
+    <p class="modal-desc">
+      Что происходило на этой записи — словами. Разбор пишет Claude; поле заметок
+      остаётся за Романом и здесь не трогается. Markdown поддерживается.
+    </p>
+    <textarea id="session_expl_input" style="min-height:320px;font-family:var(--mono);font-size:.82rem" placeholder="Что было видно на графиках и что это значит — без нагромождения цифр." maxlength="20000"></textarea>
+    <div style="font-size:0.7rem;color:var(--text-muted);text-align:right;margin-top:4px"><span id="expl_char_count">0</span>/20000</div>
+    <div class="modal-actions">
+      <button type="button" class="btn" id="session_expl_cancel">Отмена</button>
+      <button type="button" class="btn btn-primary" id="session_expl_save">Сохранить</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
 <script src="/assets/theme.js?v=1"></script>
@@ -1979,6 +2061,6 @@
 <script src="/assets/session_audio_player.js?v=7"></script>
 <script src="/assets/chart_zoom.js?v=1"></script>
 <script src="/assets/analysis_charts.js?v=11"></script>
-<script src="/assets/app.js?v=33"></script>
+<script src="/assets/app.js?v=34"></script>
 </body>
 </html>

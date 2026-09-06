@@ -287,6 +287,7 @@ hrv_accel_batches (id, session_id, ts, hz, n_samples, data)  -- data: blob int16
 baseline        (hour, rmssd_mean, n_samples, updated_at)   -- hour 0–23
 session_types   (slug, label, phrase_prefix, mock_profile, chart_profile, is_custom)
 meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_before, …)
+session_explanations (session_id PK, body, author, created_at, updated_at)
 
 ix_hrv_points_session_ts        ON hrv_points(session_id, ts)
 ix_hrv_accel_batches_session_ts ON hrv_accel_batches(session_id, ts)
@@ -310,6 +311,13 @@ ix_phrase_log_session           ON meditation_phrase_log(session_id)
 не было вовсе. Отличить старую сессию от новой, где PMD просто не ответил
 (`accel_missing`), эта колонка не может — для этого смотреть строки в
 `hrv_accel_batches`.
+
+`session_explanations`: разбор сессии — связный текст (markdown), который Claude
+пишет по номеру сессии, чтобы графики читались словами. Отдельная таблица, а не
+поле в `sessions`, намеренно: `session_name` — заметки испытуемого, и когда туда
+однажды положили разбор от Claude (сессии 91–93), авторство текста восстановить
+уже было нечем. Одна запись на сессию (перезапись меняет `body`/`updated_at`,
+`created_at` сохраняется), удаляется вместе с сессией и при очистке истории.
 
 **Файлы:** `session_audio/{session_id}.webm` — записи микрофона рядом с БД.
 
@@ -351,6 +359,9 @@ ix_phrase_log_session           ON meditation_phrase_log(session_id)
 | `/api/sessions/{id}` | GET/DELETE | Summary завершённой сессии / удаление (+ файл аудио) |
 | `/api/sessions/{id}/audio` | PUT | Сохранить запись микрофона (raw body webm/ogg, после stop) |
 | `/api/sessions/{id}/audio` | GET | Отдать файл записи (`audio/webm`) |
+| `/api/sessions/{id}/explanation` | GET | Разбор сессии (`{"explanation": {...}\|null}`) |
+| `/api/sessions/{id}/explanation` | PUT | Записать разбор. Тело — JSON `{body, author}` **или** сырой markdown (тогда автор из `?author=`); лимит 20 000 символов |
+| `/api/sessions/{id}/explanation` | DELETE | Удалить разбор |
 | `/api/sessions/{id}/points` | GET | Точки (с downsampling) |
 | `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); `max_points` |
 | `/api/sessions/{id}/breathing` | GET | Post-session дыхание из акселерометра (см. § «Дыхание из акселерометра»); `max_points` |
@@ -361,6 +372,15 @@ ix_phrase_log_session           ON meditation_phrase_log(session_id)
 | `/api/meditation/phrase-manifest` | GET | Список mp3 в `static/phrases/{prefix}/{set}/` |
 | `/api/meditation/phrase-log` | POST/PATCH | Лог воспроизведения guided-фраз |
 | `/api/meditation/phrase-stats` | GET | Статистика фраз по `session_id` |
+
+Разбор приходит и внутри `GET /api/sessions/{id}` (поле `explanation`), а в
+списке сессий есть флаг `has_explanation` — UI не делает лишнего запроса.
+Записать разбор из терминала:
+
+```bash
+curl -X PUT --data-binary @разбор.md -H 'Content-Type: text/markdown' \
+  'http://127.0.0.1:8765/api/sessions/219/explanation?author=claude'
+```
 
 Одновременно допускается **только одна активная сессия** (409 Conflict при повторном старте).
 

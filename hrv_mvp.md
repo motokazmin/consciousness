@@ -102,6 +102,7 @@ hrv_points      (id, session_id, ts, rr_ms, rmssd)
 baseline        (hour, rmssd_mean, n_samples, updated_at)  -- hour 0–23, локальное время
 session_types   (slug, label, phrase_prefix, mock_profile, chart_profile, is_custom)
 meditation_phrase_log (…)  -- лог guided mp3-фраз (meditation / relaxation)
+session_explanations (session_id, body, author, created_at, updated_at)  -- разбор словами
 ```
 
 ### Тегирование сессий
@@ -382,12 +383,20 @@ python -m hrv_web
 
 После завершения сессии доступны графики Poincaré, спектр FFT, SDNN и (опционально) RMSSD. Подробная интерпретация: [explain.md](explain.md).
 
+**Разбор сессии.** Над сводкой в «Архиве» — блок «Разбор сессии · пишет Claude»:
+связный текст о том, что происходило на этой записи. Пишет его Claude по номеру
+сессии (`PUT /api/sessions/{id}/explanation`), правится и удаляется прямо в
+карточке сессии; в списке сессий такие записи помечены значком «разбор».
+Заметки Романа (`session_name`) — отдельное поле и отдельный блок, разбор их не
+трогает.
+
 ### API
 
 | Endpoint | Назначение |
 |----------|------------|
 | `GET /api/sessions/{id}/analysis` | Полный анализ одной сессии |
 | `GET /api/progress/analysis` | Overlay нескольких сессий (фильтры: период, тип, теги заметок, участник) |
+| `GET/PUT/DELETE /api/sessions/{id}/explanation` | Разбор сессии словами (PUT принимает сырой markdown) |
 
 Параметры анализа:
 
