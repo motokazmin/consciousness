@@ -13,7 +13,11 @@ ALREADY_IN_STATE) — значит измерение реально запус�
 разбор разошёлся с реальностью, если разошёлся.
 
 Запуск (ремень надет, не занят другим клиентом BLE):
-    python -m hrv_core.pmd_check [--mac AA:BB:..] [--seconds 30]
+    python -m hrv_core.pmd_check [--mac AA:BB:..] [--seconds 30] [--dump raw.csv]
+
+`--dump PATH` сохраняет все принятые отсчёты в CSV (сырьё, не только пик по
+Уэлчу — см. `_write_dump`): пригодится, если понадобится разобрать запись
+другим способом, чем текущая диагностика дыхания.
 
 Тестами не покрыта: живой BLE в тестах не участвует (см. tests/).
 """
@@ -22,8 +26,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import sys
 import time
+from pathlib import Path
 
 from hrv_core.ble_scan import (
     bleak_adapter_kwargs,
@@ -45,8 +51,43 @@ from hrv_core.pmd import (
 # Печатать снимок счётчиков кадров/отсчётов каждые столько секунд.
 SNAPSHOT_EVERY_SEC = 5.0
 
+DumpRow = tuple[int, int, int | None, float, int, int, int]
 
-async def check(mac: str | None, seconds: float) -> int:
+
+def _write_dump(
+    path: Path,
+    rows: list[DumpRow],
+    requested_hz: float,
+    measured_hz: float | None,
+    total_frames: int,
+    total_samples: int,
+    measured_window: float | None,
+    first_frame_wall_time: float | None,
+) -> None:
+    """Все принятые отсчёты в CSV — пик по Уэлчу не единственный способ
+    разобрать запись, а печатью в терминал прогон не сохраняется.
+
+    Первая строка — комментарий `#` с метаданными прогона, включая
+    `time.time()` первого кадра с отсчётами (привязать запись к внешним
+    событиям по стенным часам). Дальше — обычный CSV с заголовком."""
+    measured_txt = f"{measured_hz:.2f}" if measured_hz is not None else "н/д"
+    window_txt = f"{measured_window:.1f}" if measured_window is not None else "н/д"
+    wall_txt = f"{first_frame_wall_time:.3f}" if first_frame_wall_time is not None else "н/д"
+    with path.open("w", newline="") as f:
+        f.write(
+            f"# requested_hz={requested_hz:.0f} measured_hz={measured_txt} "
+            f"total_frames={total_frames} total_samples={total_samples} "
+            f"stream_window_s={window_txt} first_frame_wall_time={wall_txt}\n"
+        )
+        writer = csv.writer(f)
+        writer.writerow(
+            ["frame_idx", "sample_idx", "device_ts_ns", "host_monotonic", "x", "y", "z"]
+        )
+        writer.writerows(rows)
+    print(f"\nДамп отсчётов: {path} ({len(rows)} строк)")
+
+
+async def check(mac: str | None, seconds: float, dump: Path | None = None) -> int:
     from bleak import BleakClient
 
     if mac is None:
@@ -99,7 +140,23 @@ async def check(mac: str | None, seconds: float) -> int:
         def on_batch(batch_ts: float, samples: list[tuple[int, int, int]], hz: float) -> None:
             batches.append((batch_ts, samples, hz))
 
-        stream = PmdAccStream(client, on_batch, on_event=print)
+        dump_rows: list[DumpRow] = []
+        first_frame_wall_time: list[float] = []  # 0 или 1 элемент — проще, чем nonlocal
+
+        def on_frame(
+            frame_idx: int,
+            device_ts_ns: int | None,
+            host_monotonic: float,
+            samples: list[tuple[int, int, int]],
+        ) -> None:
+            if not first_frame_wall_time:
+                first_frame_wall_time.append(time.time())
+            for sample_idx, (x, y, z) in enumerate(samples):
+                dump_rows.append((frame_idx, sample_idx, device_ts_ns, host_monotonic, x, y, z))
+
+        stream = PmdAccStream(
+            client, on_batch, on_event=print, on_frame=on_frame if dump else None
+        )
 
         print("\n=== Маска возможностей и договор о частоте акселерометра ===")
         t0 = time.time()
@@ -132,6 +189,15 @@ async def check(mac: str | None, seconds: float) -> int:
         for _, s, _ in batches:
             samples.extend(s)
 
+        measured_hz = stream.measured_hz
+        measured_window = stream.measured_window_s
+
+        if dump:
+            _write_dump(
+                dump, dump_rows, hz, measured_hz, stream.total_frames, stream.total_samples,
+                measured_window, first_frame_wall_time[0] if first_frame_wall_time else None,
+            )
+
         print(f"\nИтого за {elapsed:.1f}s: кадров {stream.total_frames}, "
               f"отсчётов {stream.total_samples} (из них в пачках для БД: {len(samples)})")
         if stream.total_samples == 0:
@@ -141,14 +207,23 @@ async def check(mac: str | None, seconds: float) -> int:
                   "дал кадры, если хоть один.")
             return 5
 
-        fs_actual = stream.total_samples / elapsed
-        print(f"фактическая частота (отсчётов/время): {fs_actual:.1f} Гц "
-              f"(запрошено {hz:.0f} Гц)")
-        if hz and abs(fs_actual - hz) / hz > 0.20:
+        if measured_hz is None:
+            print(
+                "фактическую частоту потока измерить не удалось (кадров с отсчётами "
+                "меньше двух, или интервал между первым и последним нулевой) — "
+                "пропускаю диагностику дыхания."
+            )
+            return 0
+        print(
+            f"фактическая частота (по кадрам потока): {measured_hz:.1f} Гц "
+            f"(запрошено {hz:.0f} Гц, окно измерения {measured_window:.1f}s из "
+            f"{elapsed:.1f}s общего времени команды)"
+        )
+        if hz and abs(measured_hz - hz) / hz > 0.20:
             print(
                 "ВНИМАНИЕ: фактическая частота расходится с запрошенной больше чем на "
-                "20% — вероятный признак того, что разбор дельта-кадров даёт неверное "
-                "число отсчётов (см. hex кадров выше)."
+                "20% — механика потока (потери кадров, троттлинг BLE), не разбор кадров: "
+                "он проверен отдельно (см. hex кадров выше)."
             )
 
         if not samples:
@@ -167,16 +242,34 @@ async def check(mac: str | None, seconds: float) -> int:
         for name, mean, std, lo, hi in arr_stats:
             print(f"  {name}: среднее {mean:8.0f}  разброс {std:7.1f}  диапазон [{lo}, {hi}]")
 
-        br = breathing_from_acc(samples, fs_actual)
+        br = breathing_from_acc(samples, measured_hz)
         if br is None:
             print("\nОтсчётов мало для оценки дыхания (это диагностика, не метрика — "
                   "в БД и на графики не идёт).")
             return 0
         print(
-            f"\nДиагностика дыхания (не метрика, только для проверки на слух/на глаз): "
-            f"ось {br['axis']}, {br['cpm']:.1f} цикл/мин, "
-            f"доля дыхательной полосы в мощности {br['band_share_pct']:.0f}%."
+            f"\nДиагностика дыхания по окнам (не метрика, только для проверки на "
+            f"слух/на глаз, в БД и на графики не идёт). Окно {br['window_sec']:.0f}с, "
+            f"шаг 30с, оценка квантована шагом {br['bin_cpm']:.1f} цикл/мин:"
         )
+        for w in br["windows"]:
+            mark = "БРАК (движение)" if w["rejected"] else "ок"
+            print(
+                f"  [{w['t_start_sec']:6.0f}–{w['t_end_sec']:6.0f}s] ось {w['axis']}  "
+                f"{w['cpm']:5.1f} цикл/мин  полоса {w['band_share_pct']:4.0f}%  "
+                f"ампл {w['amp_mg']:6.1f} мг  {mark}"
+            )
+        if br["cpm_median"] is None:
+            print(
+                f"\nВсе {br['n_windows']} окон забракованы по движению — устойчивой "
+                "оценки дыхания на этом прогоне нет."
+            )
+        else:
+            print(
+                f"\nИтог по {br['n_quiet']}/{br['n_windows']} спокойным окнам: "
+                f"медиана {br['cpm_median']:.1f} цикл/мин "
+                f"(разброс {br['cpm_min']:.1f}–{br['cpm_max']:.1f})."
+            )
         print("Сверить с тем, как Роман дышал в эти секунды.")
     return 0
 
@@ -185,9 +278,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mac", help="MAC датчика, если не искать сканированием")
     ap.add_argument("--seconds", type=float, default=30.0, help="длина проверки потока")
+    ap.add_argument(
+        "--dump", type=Path, default=None,
+        help="сохранить все принятые отсчёты в CSV по этому пути (по умолчанию не пишем)",
+    )
     args = ap.parse_args()
     try:
-        sys.exit(asyncio.run(check(args.mac, args.seconds)))
+        sys.exit(asyncio.run(check(args.mac, args.seconds, args.dump)))
     except Exception as exc:  # проверочная команда: важен диагноз, не стектрейс
         hint = format_bleak_connect_error(exc)
         print(f"Не удалось: {exc}")

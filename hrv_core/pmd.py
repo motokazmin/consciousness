@@ -338,44 +338,146 @@ def parse_acc_frame(payload: bytes) -> list[tuple[int, int, int]]:
     return [struct.unpack_from("<hhh", body, i * 6) for i in range(n)]
 
 
-def breathing_from_acc(samples: list[tuple[int, int, int]], fs: float) -> dict | None:
-    """Доминирующая частота движения грудной клетки в дыхательной полосе.
+def frame_timestamp_ns(payload: bytes) -> int | None:
+    """Метка времени устройства из заголовка кадра — байты 1..8, uint64 LE,
+    наносекунды (формат заголовка — см. `parse_acc_frame`). None, если кадр
+    короче заголовка. Часы устройства не подвержены дрожанию BLE-планировщика
+    хоста, поэтому интервал между двумя такими метками — более точная оценка
+    частоты потока, чем интервал по хостовому `time.monotonic()`."""
+    if len(payload) < 9:
+        return None
+    return int.from_bytes(payload[1:9], "little")
 
-    Только для проверочной команды (`pmd_check`) — вывод человеку, не пишется
-    в БД и не участвует в live-графиках или post-session анализе.
-    """
+
+# Отбраковка окон по движению: во сколько раз амплитуда окна (std сырого
+# сигнала выбранной оси, мг) должна превысить медианную амплитуду по всем
+# окнам прогона, чтобы окно посчиталось «не дыханием, а движением». На живом
+# прогоне 2026-09-06 спокойные окна дали ~20 мг, окно посадки — ~158 мг
+# (разница ×7.9). Порог ×3 берёт запас втрое меньше этого разрыва — ловит
+# явное движение, но не задевает обычный разброс амплитуды дыхания между
+# окнами (тот на порядок меньше).
+MOTION_REJECT_FACTOR = 3.0
+
+
+def _breath_window_estimate(seg, fs: float) -> dict | None:
+    """Оценка дыхания по одному окну отсчётов. `seg` — (N, 3) отсчёты в мг.
+
+    Логика окна не изменилась с прежней (единственной) оценки по всему
+    прогону — она просто теперь применяется к куску записи, а не к нему
+    целиком."""
     import numpy as np
     from scipy.signal import detrend, welch
 
-    if len(samples) < int(fs * 20):
+    decim = max(1, int(round(fs / 10.0)))
+    n_decim = (len(seg) // decim) * decim
+    if n_decim < decim * 2:
         return None
-    arr = np.asarray(samples, dtype=float)
     # Ось с наибольшей медленной изменчивостью и есть ось дыхания: её выбирает
     # то, как ремень сидит на груди, а не наши предположения.
-    decim = max(1, int(round(fs / 10.0)))
     slow = np.stack([
-        detrend(arr[: len(arr) // decim * decim, k].reshape(-1, decim).mean(axis=1))
+        detrend(seg[:n_decim, k].reshape(-1, decim).mean(axis=1))
         for k in range(3)
     ])
     fs_slow = fs / decim
     axis = int(np.argmax(slow.std(axis=1)))
     sig = slow[axis]
-    nper = min(len(sig), int(fs_slow * 60))
+    nper = len(sig)
+    if nper < 2:
+        return None
     freqs, power = welch(sig, fs=fs_slow, nperseg=nper)
     band = (freqs >= BREATH_BAND[0]) & (freqs <= BREATH_BAND[1])
     if not band.any():
         return None
     peak = freqs[band][int(np.argmax(power[band]))]
     share = float(power[band].sum() / power[1:].sum()) if power[1:].sum() else 0.0
+    window_sec = nper / fs_slow
     return {
         "axis": "XYZ"[axis],
         "cpm": peak * 60.0,
         "band_share_pct": share * 100.0,
-        "fs_slow": fs_slow,
+        # Шаг сетки Уэлча (freqs[1] - freqs[0] = fs_slow/nper) в цикл/мин —
+        # cpm выше квантован этим шагом, не непрерывная величина.
+        "bin_cpm": 60.0 / window_sec,
+        "window_sec": window_sec,
+        # Амплитуда движения в окне — std сырого (не децимированного, не
+        # детрендированного) сигнала выбранной оси: дыхание даёт единицы-
+        # десятки мг, посадка/поправление ремня — на порядок больше.
+        "amp_mg": float(np.std(seg[:, axis])),
+    }
+
+
+def breathing_from_acc(
+    samples: list[tuple[int, int, int]],
+    fs: float,
+    *,
+    window_sec: float = 60.0,
+    step_sec: float = 30.0,
+) -> dict | None:
+    """Оценка частоты дыхания по акселерометру — по скользящим окнам, не по
+    всему прогону разом.
+
+    Одно число по всему прогону врёт, если в записи есть движение (сесть,
+    поправиться): секунды движения на порядок превышают дыхательную амплитуду
+    и забирают пик спектра себе (живые прогоны 2026-09-06: 28.0 и 3.0 цикл/мин
+    вместо правильных 17-19 и 10-12 по спокойным участкам). Поэтому здесь
+    считается отдельная оценка на каждое окно `window_sec` с шагом `step_sec`,
+    окна с амплитудой движения выше `MOTION_REJECT_FACTOR` × медианы по всем
+    окнам бракуются, а итоговое число — медиана только по не забракованным.
+
+    Только для проверочной команды (`pmd_check`) — вывод человеку, не пишется
+    в БД и не участвует в live-графиках или post-session анализе.
+    """
+    import numpy as np
+
+    # Минимум данных для хоть одной оценки: как раньше, 20с — если запись
+    # короче окна `window_sec`, оценивается всё, что есть, но не меньше этого.
+    if len(samples) < int(fs * min(window_sec, 20.0)):
+        return None
+    arr = np.asarray(samples, dtype=float)
+    n = len(arr)
+    win_n = min(n, int(round(fs * window_sec)))
+    step_n = max(1, int(round(fs * step_sec)))
+
+    # По построению start+win_n никогда не превышает n — каждый seg ровно
+    # win_n отсчётов (либо вся запись целиком, если она короче окна), хвостов
+    # короче окна не бывает.
+    windows = []
+    for start in range(0, max(1, n - win_n + 1), step_n):
+        seg = arr[start:start + win_n]
+        est = _breath_window_estimate(seg, fs)
+        if est is None:
+            continue
+        windows.append({
+            "t_start_sec": start / fs,
+            "t_end_sec": (start + len(seg)) / fs,
+            **est,
+        })
+    if not windows:
+        return None
+
+    median_amp = float(np.median([w["amp_mg"] for w in windows]))
+    for w in windows:
+        w["rejected"] = median_amp > 0 and w["amp_mg"] > MOTION_REJECT_FACTOR * median_amp
+
+    quiet = [w for w in windows if not w["rejected"]]
+    quiet_cpm = [w["cpm"] for w in quiet]
+    return {
+        "windows": windows,
+        "window_sec": windows[0]["window_sec"],
+        "bin_cpm": windows[0]["bin_cpm"],
+        "n_windows": len(windows),
+        "n_quiet": len(quiet),
+        "cpm_median": float(np.median(quiet_cpm)) if quiet_cpm else None,
+        "cpm_min": float(min(quiet_cpm)) if quiet_cpm else None,
+        "cpm_max": float(max(quiet_cpm)) if quiet_cpm else None,
     }
 
 
 OnAccelBatch = Callable[[float, list[tuple[int, int, int]], float], None]
+# frame_idx (1-based, = PmdAccStream.total_frames в момент кадра),
+# device_ts_ns (метка времени устройства, None если не разобралась),
+# host_monotonic (time.monotonic() приёма кадра), отсчёты кадра.
+OnAccelFrame = Callable[[int, int | None, float, list[tuple[int, int, int]]], None]
 
 
 class PmdAccStream:
@@ -384,6 +486,12 @@ class PmdAccStream:
     Второе BLE-соединение к H10 не открывается — акселерометр подписывается на
     том же клиенте, что и HR notify. Копит отсчёты и отдаёт их пачками
     (`on_batch(batch_ts, samples, hz)`) примерно раз в секунду, а не по одному.
+
+    `on_frame` — необязательный хук пожёстче: вызывается на КАЖДЫЙ кадр,
+    реально принёсший отсчёты (не только на первые несколько для диагностики,
+    и не порциями раз в секунду, как `on_batch`, у которого хвост буфера может
+    не успеть слиться до `stop()`). Нужен `pmd_check --dump` — сырому дампу
+    важны все отсчёты без потерь на границе буфера. В боевой записи не задан.
 
     Любая ошибка здесь — PmdError (или подкласс `PmdPairingRequiredError`).
     RR от этого класса не зависит: вызывающая сторона (`PolarH10Source`)
@@ -397,12 +505,14 @@ class PmdAccStream:
         *,
         candidate_hz: tuple[int, ...] = ACC_CANDIDATE_HZ,
         on_event: Callable[[str], None] | None = None,
+        on_frame: OnAccelFrame | None = None,
         first_frames_kept: int = 3,
     ):
         self._client = client
         self._on_batch = on_batch
         self._candidate_hz = candidate_hz
         self._on_event = on_event or (lambda _msg: None)
+        self._on_frame = on_frame or (lambda *_a: None)
         self._control_replies: list[bytes] = []
         self._buffer: list[tuple[int, int, int]] = []
         self._buffer_ts: float | None = None
@@ -412,6 +522,14 @@ class PmdAccStream:
         self.total_samples = 0
         self._first_frames_kept = first_frames_kept
         self.first_frames_raw: list[bytes] = []
+        # Для measured_hz: отсчитываем от первого кадра, реально принёсшего
+        # отсчёты, до последнего такого же — отсчёты самого первого кадра в
+        # числитель не идут (накопились ещё до отметки времени первого кадра).
+        self._measured_first_t: float | None = None
+        self._measured_last_t: float | None = None
+        self._measured_first_ns: int | None = None
+        self._measured_last_ns: int | None = None
+        self._measured_extra_samples = 0
 
     def _on_control(self, _handle, data) -> None:
         raw = bytes(data)
@@ -437,11 +555,64 @@ class PmdAccStream:
         if not samples:
             return
         self._frames_seen += 1
+        now = time.monotonic()
+        device_ns = frame_timestamp_ns(raw)
+        if self._measured_first_t is None:
+            self._measured_first_t = now
+            self._measured_first_ns = device_ns
+        else:
+            self._measured_extra_samples += len(samples)
+        self._measured_last_t = now
+        self._measured_last_ns = device_ns
+        self._on_frame(self.total_frames, device_ns, now, samples)
         if self._buffer_ts is None:
             self._buffer_ts = time.time()
         self._buffer.extend(samples)
         if self._hz and len(self._buffer) >= self._hz:
             self._flush()
+
+    def _measured_hz_and_window(self) -> tuple[float, float] | None:
+        """(частота, длительность окна в секундах) по кадрам с отсчётами, или
+        None, если такой кадр был один или интервал ≤ 0.
+
+        Предпочитаем метку времени устройства (`frame_timestamp_ns`) — она не
+        дрожит от BLE-планировщика хоста; откатываемся на хостовые часы, если
+        меток нет или интервал по ним неправдоподобен (расходится с хостовым
+        больше чем в 1.5 раза — вероятный признак мусорной метки, а не падаем
+        с исключением)."""
+        if self._measured_first_t is None or self._measured_last_t is None:
+            return None
+        if self._measured_extra_samples <= 0:
+            return None
+        host_dt = self._measured_last_t - self._measured_first_t
+        if host_dt <= 0:
+            return None
+        host_hz = self._measured_extra_samples / host_dt
+        if self._measured_first_ns is not None and self._measured_last_ns is not None:
+            dt_ns = self._measured_last_ns - self._measured_first_ns
+            if dt_ns > 0:
+                device_dt = dt_ns / 1e9
+                device_hz = self._measured_extra_samples / device_dt
+                if device_hz > 0 and max(device_hz, host_hz) / min(device_hz, host_hz) <= 1.5:
+                    return device_hz, device_dt
+        return host_hz, host_dt
+
+    @property
+    def measured_hz(self) -> float | None:
+        """Фактическая частота потока по кадрам, реально принёсшим отсчёты —
+        не по времени всей команды (см. hrv_core/pmd_check.py: раньше `elapsed`
+        считался от начала переговоров с control point, из-за чего частота
+        занижалась вдвое)."""
+        stats = self._measured_hz_and_window()
+        return stats[0] if stats else None
+
+    @property
+    def measured_window_s(self) -> float | None:
+        """Длительность окна измерения `measured_hz` — интервал между первым и
+        последним кадром, реально принёсшим отсчёты (по той же метке времени,
+        что и сама частота: устройство или хост, см. `measured_hz`)."""
+        stats = self._measured_hz_and_window()
+        return stats[1] if stats else None
 
     def _flush(self) -> None:
         if not self._buffer or self._buffer_ts is None:

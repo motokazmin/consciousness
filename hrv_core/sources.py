@@ -263,6 +263,29 @@ class PolarH10Source(HRVSource):
         except Exception as exc:
             print(f"PMD акселерометр: ошибка при остановке (игнорирую): {exc}")
 
+    async def _maybe_repair_bond(self) -> None:
+        """Пересопряжение перед записью с акселерометром — ровно один раз на
+        запись (см. hrv_core/ble_repair.py: bond отдаёт PMD только в одном
+        BLE-соединении, и его расходует первое же успешное). Вызывается один
+        раз в начале `_loop`, до цикла (пере)подключений — сам цикл может
+        переподключаться сколько угодно, но пересопрягать нужно не чаще.
+
+        RR неприкосновенен: датчик не найден, bluetoothctl недоступен, таймаут
+        сопряжения — всё это логируется, запись продолжается без акселерометра
+        (PMD дальше сам откажет по месту, в `_start_pmd_accel`).
+        """
+        if self._acc_callback is None:
+            return
+        from hrv_core import ble_repair
+
+        print("PMD: пересопряжение ремня перед записью (~20с)…")
+        try:
+            ok = await asyncio.to_thread(ble_repair.repair, self.address)
+        except Exception as exc:
+            print(f"PMD: пересопряжение упало с исключением (продолжаю без акселерометра): {exc}")
+            return
+        print("PMD: пересопряжение ✓" if ok else "PMD: пересопряжение не удалось — дальше без акселерометра")
+
     async def _loop(self):
         from bleak import BleakClient
 
@@ -279,6 +302,8 @@ class PolarH10Source(HRVSource):
             return
 
         bt_kw = bleak_adapter_kwargs()
+
+        await self._maybe_repair_bond()
 
         while not self._session_stop.is_set():
             self._last_rr_ts = None
