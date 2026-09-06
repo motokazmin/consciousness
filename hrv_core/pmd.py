@@ -349,22 +349,22 @@ def frame_timestamp_ns(payload: bytes) -> int | None:
     return int.from_bytes(payload[1:9], "little")
 
 
-# Отбраковка окон по движению: во сколько раз амплитуда окна (std сырого
-# сигнала выбранной оси, мг) должна превысить медианную амплитуду по всем
-# окнам прогона, чтобы окно посчиталось «не дыханием, а движением». На живом
-# прогоне 2026-09-06 спокойные окна дали ~20 мг, окно посадки — ~158 мг
-# (разница ×7.9). Порог ×3 берёт запас втрое меньше этого разрыва — ловит
-# явное движение, но не задевает обычный разброс амплитуды дыхания между
-# окнами (тот на порядок меньше).
-MOTION_REJECT_FACTOR = 3.0
+# Нарезка на скользящие окна и правило браковки по движению — общие с
+# `hrv_core.breathing` (метрика дыхания для БД/графиков): порог не должен
+# разъезжаться между диагностикой здесь и расчётом там.
+from hrv_core.breathing import (  # noqa: E402  (после констант модуля, до использования)
+    iter_windows,
+    motion_reject_windows,
+)
 
 
 def _breath_window_estimate(seg, fs: float) -> dict | None:
     """Оценка дыхания по одному окну отсчётов. `seg` — (N, 3) отсчёты в мг.
 
-    Логика окна не изменилась с прежней (единственной) оценки по всему
-    прогону — она просто теперь применяется к куску записи, а не к нему
-    целиком."""
+    Только для диагностики (`pmd_check`) — пик спектра по Уэлчу, не по фазе
+    Гильберта: метрика для БД/графиков считается иначе, см.
+    `hrv_core.breathing` (там же — почему argmax спектра на слабом сигнале
+    ненадёжен для итоговой частоты, а не только для диагностики per-window)."""
     import numpy as np
     from scipy.signal import detrend, welch
 
@@ -420,12 +420,15 @@ def breathing_from_acc(
     поправиться): секунды движения на порядок превышают дыхательную амплитуду
     и забирают пик спектра себе (живые прогоны 2026-09-06: 28.0 и 3.0 цикл/мин
     вместо правильных 17-19 и 10-12 по спокойным участкам). Поэтому здесь
-    считается отдельная оценка на каждое окно `window_sec` с шагом `step_sec`,
-    окна с амплитудой движения выше `MOTION_REJECT_FACTOR` × медианы по всем
-    окнам бракуются, а итоговое число — медиана только по не забракованным.
+    считается отдельная оценка на каждое окно `window_sec` с шагом `step_sec`
+    (нарезка — `hrv_core.breathing.iter_windows`), окна с амплитудой движения
+    выше `MOTION_REJECT_FACTOR` × медианы по всем окнам бракуются
+    (`hrv_core.breathing.motion_reject_windows`), а итоговое число — медиана
+    только по не забракованным.
 
     Только для проверочной команды (`pmd_check`) — вывод человеку, не пишется
-    в БД и не участвует в live-графиках или post-session анализе.
+    в БД и не участвует в live-графиках или post-session анализе (для этого —
+    `hrv_core.breathing.analyze_breathing`, фаза Гильберта, не Уэлч).
     """
     import numpy as np
 
@@ -435,15 +438,10 @@ def breathing_from_acc(
         return None
     arr = np.asarray(samples, dtype=float)
     n = len(arr)
-    win_n = min(n, int(round(fs * window_sec)))
-    step_n = max(1, int(round(fs * step_sec)))
 
-    # По построению start+win_n никогда не превышает n — каждый seg ровно
-    # win_n отсчётов (либо вся запись целиком, если она короче окна), хвостов
-    # короче окна не бывает.
     windows = []
-    for start in range(0, max(1, n - win_n + 1), step_n):
-        seg = arr[start:start + win_n]
+    for start, end in iter_windows(n, fs, window_sec, step_sec):
+        seg = arr[start:end]
         est = _breath_window_estimate(seg, fs)
         if est is None:
             continue
@@ -455,9 +453,9 @@ def breathing_from_acc(
     if not windows:
         return None
 
-    median_amp = float(np.median([w["amp_mg"] for w in windows]))
-    for w in windows:
-        w["rejected"] = median_amp > 0 and w["amp_mg"] > MOTION_REJECT_FACTOR * median_amp
+    rejected = motion_reject_windows([w["amp_mg"] for w in windows])
+    for w, r in zip(windows, rejected):
+        w["rejected"] = r
 
     quiet = [w for w in windows if not w["rejected"]]
     quiet_cpm = [w["cpm"] for w in quiet]

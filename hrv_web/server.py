@@ -17,13 +17,15 @@ from pydantic import BaseModel, Field
 import numpy as np
 
 from hrv_core.analysis import progress_session_analysis, session_analysis, session_sd1
-from hrv_core.constants import DB_PATH, DEFAULT_OPT_ACC_RECORDING
+from hrv_core.breathing import analyze_breathing, decimate_for_transport
+from hrv_core.constants import DB_PATH
 from hrv_core.db import (
     delete_session,
     ensure_session_audio_dir,
     finalize_orphaned_sessions,
     finalize_session,
     init_db,
+    load_accel_samples,
     load_hour_baseline,
     session_audio_path,
     set_session_has_audio,
@@ -67,7 +69,6 @@ class StartSessionBody(BaseModel):
     opt_guided_phrases: bool = False
     opt_audio_biofeedback: bool = False
     opt_mic_recording: bool = False
-    opt_acc_recording: bool = DEFAULT_OPT_ACC_RECORDING
 
 
 class PhraseLogBody(BaseModel):
@@ -280,7 +281,6 @@ def start_session(body: StartSessionBody):
             opt_guided_phrases=body.opt_guided_phrases,
             opt_audio_biofeedback=body.opt_audio_biofeedback,
             opt_mic_recording=body.opt_mic_recording,
-            opt_acc_recording=body.opt_acc_recording,
         )
     except RuntimeError as e:
         if "already_running" in str(e):
@@ -293,6 +293,7 @@ def start_session(body: StartSessionBody):
         "first_beat_at": rs.first_beat_at,
         "duration_minutes": rs.duration_minutes,
         "tag": tag,
+        "device_state": rs.device_state,
     }
 
 
@@ -306,6 +307,9 @@ def recording_status():
         "session_id": active.session_id,
         "started_at": active.started_at,
         "first_beat_at": active.first_beat_at,
+        "device_state": active.device_state,
+        "accel_missing": active.accel_missing,
+        "last_accel_at": active.last_accel_at,
     }
 
 
@@ -645,6 +649,80 @@ def session_analysis_endpoint(
     return session_analysis(rows, started, ended)
 
 
+@app.get("/api/sessions/{session_id}/breathing")
+def session_breathing_endpoint(
+    session_id: int,
+    max_points: int = 4000,
+):
+    """Дыхание из акселерометра PMD — только post-session (см. ARCHITECTURE.md:
+    живого графика во время записи нет, решено отдельно). Ось времени та же,
+    что у /analysis: `ts - sessions.started` (started уже приведён к моменту
+    взведения — своей коррекции здесь не нужно, см. hrv_web/session_manager.py).
+
+    Явно отличает «акселерометра в сессии нет» (все сессии до Части A) от
+    «есть, но короткая/шумная» — фронт не должен рисовать это как нулевые
+    графики (см. ARCHITECTURE.md)."""
+    max_points = max(100, min(max_points, 20_000))
+    conn = init_db()
+    row = conn.execute(
+        "SELECT started, ended FROM sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404)
+    started, ended = row
+    if ended is None:
+        conn.close()
+        raise HTTPException(400, "Сессия ещё не завершена — дыхание после stop")
+    samples = load_accel_samples(conn, session_id)
+    conn.close()
+
+    if not samples:
+        return {
+            "has_accel": False,
+            "insufficient_data": True,
+            "message": "В этой сессии нет данных акселерометра",
+        }
+
+    result = analyze_breathing(samples)
+    if result is None:
+        return {
+            "has_accel": True,
+            "insufficient_data": True,
+            "message": "Данных акселерометра мало для оценки дыхания",
+        }
+
+    t = result["t"] - float(started)
+    t_dec, (wave_dec, rate_dec) = decimate_for_transport(
+        t, [result["wave"], result["rate_cpm"]], max_points
+    )
+    windows = [
+        {
+            "t_start": round(w["t_start"] - float(started), 2),
+            "t_end": round(w["t_end"] - float(started), 2),
+            "amp_mg": round(w["amp_mg"], 2),
+            "rejected": bool(w["rejected"]),
+        }
+        for w in result["windows"]
+    ]
+    summary = result["summary"]
+    return {
+        "has_accel": True,
+        "insufficient_data": False,
+        "t": [round(float(x), 2) for x in t_dec],
+        "wave_mg": [round(float(x), 2) for x in wave_dec],
+        "rate_cpm": [round(float(x), 2) for x in rate_dec],
+        "windows": windows,
+        "summary": {
+            "cpm_median": round(summary["cpm_median"], 1) if summary["cpm_median"] is not None else None,
+            "good_fraction": round(summary["good_fraction"], 3) if summary["good_fraction"] is not None else None,
+            "amp_median_mg": round(summary["amp_median_mg"], 2) if summary["amp_median_mg"] is not None else None,
+            "axis": summary["axis"],
+        },
+    }
+
+
 @app.get("/api/progress/analysis")
 def progress_analysis(
     tag: str | None = None,
@@ -739,6 +817,8 @@ async def session_stream(websocket: WebSocket, session_id: int):
             "started_at": rs.started_at,
             "first_beat_at": rs.first_beat_at,
             "duration_minutes": rs.duration_minutes,
+            "device_state": rs.device_state,
+            "accel_missing": rs.accel_missing,
         }
     )
 

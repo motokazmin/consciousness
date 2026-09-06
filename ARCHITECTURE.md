@@ -69,21 +69,43 @@ flowchart LR
     ST --> WEB
 ```
 
-### Жизненный цикл сессии (arm с первого RR)
+### Жизненный цикл сессии (arm — по каналу дыхания для BLE, по RR для mock)
 
-Отсчёт длительности, ось live-графика, guided-фразы и release-протокол стартуют **не** в момент `POST /api/sessions`, а с **первого реального RR** (arm).
+Отсчёт длительности, ось live-графика, guided-фразы и release-протокол стартуют **не** в момент `POST /api/sessions`, а в момент **взведения** (arm). У взведения два пути, чтобы t0 совпадал с реальным стартом канала дыхания, а не подменялся первым RR:
 
-1. **Старт** (`SessionManager.start`): запись в `sessions`, запуск источника, сторож `ARM_TIMEOUT_SEC` (300 с) — если RR так и не пришёл, сессия останавливается.
-2. **Первый RR** → `_arm(ts)`: `first_beat_at = ts`, `UPDATE sessions SET started = ts`, WS `{type:"armed", started_at}`, старт таймера авто-стопа (`duration_minutes`), если задан.
-3. **Клиент** (`app.js`): до arm — «ожидание устройства»; по `armed` / `meta.first_beat_at` / первому `beat` — `armSession()` (T0, фразы, аудио).
-4. **Стоп** — summary, обновление персонального baseline по часу.
+- **mock** — акселерометра нет физически, взводим по первому RR, как раньше.
+- **BLE** — взводим по **первой пачке акселерометра**. Если за `ACC_ARM_WAIT_SEC`
+  (60 с) после первого RR канал не ответил (PMD умеет отказывать молча — см.
+  § PMD-акселерометр), взводим запасным путём по этому же RR
+  (`accel_missing=True` в сессии): RR неприкосновенен, ждать бесконечно нельзя.
+  RR-удары **до** взведения не пишутся в БД и не идут в `HRVSessionState` —
+  как будто их не было (иначе первый «настоящий» удар после взведения
+  перестал бы быть первым для дельт RMSSD).
+
+1. **Старт** (`SessionManager.start`): запись в `sessions` (`opt_acc_recording=1`
+   всегда — см. § PMD-акселерометр), запуск источника, сторож `ARM_TIMEOUT_SEC`
+   (300 с) на случай, если сессия так и не взведётся.
+2. **Взведение** → `_arm(ts, accel_missing=...)`: `first_beat_at = ts`,
+   `UPDATE sessions SET started = ts`, WS `{type:"armed", started_at, accel_missing}`,
+   старт таймера авто-стопа (`duration_minutes`), если задан.
+3. **Пока не взведено** (`RunningSession.device_state`, WS `{type:"device_state", state}`
+   и поле в `GET /api/sessions/recording`): `"ble_repair"` (идёт пересопряжение) →
+   `"waiting_accel"` (ждём поток PMD) → `"recording"` (взведено); mock —
+   `"waiting_beat"` → `"recording"`.
+4. **Клиент** (`app.js`): до arm — текст по `device_state` (`setLiveEmptyState`);
+   по `armed` / `meta.first_beat_at` / первому `beat` — `armSession()` (T0,
+   фразы, аудио); `accel_missing` в `armed`/`meta` — строка «канал не ответил»
+   в панели записи (`acc_status`, без графика — живого дыхания при записи нет).
+5. **Стоп** — summary, обновление персонального baseline по часу.
 
 ### Обработка одного удара
 
-1. **Источник** (`hrv_core/sources.py`) в отдельном потоке вызывает `callback(rr_ms, ts)`.
-2. **`SessionManager`**: при первом колбэке вызывает `_arm`, затем `RunningSession.on_beat`.
+1. **Источник** (`hrv_core/sources.py`) в отдельном потоке вызывает `callback(rr_ms, ts)` и, если акселерометр поднялся, `acc_callback(batch_ts, samples, hz)`.
+2. **`SessionManager`**: первый колбэк (RR для mock; первая пачка акселерометра
+   или RR-запас для BLE, см. выше) вызывает `_arm`; после взведения каждый RR
+   идёт в `RunningSession.on_beat`, каждая пачка — в `on_accel_batch`.
 3. **`HRVSessionState.process_beat()`** (`hrv_core/pipeline.py`): скользящий буфер RR (60 с), RMSSD, drift; возвращает `BeatSample(ts, rr_ms, rmssd, drift_just_fired)` (первый удар может не дать sample, пока RMSSD = 0).
-4. **Веб-слой** сохраняет точку в `hrv_points`, отправляет метрики по WebSocket, обновляет графики (uPlot).
+4. **Веб-слой** сохраняет точку в `hrv_points`, отправляет метрики по WebSocket, обновляет графики (uPlot); пачка акселерометра — в `hrv_accel_batches`, плюс лёгкий WS `{type:"accel_status", ts}` для строки состояния канала в панели записи.
 
 ---
 
@@ -93,9 +115,10 @@ flowchart LR
 
 | Модуль | Роль |
 |--------|------|
-| `constants.py` | Пороги, таймауты, пути (`DB_PATH`, `DRIFT_THRESHOLD=0.80`, окно RMSSD 60 с, `DEFAULT_OPT_ACC_RECORDING`) |
+| `constants.py` | Пороги, таймауты, пути (`DB_PATH`, `DRIFT_THRESHOLD=0.80`, окно RMSSD 60 с) |
 | `sources.py` | Абстракция `HRVSource`, реализации mock/BLE, фабрика `build_source()` |
-| `pmd.py` | Протокол PMD Polar H10 (акселерометр): UUID, маска возможностей, разбор кадров, `PmdAccStream` |
+| `pmd.py` | Протокол PMD Polar H10 (акселерометр): UUID, маска возможностей, разбор кадров, `PmdAccStream`; диагностика дыхания по Уэлчу для `pmd_check` (нарезка окон и брак по движению — из `breathing.py`) |
+| `breathing.py` | Дыхание из акселерометра для БД/графиков: интерполяция 10 Гц → полосовой Баттерворт → фаза Гильберта (число циклов, мгновенная частота), окна качества с браком по движению — см. § PMD-акселерометр |
 | `pmd_check.py` | `python -m hrv_core.pmd_check` — ручная диагностика PMD с надетым ремнём |
 | `pipeline.py` | `compute_rmssd()`, `HRVSessionState`, детекция drift (опц. `notify-send`) |
 | `db.py` | Схема SQLite, миграции, baseline по часу 0–23, удаление сессий, пачки акселерометра |
@@ -112,9 +135,9 @@ flowchart LR
 | Модуль | Роль |
 |--------|------|
 | `server.py` | FastAPI: REST + WebSocket, раздача статики |
-| `session_manager.py` | `SessionManager` — одна активная сессия; arm с первого RR; очередь WS |
-| `static/app.js` | SPA: форма, WebSocket, архив, прогресс; `armSession` после первого удара |
-| `static/analysis_charts.js` | Отрисовка архивных графиков (RR, SDNN, Poincaré, FFT, overlay) |
+| `session_manager.py` | `SessionManager` — одна активная сессия; arm по каналу дыхания (BLE) или по первому RR (mock); очередь WS |
+| `static/app.js` | SPA: форма, WebSocket, архив, прогресс; `armSession` после взведения; `updateAccStatusTick` — строка состояния канала акселерометра в панели записи |
+| `static/analysis_charts.js` | Отрисовка архивных графиков (RR, SDNN, Poincaré, FFT, дыхание, overlay) |
 | `static/meditation_engine.js` | HRV-реактивные mp3-фразы (meditation → sit, relaxation → lay) |
 | `static/timed_protocol_engine.js` | Последовательный протокол «Телесное расслабление» (`release`) по `release_schedule.json` |
 | `static/hrv_audio_engine.js` | Web Audio: пульс, текстуры, трансовый pad |
@@ -169,22 +192,31 @@ Polar H10 через нестандартный сервис PMD (Polar Measurem
   кадр не разобрался) — это `PmdError`/`PmdPairingRequiredError`, пойманная и
   залогированная в `PolarH10Source._start_pmd_accel`; RR-цикл (`_loop`) её не
   видит и продолжает работать как без акселерометра, включая reconnect.
-- **Опция сессии** `opt_acc_recording` (колонка `sessions`, чекбокс в форме
-  старта рядом с «Запись микрофона») — по умолчанию выключена
-  (`DEFAULT_OPT_ACC_RECORDING` в `constants.py`, единственное место дефолта).
-  Включена — `SessionManager` передаёт `acc_callback` в `source.start()`.
+- **Акселерометр обязателен для каждой BLE-записи** (решение заказчика,
+  ADR-019 в `research/`) — опции `opt_acc_recording` в форме старта больше
+  нет, `SessionManager` передаёт `acc_callback` в `source.start()` всегда.
+  Колонка `sessions.opt_acc_recording` осталась только чтобы отличать старые
+  записи (пишется 1 во все новые сессии); фактическое наличие канала в
+  конкретной сессии — по строкам в `hrv_accel_batches`, не по этой колонке.
+- **Взведение сессии — по каналу дыхания, не по RR** (для BLE; mock — по
+  первому RR, см. § «Жизненный цикл сессии»). PMD документированно умеет
+  отказывать молча (ниже), поэтому ожидание первой пачки ограничено
+  `ACC_ARM_WAIT_SEC` (60 с в `hrv_web/session_manager.py`) — не дождались,
+  взводимся по RR (`accel_missing=True`), RR остаётся неприкосновенным.
 - **Хранилище — пачками, не построчно.** `RunningSession.on_accel_batch`
   копит отсчёты в `PmdAccStream` (~1 с на пачку) и пишет строку в
   `hrv_accel_batches` через `db.insert_accel_batch`; ошибка записи логируется
   и глотается, RR не страдает. Чтение обратно — `db.load_accel_samples(conn,
   session_id) → [(ts, x, y, z), …]`.
-- **Только регистрация.** Сырые отсчёты не выводятся на live-график, не
-  участвуют в post-session анализе и не дают метрику дыхания в реальном
-  времени — это отдельная задача после того, как канал подтвердится на живом
-  устройстве.
+- **Метрика дыхания — `hrv_core/breathing.py`**, post-session (см. § «Post-session
+  анализ»): резонанс с фазой Гильберта, не пики и не спектр (аргумент —
+  ниже). Живого графика во время записи нет (решено отдельно) — только строка
+  состояния канала в панели записи (идут ли пачки, когда была последняя),
+  см. `RunningSession.last_accel_at` и WS `{type:"accel_status"}`.
 - **Проверка человеком:** `python -m hrv_core.pmd_check` — связь, сопряжение,
   маска возможностей, 30 с потока, фактическая частота, разброс по осям,
-  диагностика дыхания (не метрика). При ATT 0x0e печатает то же сообщение
+  диагностика дыхания по Уэлчу (только для этой команды — ниже почему это не
+  годится для итоговой метрики). При ATT 0x0e печатает то же сообщение
   про `bluetoothctl pair`, что и лог боевой сессии.
 
 **Проверено на живом устройстве** (прошивка 5.0.0): договор о настройках,
@@ -264,6 +296,12 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 пакует/распаковывает `hrv_core.db.pack_accel_samples`/`unpack_accel_samples`.
 Чтение обратно — `hrv_core.db.load_accel_samples(conn, session_id)`.
 
+`sessions.opt_acc_recording`: с Части A (акселерометр обязателен) пишется `1`
+во все новые сессии — колонка только отличает старые записи (`0`), где канала
+не было вовсе. Отличить старую сессию от новой, где PMD просто не ответил
+(`accel_missing`), эта колонка не может — для этого смотреть строки в
+`hrv_accel_batches`.
+
 **Файлы:** `session_audio/{session_id}.webm` — записи микрофона рядом с БД.
 
 `sessions.started` при INSERT — момент создания; после arm переписывается временем первого RR (канонический t₀ длительности и оси `ts - started`).
@@ -296,15 +334,17 @@ meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_befo
 | `/api/session-types` | POST | Создать пользовательский тип (`slug`, `label`) |
 | `/api/session-types/{slug}` | DELETE | Удалить пользовательский тип (системные — 403) |
 | `/api/note-tags` | GET | Уникальные теги из заметок (`#утро` → `утро`) |
-| `/api/sessions` | POST/GET | Старт / список сессий (фильтры: participant, tag, note_tag, период) |
+| `/api/sessions` | POST/GET | Старт (акселерометр запрашивается всегда для BLE) / список сессий (фильтры: participant, tag, note_tag, период) |
 | `/api/sessions/{id}` | PATCH | Заметки после завершения (`session_name`) |
 | `/api/sessions/{id}/stop` | POST | Остановка + summary |
-| `/api/sessions/{id}/stream` | WebSocket | Live: `meta` (`first_beat_at`), `armed`, `beat`, `ended` |
+| `/api/sessions/recording` | GET | Статус активной сессии: `device_state`, `accel_missing`, `last_accel_at` (для восстановления UI после перезагрузки страницы) |
+| `/api/sessions/{id}/stream` | WebSocket | Live: `meta` (`first_beat_at`, `device_state`, `accel_missing`), `device_state`, `armed` (`accel_missing`), `beat`, `accel_status` (`ts` последней пачки), `ended` |
 | `/api/sessions/{id}` | GET/DELETE | Summary завершённой сессии / удаление (+ файл аудио) |
 | `/api/sessions/{id}/audio` | PUT | Сохранить запись микрофона (raw body webm/ogg, после stop) |
 | `/api/sessions/{id}/audio` | GET | Отдать файл записи (`audio/webm`) |
 | `/api/sessions/{id}/points` | GET | Точки (с downsampling) |
 | `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); `max_points` |
+| `/api/sessions/{id}/breathing` | GET | Post-session дыхание из акселерометра (см. § «Дыхание из акселерометра»); `max_points` |
 | `/api/progress` | GET | Наложение RMSSD-кривых завершённых сессий |
 | `/api/progress/analysis` | GET | Overlay Poincaré / спектр / SDNN; фильтры сессий |
 | `/api/history` | DELETE | Очистка всей истории |
@@ -345,6 +385,7 @@ hrv_points (ts, rr_ms, rmssd)  — сырые RR в БД
 | **Coherence** | `coherence_score` | Доля мощности в 0.08–0.12 Гц от суммы 0–0.5 Гц (%) |
 | **SDNN trend** | `moving_sdnn` | std(corrected RR) в окне 60 с; первые 20 с не рисуются |
 | **RMSSD trend** | `rmssd_trend` | Сохранённые значения `rmssd` по времени (как писались в live) |
+| **Дыхание** (если есть акселерометр) | `hrv_core/breathing.py` | См. § «Дыхание из акселерометра» ниже |
 
 Константы: `ARTIFACT_REL_THRESHOLD=0.20`, `ARTIFACT_MEDIAN_WINDOW=5`, `RR_PHYSIO_MIN_MS=300`, `RR_PHYSIO_MAX_MS=2000`, `MIN_SPECTRAL_SEC=60`, `SDNN_INITIAL_CROP_SEC=20`.
 
@@ -359,6 +400,50 @@ hrv_points (ts, rr_ms, rmssd)  — сырые RR в БД
 ### Ответ `/api/sessions/{id}/analysis`
 
 Ключевые поля: `raw_rr`, `raw_rr_x`, `analysis_rr`, `analysis_rr_x`, `poincare`, `spectrum`, `sdnn_trend`, `rmssd_trend`, `mean_rr`, `coherence_score`, `outliers`.
+
+### Дыхание из акселерометра (`hrv_core/breathing.py`, `GET /api/sessions/{id}/breathing`)
+
+Метод сверен вручную с нажатиями человека на каждый вдох на живых прогонах
+(0.3–1.3% расхождения по числу циклов, детали — в `research/`, сюда только
+результат):
+
+1. Отсчёты (x, y, z, мг, реально ~25.5 Гц) интерполируются на равномерную
+   сетку **10 Гц**.
+2. Полосовой Баттерворт 2-го порядка **0.10–0.45 Гц** (6–27 цикл/мин),
+   нулевая фаза (`filtfilt`), после `detrend`.
+3. **Несущая ось выбирается по данным** — та из трёх, у которой p75 модуля
+   отфильтрованного сигнала наибольший (не назначается заранее: выбирает то,
+   как ремень сидит на груди).
+4. **Число циклов = разность фаз Гильберта / 2π**, не подсчёт пиков: подъём и
+   спад грудной клетки несимметричны, детектор пиков дробит вдох надвое и
+   завышает счёт на ~13%.
+5. **Частота для графиков — производная фазы** (цикл/мин, сглажена окном
+   ~15 с), **не argmax спектра**: на слабом сигнале argmax прыгает на вторую
+   гармонику (живой прогон дал 30 и 35 цикл/мин отдельными окнами при
+   настоящих 16.6). Оценка по Уэлчу осталась только диагностикой в
+   `pmd_check` (см. § PMD-акселерометр).
+6. **Качество** — окна 60 с / шаг 30 с: амплитуда (p75 модуля несущей) и брак
+   по движению, если амплитуда окна больше `MOTION_REJECT_FACTOR` (×3) медианы
+   амплитуд по прогону. Нарезка на окна и правило браковки —
+   `iter_windows`/`motion_reject_windows`, общие с диагностикой в `pmd.py`.
+
+Эндпойнт (`GET /api/sessions/{id}/breathing`, только post-session, ось времени
+та же, что у `/analysis` — секунды от `sessions.started`) отдаёт: `has_accel`
+(явно `false`, если строк в `hrv_accel_batches` нет — не пустые массивы,
+которые фронт нарисовал бы как ноль), `insufficient_data`, волну (`t`,
+`wave_mg`, прорежённые `decimate_for_transport` до ≤4 Гц/точку и `max_points`),
+ряд `rate_cpm`, `windows` (`t_start`, `t_end`, `amp_mg`, `rejected`) и `summary`
+(`cpm_median`, `good_fraction`, `amp_median_mg`, `axis`).
+
+Графики (`analysis_charts.js`: `makeBreathingWavePlot`/`makeBreathingRatePlot`/
+`makeBreathingRateRmssdPlot`, в стиле `makeRawRrPlot`/`makeRmssdPlot`) —
+волна с затенением забракованных окон (`drawRejectedWindows`, по образцу
+`drawTrimBands`), частота дыхания, и частота дыхания вместе с трендом RMSSD на
+двух шкалах Y (RMSSD интерполируется на сетку дыхания — `interpolateSeries`).
+Блок (`#arch_breathing_block`) скрыт целиком, если `has_accel=false` —
+так выглядит большинство сессий до Части A (акселерометр стал обязательным).
+Живого графика во время записи нет (решено отдельно) — есть только строка
+состояния канала, см. § PMD-акселерометр.
 
 ### Guided meditation и release-протокол
 

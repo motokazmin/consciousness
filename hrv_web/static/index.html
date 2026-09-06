@@ -45,6 +45,7 @@
       --chart-rr: #00d4ff;
       --chart-sdnn: #9d8ef0;
       --chart-rmssd: #39e085;
+      --chart-breathing: #f0a83c;
       --chart-trim-overlay: rgba(0, 0, 0, 0.28);
       --chart-guide-line: rgba(255, 255, 255, 0.22);
       --peak-marker-bg: rgba(57, 224, 133, 0.1);
@@ -80,6 +81,7 @@
       --chart-rr: #0077aa;
       --chart-sdnn: #6b5fc7;
       --chart-rmssd: #1a9b5c;
+      --chart-breathing: #b4740e;
       --chart-trim-overlay: rgba(0, 0, 0, 0.07);
       --chart-guide-line: rgba(26, 36, 51, 0.18);
       --peak-marker-bg: rgba(26, 155, 92, 0.12);
@@ -1501,13 +1503,10 @@
             </div>
             <div class="biofeedback-options">
               <div class="biofeedback-options-title">Акселерометр (PMD, только BLE Polar H10)</div>
-              <label class="check-label">
-                <input type="checkbox" id="opt_acc_recording" />
-                Писать поток акселерометра для дыхания (сырые отсчёты, без live-графика)
-              </label>
-              <p style="font-size:.75rem;color:var(--text-muted);margin:6px 0 0;line-height:1.45">
-                Экспериментально, по умолчанию выкл. Не отображается во время записи — только хранится для расчёта
-                метрики дыхания позже. При отказе PMD (нет сопряжения и т.п.) запись RR продолжается как обычно.
+              <p style="font-size:.75rem;color:var(--text-muted);margin:0;line-height:1.45">
+                Пишется в каждой записи с Polar H10 для расчёта дыхания — включать нечего. Перед
+                стартом ремень пересопрягается (~20с). При отказе PMD (нет сопряжения, канал молчит
+                и т.п.) запись RR продолжается как обычно, дыхание в этой сессии будет недоступно.
               </p>
             </div>
             <div class="btn-row">
@@ -1519,6 +1518,7 @@
 
         <div class="status-bar" id="live_status"></div>
         <div class="status-bar" id="mic_status" style="display:none"></div>
+        <div class="status-bar" id="acc_status" style="display:none"></div>
         <div class="err-bar" id="live_err"></div>
       </div>
 
@@ -1826,6 +1826,26 @@
             <div class="plot-card">
               <div class="plot-header"><span class="plot-title">RMSSD — от начала сессии</span></div>
               <div class="plot-body" id="arch_rm"></div>
+            </div>
+          </div>
+          <div class="arch-breathing-block" id="arch_breathing_block" hidden>
+            <div class="metrics-panel" style="margin-bottom:16px">
+              <div class="s-label">Дыхание (акселерометр PMD)</div>
+              <div class="metrics-row" id="arch_breathing_metrics_row"></div>
+            </div>
+            <div class="archive-timeseries-stack">
+              <div class="plot-card" style="margin-bottom:0">
+                <div class="plot-header"><span class="plot-title">Волна дыхания</span></div>
+                <div class="plot-body" id="arch_breathing_wave"></div>
+              </div>
+              <div class="plot-card" style="margin-bottom:0">
+                <div class="plot-header"><span class="plot-title">Частота дыхания</span></div>
+                <div class="plot-body" id="arch_breathing_rate"></div>
+              </div>
+              <div class="plot-card" style="margin-bottom:0">
+                <div class="plot-header"><span class="plot-title">Дыхание и RMSSD</span></div>
+                <div class="plot-body" id="arch_breathing_rate_rmssd"></div>
+              </div>
             </div>
           </div>
         </div>

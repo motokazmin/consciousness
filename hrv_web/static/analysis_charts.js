@@ -450,25 +450,12 @@
     );
   }
 
+  // Общая реализация — interpolateSeries (ниже, используется и графиком
+  // "дыхание + RMSSD"); здесь только контракт "нет данных → нули", который
+  // ждёт buildProgressSpectrumPlot.
   function interpolateSpectrum(freqs, power, grid) {
     if (!freqs?.length) return grid.map(() => 0);
-    const n = freqs.length;
-    return grid.map((f) => {
-      if (f <= freqs[0]) return power[0];
-      if (f >= freqs[n - 1]) return power[n - 1];
-      let lo = 0;
-      let hi = n - 1;
-      while (lo + 1 < hi) {
-        const mid = (lo + hi) >> 1;
-        if (freqs[mid] <= f) lo = mid;
-        else hi = mid;
-      }
-      const f0 = freqs[lo];
-      const f1 = freqs[hi];
-      if (f1 === f0) return power[lo];
-      const t = (f - f0) / (f1 - f0);
-      return power[lo] + t * (power[hi] - power[lo]);
-    });
+    return interpolateSeries(freqs, power, grid);
   }
 
   function buildProgressSpectrumPlot(el, sessions, visible, colors, height) {
@@ -607,6 +594,164 @@
     );
   }
 
+  // ── ДЫХАНИЕ (акселерометр PMD) ──────────────────────────────────────────
+  // Общий рецепт расчёта — hrv_core/breathing.py; здесь только отрисовка.
+  // Живого графика во время записи нет (решено отдельно) — эти три графика
+  // только в разборе завершённой сессии, и только если у неё вообще есть
+  // данные акселерометра (has_accel в ответе /breathing).
+
+  function drawRejectedWindows(u, windows) {
+    if (!windows?.length) return;
+    const { ctx } = u;
+    const oy = u.bbox.top;
+    const h = u.bbox.height;
+    ctx.save();
+    ctx.fillStyle = T().chartLine("--chart-trim-overlay", "rgba(0,0,0,0.28)");
+    for (const win of windows) {
+      if (!win.rejected) continue;
+      const x0 = u.valToPos(win.t_start, "x", true);
+      const x1 = u.valToPos(win.t_end, "x", true);
+      ctx.fillRect(x0, oy, x1 - x0, h);
+    }
+    ctx.restore();
+  }
+
+  function makeBreathingWavePlot(el, t, waveMg, windows, durationSec, height) {
+    if (!t?.length || !waveMg?.length) return null;
+    const w = plotWidth(el);
+    const xMax = durationSec || t[t.length - 1] || 1;
+    const absMax = waveMg.reduce((a, b) => Math.max(a, Math.abs(b)), 1) * 1.15;
+
+    return new uPlot(
+      {
+        width: w,
+        height: height || 260,
+        padding: CHART_PADDING,
+        scales: {
+          x: { ...xScaleLinear, range: [0, xMax] },
+          y: { time: false, distr: 1, range: [-absMax, absMax] },
+        },
+        series: [
+          {},
+          { width: 1.5, points: { show: false }, ...seriesColor("--chart-breathing", "#f0a83c", 0.06) },
+        ],
+        axes: [
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), label: "мг (0.10–0.45 Гц)", size: 60 },
+        ],
+        hooks: {
+          draw: [(u) => drawRejectedWindows(u, windows)],
+        },
+        cursor: { show: true, x: true, y: false },
+        legend: { show: false },
+      },
+      [t, waveMg],
+      el
+    );
+  }
+
+  function makeBreathingRatePlot(el, t, rateCpm, durationSec, height) {
+    if (!t?.length || !rateCpm?.length) return null;
+    const w = plotWidth(el);
+    const xMax = durationSec || t[t.length - 1] || 1;
+    const yMax = rateCpm.reduce((a, b) => Math.max(a, b), 10) * 1.15;
+
+    return new uPlot(
+      {
+        width: w,
+        height: height || 260,
+        padding: CHART_PADDING,
+        scales: {
+          x: { ...xScaleLinear, range: [0, xMax] },
+          y: { time: false, distr: 1, range: [0, yMax] },
+        },
+        series: [
+          {},
+          { width: 2, points: { show: false }, ...seriesColor("--chart-breathing", "#f0a83c", 0.08) },
+        ],
+        axes: [
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), label: "дыхание, цикл/мин", size: 56 },
+        ],
+        cursor: { show: true, x: true, y: false },
+        legend: { show: false },
+      },
+      [t, rateCpm],
+      el
+    );
+  }
+
+  // Линейная интерполяция ys(xs) на произвольную сетку grid — общая с
+  // interpolateSpectrum (там же бинарный поиск), нужна тут, чтобы свести
+  // RMSSD-тренд (неравномерные точки из hrv_points) на сетку дыхания
+  // (равномерная, ~10 Гц до прореживания) для общего графика с двумя Y.
+  function interpolateSeries(xs, ys, grid) {
+    if (!xs?.length) return grid.map(() => null);
+    const n = xs.length;
+    return grid.map((x) => {
+      if (x <= xs[0]) return ys[0];
+      if (x >= xs[n - 1]) return ys[n - 1];
+      let lo = 0;
+      let hi = n - 1;
+      while (lo + 1 < hi) {
+        const mid = (lo + hi) >> 1;
+        if (xs[mid] <= x) lo = mid;
+        else hi = mid;
+      }
+      const x0 = xs[lo];
+      const x1 = xs[hi];
+      if (x1 === x0) return ys[lo];
+      const t = (x - x0) / (x1 - x0);
+      return ys[lo] + t * (ys[hi] - ys[lo]);
+    });
+  }
+
+  function makeBreathingRateRmssdPlot(el, t, rateCpm, rmssdTrend, durationSec, height) {
+    if (!t?.length || !rateCpm?.length || !rmssdTrend?.length) return null;
+    const w = plotWidth(el);
+    const xMax = durationSec || t[t.length - 1] || 1;
+    const rmssdXs = rmssdTrend.map((p) => p.x);
+    const rmssdYs = rmssdTrend.map((p) => p.rmssd);
+    const rmssdOnGrid = interpolateSeries(rmssdXs, rmssdYs, t);
+    const rateMax = rateCpm.reduce((a, b) => Math.max(a, b), 10) * 1.15;
+    const rmssdMax = rmssdYs.reduce((a, b) => Math.max(a, b), 40) * 1.15;
+
+    return new uPlot(
+      {
+        width: w,
+        height: height || 260,
+        padding: [8, 46, 4, 4],
+        scales: {
+          x: { ...xScaleLinear, range: [0, xMax] },
+          cpm: { time: false, distr: 1, range: [0, rateMax] },
+          rmssd: { time: false, distr: 1, range: [0, rmssdMax] },
+        },
+        series: [
+          {},
+          {
+            scale: "cpm", width: 2, points: { show: false },
+            stroke: T().cssVar("--chart-breathing", "#f0a83c"),
+            label: "дыхание",
+          },
+          {
+            scale: "rmssd", width: 1.5, points: { show: false },
+            stroke: T().cssVar("--chart-rmssd", "#39e085"),
+            label: "RMSSD",
+          },
+        ],
+        axes: [
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), scale: "cpm", label: "дыхание, цикл/мин", size: 56 },
+          { ...axisStyle(), scale: "rmssd", label: "RMSSD, ms", side: 1, size: 52 },
+        ],
+        cursor: { show: true, x: true, y: false },
+        legend: { show: true },
+      },
+      [t, rateCpm, rmssdOnGrid],
+      el
+    );
+  }
+
   function setChartEmpty(el, message) {
     if (!el) return;
     el.innerHTML = `<div class="chart-empty">${message}</div>`;
@@ -625,5 +770,9 @@
     buildProgressSpectrumPlot,
     buildProgressSdnnPlot,
     setChartEmpty,
+    makeBreathingWavePlot,
+    makeBreathingRatePlot,
+    makeBreathingRateRmssdPlot,
+    interpolateSeries,
   };
 })(window);

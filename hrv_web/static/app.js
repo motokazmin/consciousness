@@ -23,6 +23,14 @@ let sessionBaseline = null;
 let sessionArmed = false;
 let pendingArm = null;
 
+// ── КАНАЛ АКСЕЛЕРОМЕТРА (PMD) ────────────────────────────────────────────
+// Живого графика дыхания во время записи нет (решено отдельно) — только
+// строка состояния: идут ли пачки и когда пришла последняя. PMD умеет
+// отказывать молча (см. ARCHITECTURE.md), поэтому это не косметика.
+let accelExpected = false;      // true только для source === "ble"
+let accelMissing = false;       // канал не ответил за ACC_ARM_WAIT_SEC — сессия без дыхания
+let lastAccelWallMs = null;     // Date.now() момента последнего "accel_status"
+
 // ── AUDIO BIOFEEDBACK ─────────────────────────────────────────────────────
 let audioEngine = null;
 let audioSessionActive = false;
@@ -163,11 +171,6 @@ function micOptions() {
   return { micRecording: el ? el.checked : false };
 }
 
-function accOptions() {
-  const el = $("opt_acc_recording");
-  return { accRecording: el ? el.checked : false };
-}
-
 function setMicStatus(text) {
   const el = $("mic_status");
   if (!el) return;
@@ -175,6 +178,39 @@ function setMicStatus(text) {
   const on = !!text;
   el.style.display = on ? "block" : "none";
   el.classList.toggle("visible", on);
+}
+
+function setAccStatus(text) {
+  const el = $("acc_status");
+  if (!el) return;
+  el.textContent = text || "";
+  const on = !!text;
+  el.style.display = on ? "block" : "none";
+  el.classList.toggle("visible", on);
+}
+
+// Строка состояния канала акселерометра в панели идущей записи. Обновляется
+// раз в секунду (см. setInterval внизу файла) — только "жив ли канал" и
+// "когда была последняя пачка", без графика.
+function updateAccStatusTick() {
+  if (!accelExpected || !sessionArmed) {
+    setAccStatus("");
+    return;
+  }
+  if (accelMissing) {
+    setAccStatus("акселерометр: канал не ответил — сессия без дыхания");
+    return;
+  }
+  if (lastAccelWallMs == null) {
+    setAccStatus("акселерометр: ожидание первой пачки…");
+    return;
+  }
+  const ageSec = (Date.now() - lastAccelWallMs) / 1000;
+  if (ageSec > 5) {
+    setAccStatus(`акселерометр: нет данных ${ageSec.toFixed(0)}с — канал мог прерваться`);
+  } else {
+    setAccStatus(`акселерометр: пишет (последняя пачка ${ageSec.toFixed(1)}с назад)`);
+  }
 }
 
 async function uploadSessionAudio(sessionId, blob, delaySeconds) {
@@ -1102,13 +1138,22 @@ function makeRRPlot(el, timed) {
   return rrPlot;
 }
 
+// mode — состояния подключения устройства (см. hrv_web/session_manager.py:
+// RunningSession.device_state) плюс пара локальных ("idle", "waiting").
+// "device" оставлен как синоним "waiting_beat" для чисто mock-сессий.
 function setLiveEmptyState(mode) {
   const empty = $("live_rr_empty");
   if (!empty) return;
   if (mode === "idle") {
     empty.textContent = "Служба готова к запуску";
     empty.classList.remove("hidden");
-  } else if (mode === "device") {
+  } else if (mode === "ble_repair") {
+    empty.textContent = "Пересопряжение ремня (~20с) — нужно для канала дыхания";
+    empty.classList.remove("hidden");
+  } else if (mode === "waiting_accel") {
+    empty.textContent = "Ожидание акселерометра — отсчёт начнётся с первой пачки данных";
+    empty.classList.remove("hidden");
+  } else if (mode === "device" || mode === "waiting_beat") {
     empty.textContent = "Ожидание устройства — отсчёт начнётся с первого удара";
     empty.classList.remove("hidden");
   } else if (mode === "waiting") {
@@ -1149,6 +1194,15 @@ function resizePlots() {
     }
     if (archSdnn && $("arch_sdnn")) archSdnn.setSize({ width: plotWidth($("arch_sdnn")), height: ARCHIVE_PLOT_H });
     if (archRM && $("arch_rm")) archRM.setSize({ width: plotWidth($("arch_rm")), height: ARCHIVE_PLOT_H });
+    if (archBreathingWave && $("arch_breathing_wave")) {
+      archBreathingWave.setSize({ width: plotWidth($("arch_breathing_wave")), height: ARCHIVE_PLOT_H });
+    }
+    if (archBreathingRate && $("arch_breathing_rate")) {
+      archBreathingRate.setSize({ width: plotWidth($("arch_breathing_rate")), height: ARCHIVE_PLOT_H });
+    }
+    if (archBreathingRateRmssd && $("arch_breathing_rate_rmssd")) {
+      archBreathingRateRmssd.setSize({ width: plotWidth($("arch_breathing_rate_rmssd")), height: ARCHIVE_PLOT_H });
+    }
   }
   if (progressVisible) {
     if (progPoincare && $("prog_poincare")) progPoincare.setSize({ width: plotWidth($("prog_poincare")), height: PROGRESS_PLOT_H });
@@ -1277,11 +1331,26 @@ function armSession(t0) {
 function onWsMessage(ev) {
   const msg = JSON.parse(ev.data);
   if (msg.type === "meta") {
-    if (msg.first_beat_at != null) armSession(msg.first_beat_at);
-    else if (msg.started_at != null && sessionArmed) sessionT0 = msg.started_at;
+    if (msg.accel_missing) accelMissing = true;
+    if (msg.first_beat_at != null) {
+      armSession(msg.first_beat_at);
+    } else if (msg.started_at != null && sessionArmed) {
+      sessionT0 = msg.started_at;
+    } else if (msg.device_state) {
+      setLiveEmptyState(msg.device_state);
+    }
+    return;
+  }
+  if (msg.type === "device_state") {
+    if (!sessionArmed) setLiveEmptyState(msg.state);
+    return;
+  }
+  if (msg.type === "accel_status") {
+    lastAccelWallMs = Date.now();
     return;
   }
   if (msg.type === "armed") {
+    if (msg.accel_missing) accelMissing = true;
     if (msg.started_at != null) armSession(msg.started_at);
     return;
   }
@@ -1316,6 +1385,10 @@ function finalizeLiveSession() {
   stopBiofeedbackSession();
   sessionArmed = false;
   pendingArm = null;
+  accelExpected = false;
+  accelMissing = false;
+  lastAccelWallMs = null;
+  setAccStatus("");
 }
 
 function onSessionEnded(statusText) {
@@ -1446,13 +1519,11 @@ function setBiofeedbackControlsEnabled(on) {
   const intervalEl = $("guided_phrase_interval");
   const setEl = $("guided_phrase_set");
   const micEl = $("opt_mic_recording");
-  const accEl = $("opt_acc_recording");
   if (audioEl) audioEl.disabled = !on;
   if (guidedEl) guidedEl.disabled = !on;
   if (intervalEl) intervalEl.disabled = !on;
   if (setEl) setEl.disabled = !on || !phraseSetsForPrefix(phrasePrefixForTag($("tag")?.value)).length;
   if (micEl) micEl.disabled = !on;
-  if (accEl) accEl.disabled = !on;
 }
 
 function syncSourceFields() {
@@ -1485,7 +1556,7 @@ async function startLive() {
     return;
   }
   const isRelease = isReleaseTag(tag);
-  const opts = { ...audioOptions(), ...guidedPhraseOptions(), ...micOptions(), ...accOptions() };
+  const opts = { ...audioOptions(), ...guidedPhraseOptions(), ...micOptions() };
   if (isRelease) {
     opts.guidedPhrases = true;
     opts.phraseSet = opts.phraseSet || "soft";
@@ -1500,7 +1571,6 @@ async function startLive() {
     opt_guided_phrases: isRelease ? true : opts.guidedPhrases,
     opt_audio_biofeedback: opts.audioBiofeedback,
     opt_mic_recording: opts.micRecording,
-    opt_acc_recording: opts.accRecording,
   };
 
   try {
@@ -1541,6 +1611,10 @@ async function startLive() {
     liveMode    = timed ? "timed" : "window";
     sessionT0   = 0;
     sessionArmed = false;
+    accelExpected = source === "ble";
+    accelMissing = false;
+    lastAccelWallMs = null;
+    setAccStatus("");
     durationSec = isRelease ? RELEASE_PROTOCOL_DURATION_SEC : (timed ? body.minutes * 60 : 0);
     lastRmssd   = null;
     lastRmssdNormalized = null;
@@ -1571,7 +1645,7 @@ async function startLive() {
 
     rrBuf = [];
     makeRRPlot($("rrPlot"), timed);
-    setLiveEmptyState("device");
+    setLiveEmptyState(res.device_state || "device");
     nextFrame(resizePlots);
 
     setStatus(`Сессия #${currentSessionId} · ожидание устройства…`);
@@ -1727,9 +1801,17 @@ let archSdnn = null;
 let archRM = null;
 let archAnalysisCache = null;
 let archSummaryCache = null;
+let archBreathingWave = null;
+let archBreathingRate = null;
+let archBreathingRateRmssd = null;
+let archBreathingCache = null;
 
 function sessionAnalysisUrl(sessionId) {
   return `/api/sessions/${sessionId}/analysis`;
+}
+
+function sessionBreathingUrl(sessionId) {
+  return `/api/sessions/${sessionId}/breathing`;
 }
 
 function rrTimelineSeries(analysis) {
@@ -1816,6 +1898,12 @@ function destroyPlotInstance(plot) {
   plot.destroy();
 }
 
+function destroyArchBreathingPlots() {
+  if (archBreathingWave) { archBreathingWave.destroy(); archBreathingWave = null; }
+  if (archBreathingRate) { archBreathingRate.destroy(); archBreathingRate = null; }
+  if (archBreathingRateRmssd) { archBreathingRateRmssd.destroy(); archBreathingRateRmssd = null; }
+}
+
 function destroyArchPlots() {
   archAudioPlayer?.detachPlot();
   if (archRR) { destroyPlotInstance(archRR); archRR = null; }
@@ -1823,6 +1911,7 @@ function destroyArchPlots() {
   if (archSpectrum?.plot) { archSpectrum.plot.destroy(); archSpectrum = null; }
   if (archSdnn) { archSdnn.destroy(); archSdnn = null; }
   if (archRM) { archRM.destroy(); archRM = null; }
+  destroyArchBreathingPlots();
 }
 
 function renderArchRmssd(analysis) {
@@ -1922,7 +2011,80 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   }
 
   renderArchRmssd(analysis);
+  renderArchiveBreathing(archBreathingCache, analysis);
   nextFrame(resizePlots);
+}
+
+function fmtCpm(v) {
+  return v != null ? Number(v).toFixed(1) + " цикл/мин" : "—";
+}
+
+// Дыхание — только post-session (живого графика во время записи нет,
+// решено отдельно, см. ARCHITECTURE.md). Блок скрыт целиком, если у сессии
+// нет данных акселерометра (has_accel=false) — так выглядит большинство
+// старых сессий, до Части A. Пустых графиков с нулевой линией это не рисует.
+function renderArchiveBreathing(breathing, analysis) {
+  const block = $("arch_breathing_block");
+  if (!block) return;
+  destroyArchBreathingPlots();
+
+  if (!breathing?.has_accel || breathing.insufficient_data) {
+    block.hidden = true;
+    return;
+  }
+  block.hidden = false;
+
+  const charts = AC();
+  const waveEl = $("arch_breathing_wave");
+  const rateEl = $("arch_breathing_rate");
+  const comboEl = $("arch_breathing_rate_rmssd");
+  if (waveEl) waveEl.innerHTML = "";
+  if (rateEl) rateEl.innerHTML = "";
+  if (comboEl) comboEl.innerHTML = "";
+  if (!charts) return;
+
+  const durationSec = analysis?.duration_sec;
+
+  if (breathing.t?.length && breathing.wave_mg?.length) {
+    archBreathingWave = charts.makeBreathingWavePlot(
+      waveEl, breathing.t, breathing.wave_mg, breathing.windows, durationSec, ARCHIVE_PLOT_H
+    );
+  } else if (waveEl) {
+    charts.setChartEmpty(waveEl, "Недостаточно данных");
+  }
+
+  if (breathing.t?.length && breathing.rate_cpm?.length) {
+    archBreathingRate = charts.makeBreathingRatePlot(
+      rateEl, breathing.t, breathing.rate_cpm, durationSec, ARCHIVE_PLOT_H
+    );
+  } else if (rateEl) {
+    charts.setChartEmpty(rateEl, "Недостаточно данных");
+  }
+
+  if (breathing.t?.length && breathing.rate_cpm?.length && analysis?.rmssd_trend?.length) {
+    archBreathingRateRmssd = charts.makeBreathingRateRmssdPlot(
+      comboEl, breathing.t, breathing.rate_cpm, analysis.rmssd_trend, durationSec, ARCHIVE_PLOT_H
+    );
+  } else if (comboEl) {
+    charts.setChartEmpty(comboEl, "Недостаточно данных (нет тренда RMSSD)");
+  }
+
+  const metricsRow = $("arch_breathing_metrics_row");
+  if (metricsRow) {
+    metricsRow.innerHTML = "";
+    const s = breathing.summary || {};
+    const metrics = [
+      ["Частота (медиана)", fmtCpm(s.cpm_median)],
+      ["Годный сигнал", s.good_fraction != null ? Math.round(s.good_fraction * 100) + "%" : "—"],
+      ["Амплитуда", s.amp_median_mg != null ? Number(s.amp_median_mg).toFixed(1) + " мг" : "—"],
+      ["Несущая ось", s.axis || "—"],
+    ];
+    for (const [label, value] of metrics) {
+      const cell = document.createElement("div");
+      cell.innerHTML = `<div class="s-label">${label}</div><div class="s-value">${value}</div>`;
+      metricsRow.appendChild(cell);
+    }
+  }
 }
 
 async function syncArchAudioPlayer(sum) {
@@ -1956,6 +2118,7 @@ async function openArchiveSession(id) {
   destroyArchPlots();
   archAnalysisCache = null;
   archSummaryCache = null;
+  archBreathingCache = null;
 
   let sum = null;
   try {
@@ -1972,6 +2135,12 @@ async function openArchiveSession(id) {
     archAnalysisCache = analysis;
   } catch (e) {
     setErr(String(e.message || e));
+  }
+
+  try {
+    archBreathingCache = await api(sessionBreathingUrl(id));
+  } catch {
+    archBreathingCache = null;  // эндпойнт недоступен — блок просто скрыт
   }
 
   if (sum) {
@@ -2252,3 +2421,5 @@ function onThemeChange() {
 }
 
 window.addEventListener("hrv-theme-change", onThemeChange);
+
+setInterval(updateAccStatusTick, 1000);

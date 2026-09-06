@@ -8,6 +8,7 @@ import random
 import threading
 import time
 from abc import ABC, abstractmethod
+from typing import Callable
 
 from hrv_core.session_types import SESSION_TYPES
 from hrv_core.constants import (
@@ -157,12 +158,19 @@ class PolarH10Source(HRVSource):
         address: str,
         *,
         session_stop: threading.Event,
+        on_state: Callable[[str], None] | None = None,
     ):
         self.address = address
         self._session_stop = session_stop
         self._callback = None
         self._acc_callback = None
         self._last_rr_ts: float | None = None
+        # Уведомление веб-слоя о фазе подключения канала акселерометра —
+        # "ble_repair" (идёт пересопряжение) / "waiting_accel" (пересопряжение
+        # снято, ждём первую пачку PMD). SessionManager подписывается на это,
+        # чтобы показать пользователю, что происходит, вместо одного статичного
+        # «ожидание устройства». RR от этого хука никак не зависит.
+        self._on_state = on_state or (lambda _state: None)
 
     @staticmethod
     def _parse_rr(data: bytearray) -> list[float]:
@@ -270,6 +278,11 @@ class PolarH10Source(HRVSource):
         раз в начале `_loop`, до цикла (пере)подключений — сам цикл может
         переподключаться сколько угодно, но пересопрягать нужно не чаще.
 
+        Гейт — задан ли `_acc_callback`: акселерометр теперь запрашивается на
+        каждой BLE-записи безусловно (SessionManager всегда передаёт колбэк),
+        так что на практике этот метод всегда пересопрягает; условие остаётся
+        как защита для вызовов в обход SessionManager (см. tests/).
+
         RR неприкосновенен: датчик не найден, bluetoothctl недоступен, таймаут
         сопряжения — всё это логируется, запись продолжается без акселерометра
         (PMD дальше сам откажет по месту, в `_start_pmd_accel`).
@@ -278,13 +291,16 @@ class PolarH10Source(HRVSource):
             return
         from hrv_core import ble_repair
 
+        self._on_state("ble_repair")
         print("PMD: пересопряжение ремня перед записью (~20с)…")
         try:
             ok = await asyncio.to_thread(ble_repair.repair, self.address)
         except Exception as exc:
             print(f"PMD: пересопряжение упало с исключением (продолжаю без акселерометра): {exc}")
+            self._on_state("waiting_accel")
             return
         print("PMD: пересопряжение ✓" if ok else "PMD: пересопряжение не удалось — дальше без акселерометра")
+        self._on_state("waiting_accel")
 
     async def _loop(self):
         from bleak import BleakClient
@@ -393,6 +409,7 @@ def build_source(
     session_stop: threading.Event,
     address: str | None = None,
     mock_tag: str | None = None,
+    on_state: Callable[[str], None] | None = None,
 ) -> HRVSource:
     if kind == "mock":
         mt = (mock_tag or "").strip().lower()
@@ -402,5 +419,5 @@ def build_source(
     if kind == "ble":
         if not address:
             raise ValueError("ble требует address")
-        return PolarH10Source(address, session_stop=session_stop)
+        return PolarH10Source(address, session_stop=session_stop, on_state=on_state)
     raise ValueError(f"неизвестный source kind: {kind}")
