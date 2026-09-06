@@ -287,7 +287,16 @@ hrv_accel_batches (id, session_id, ts, hz, n_samples, data)  -- data: blob int16
 baseline        (hour, rmssd_mean, n_samples, updated_at)   -- hour 0–23
 session_types   (slug, label, phrase_prefix, mock_profile, chart_profile, is_custom)
 meditation_phrase_log (session_id, phrase_file, played_at, rn_before, rmssd_before, …)
+
+ix_hrv_points_session_ts        ON hrv_points(session_id, ts)
+ix_hrv_accel_batches_session_ts ON hrv_accel_batches(session_id, ts)
+ix_phrase_log_session           ON meditation_phrase_log(session_id)
 ```
+
+Индексы создаёт `init_db` (`CREATE INDEX IF NOT EXISTS`) — отдельной миграции не
+нужно. Без них любой запрос точек одной сессии — полный скан всей таблицы:
+на 230 тыс. точек это ~0.9 с на каждое открытие соединения (там гоняется
+`_repair_session_timelines`) и ~1.2 с на список сессий.
 
 `hrv_accel_batches`: одна строка ≈ 1 секунда потока (не по отсчёту — иначе 25 Гц ×
 3 оси × 40 мин раздувают таблицу до ~60 тыс. строк за сессию). `ts` — та же

@@ -208,6 +208,20 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
             rn_after_30s    REAL,
             rmssd_after_30s REAL
         )""")
+    # Индексы по session_id: без них каждый запрос точек сессии — полный скан
+    # всей таблицы. Отдельно ts, чтобы ORDER BY ts и MIN/MAX(ts) шли по индексу.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_hrv_points_session_ts "
+        "ON hrv_points(session_id, ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_hrv_accel_batches_session_ts "
+        "ON hrv_accel_batches(session_id, ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_phrase_log_session "
+        "ON meditation_phrase_log(session_id)"
+    )
     conn.commit()
     _repair_session_timelines(conn)
     return conn
