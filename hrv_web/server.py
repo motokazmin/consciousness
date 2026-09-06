@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import math
 import queue
 import re
 from contextlib import asynccontextmanager
@@ -712,7 +713,13 @@ def session_breathing_endpoint(
         "insufficient_data": False,
         "t": [round(float(x), 2) for x in t_dec],
         "wave_mg": [round(float(x), 2) for x in wave_dec],
-        "rate_cpm": [round(float(x), 2) for x in rate_dec],
+        # Края ряда частоты приходят как NaN (переходный процесс фильтра, см.
+        # hrv_core/breathing.py) — отдаём null: JSON не знает NaN, а uPlot
+        # рисует null разрывом, что здесь и требуется.
+        "rate_cpm": [
+            None if not math.isfinite(float(x)) else round(float(x), 2)
+            for x in rate_dec
+        ],
         "windows": windows,
         "summary": {
             "cpm_median": round(summary["cpm_median"], 1) if summary["cpm_median"] is not None else None,

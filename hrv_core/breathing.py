@@ -149,8 +149,15 @@ def instantaneous_rate_cpm(
     rate_cpm = d_phase / (2 * np.pi) * 60.0
     win = max(1, int(round(smooth_sec * fs)))
     if win > 1 and win < len(rate_cpm):
-        kernel = np.ones(win) / win
-        rate_cpm = np.convolve(rate_cpm, kernel, mode="same")
+        kernel = np.ones(win)
+        # Делить на длину окна нельзя: у краёв в окно попадает меньше отсчётов,
+        # и «среднее» занижается тем сильнее, чем ближе к краю. На живой записи
+        # 2026-09-06 (сессия 222) это давало 1.7-4.4 цикл/мин на первых
+        # секундах при настоящих 10-12 — на графике выглядело как медленное
+        # дыхание в начале сессии, то есть как находка, а не как артефакт.
+        # Нормируем на фактическое число слагаемых.
+        counts = np.convolve(np.ones_like(rate_cpm), kernel, mode="same")
+        rate_cpm = np.convolve(rate_cpm, kernel, mode="same") / counts
     return rate_cpm
 
 
@@ -220,6 +227,19 @@ def analyze_breathing(samples: list[tuple[float, int, int, int]]) -> dict | None
     rate_cpm = instantaneous_rate_cpm(phase, RESAMPLE_HZ)
     boundaries = cycle_boundaries(phase, t_grid)
     windows = quality_windows(t_grid, wave, rate_cpm, RESAMPLE_HZ)
+
+    # Края ряда частоты негодны и должны быть видны как разрыв, а не как
+    # медленное дыхание. `filtfilt` и `hilbert` на конечном сигнале дают
+    # переходный процесс, и на трёх живых записях 2026-09-06 (222-224) он
+    # выглядел одинаково: плавный подъём с 3.5-8.5 до нормальных 10-14
+    # цикл/мин за первые ~20 секунд. Совпадение формы у трёх независимых
+    # записей и есть доказательство, что это прибор, а не дыхание.
+    # Окна качества считаются до маскирования — им нужен полный ряд.
+    rate_cpm = rate_cpm.astype(float).copy()
+    edge = min(int(round(RATE_SMOOTH_SEC * RESAMPLE_HZ)), len(rate_cpm) // 3)
+    if edge > 0:
+        rate_cpm[:edge] = np.nan
+        rate_cpm[-edge:] = np.nan
 
     good = [w for w in windows if not w["rejected"]]
     good_rates = [w["rate_cpm"] for w in good if w["rate_cpm"] is not None]

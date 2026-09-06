@@ -46,6 +46,11 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 PAIR_OK = "Pairing successful"
 _PAIR_FAIL = ("Failed to pair", "AuthenticationFailed", "org.bluez.Error")
+# Отдельно от отказов: после `remove` bluez забывает устройство целиком, и
+# `pair`, поданный раньше переоткрытия, отвечает этим. Не ошибка сопряжения —
+# просто рано; лечится ожиданием нового объявления и повтором.
+_NOT_AVAILABLE = "not available"
+PAIR_ATTEMPTS = 3
 
 # Сколько ждать появления датчика в эфире и сколько — самого сопряжения.
 SCAN_TIMEOUT_SEC = 30.0
@@ -61,8 +66,33 @@ def find_polar_mac() -> str | None:
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    for line in out.splitlines():
-        parts = line.split(maxsplit=2)
+    mac = _polar_in_lines(out.splitlines())
+    if mac:
+        return mac
+    # Список известных устройств пуст по самой частой причине: предыдущее
+    # пересопряжение сорвалось уже после `remove`, и ремень из него выпал.
+    # Тогда единственный способ узнать адрес — послушать эфир.
+    try:
+        subprocess.run(
+            ["bluetoothctl", "--timeout", "12", "scan", "on"],
+            capture_output=True, text=True, timeout=30,
+        )
+        out = subprocess.run(
+            ["bluetoothctl", "devices"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return _polar_in_lines(_ANSI.sub("", out).splitlines())
+
+
+def _polar_in_lines(lines: list[str]) -> str | None:
+    """MAC первого устройства с именем `Polar…` в выводе bluetoothctl.
+
+    Годится и для `devices` (`Device MAC Имя`), и для строк сканирования
+    (`[NEW] Device MAC Имя`)."""
+    for line in lines:
+        parts = line.replace("[NEW]", "").replace("[CHG]", "").split(maxsplit=2)
         if len(parts) == 3 and parts[0] == "Device" and parts[2].lower().startswith("polar"):
             return parts[1]
     return None
@@ -129,21 +159,50 @@ def repair(mac: str, echo=None) -> bool:
     пересопряжение на одну запись.
     """
     say = echo or (lambda _s: None)
+    # bluetoothctl печатает MAC заглавными, а адрес сессии приходит строчными
+    # (bleak/BlueZ отдают его в разном регистре в зависимости от источника).
+    # Сравнение по сырой строке из-за этого не находило датчик, который был в
+    # эфире, и пересопряжение «не удавалось» на исправном ремне — при уже
+    # снесённом bond'е, то есть с разрушительным исходом. Регистр нормализуем
+    # везде: в командах bluetoothctl он не важен, в поиске по выводу — важен.
+    mac = mac.upper()
     ctl = _Bluetoothctl(echo=echo)
     try:
         ctl.pump(1.5)
         ctl.send("agent NoInputNoOutput")
         ctl.send("default-agent")
-        ctl.send(f"remove {mac}", settle=2.0)
+        # Подключённый H10 себя не объявляет, и ожидание в эфире провалится на
+        # исправном ремне — например, если линк остался от прошлой записи или
+        # от предыдущего вызова repair. Рвём линк заранее; если его не было,
+        # bluetoothctl просто ответит, что устройство не подключено.
+        ctl.send(f"disconnect {mac}", settle=2.0)
         ctl.send("scan on", settle=0.5)
         say(f"\n[repair] жду {mac} в эфире…\n")
+        # Датчик ищется ДО сноса bond'а: снести привязку и не суметь сопрячься
+        # заново — худший исход из возможных (PMD отвечает ATT 0x0e, а сам MAC
+        # пропадает из списка известных устройств). Пока датчик не найден в
+        # эфире, ломать нечего.
         if ctl.wait_for((mac,), SCAN_TIMEOUT_SEC) is None:
             say("\n[repair] датчик не появился в эфире — надет ли ремень?\n")
             ctl.send("scan off", settle=0.5)
             return False
-        ctl.send(f"pair {mac}", settle=0.5)
-        result = ctl.wait_for((PAIR_OK, *_PAIR_FAIL), PAIR_TIMEOUT_SEC)
-        say(f"\n[repair] pair → {result or 'нет ответа'}\n")
+        ctl.send(f"remove {mac}", settle=2.0)
+        # После `remove` устройство пропадает из bluez, и `pair` до его нового
+        # объявления отвечает «not available». Ждём переоткрытия и пробуем
+        # несколько раз: объявление приходит раз в секунду-две.
+        result = None
+        for attempt in range(PAIR_ATTEMPTS):
+            if ctl.wait_for((mac,), SCAN_TIMEOUT_SEC) is None:
+                say("\n[repair] датчик не переоткрылся после remove\n")
+                break
+            ctl.send(f"pair {mac}", settle=0.5)
+            result = ctl.wait_for(
+                (PAIR_OK, _NOT_AVAILABLE, *_PAIR_FAIL), PAIR_TIMEOUT_SEC
+            )
+            say(f"\n[repair] pair → {result or 'нет ответа'} "
+                f"(попытка {attempt + 1} из {PAIR_ATTEMPTS})\n")
+            if result != _NOT_AVAILABLE:
+                break
         if result != PAIR_OK:
             ctl.send("scan off", settle=0.5)
             return False
