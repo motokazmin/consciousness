@@ -558,14 +558,24 @@ def progress_session_analysis(
     started: float,
     ended: float | None,
     rmssd_mean: float | None,
+    *,
+    raw_rr_max: int | None = None,
 ) -> dict[str, Any]:
-    """Compact analysis for multi-session overlay (всегда corrected RR)."""
+    """Compact analysis for multi-session overlay (всегда corrected RR).
+
+    points — полный ряд сессии (см. session_analysis: SD1/coherence/sdnn_trend
+    считаются на разностях соседних ударов, децимация входа их портит).
+    raw_rr_max — децимация ТОЛЬКО отдаваемой тахограммы raw_rr/raw_rr_x
+    (её потом используют для отрисовки облака Пуанкаре на клиенте, см.
+    poincarePointsFromRawRr в analysis_charts.js) — не расчёта.
+    """
     full = session_analysis(
         points,
         started,
         ended,
         poincare_max=400,
         trend_max=500,
+        raw_rr_max=raw_rr_max,
     )
     poincare_rr = full.get("analysis_rr", full["raw_rr"])
     poincare_rr_x = full.get("analysis_rr_x", full["raw_rr_x"])

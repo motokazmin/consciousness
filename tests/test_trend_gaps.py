@@ -7,6 +7,7 @@ import numpy as np
 from hrv_core.analysis import (
     find_ts_gaps,
     moving_sdnn,
+    progress_session_analysis,
     rmssd_trend,
     session_analysis,
 )
@@ -167,3 +168,24 @@ def test_session_analysis_stays_fast_on_long_session():
     elapsed = time.perf_counter() - start
 
     assert elapsed < 5.0, f"session_analysis слишком медленный: {elapsed:.2f}s на {len(points)} точек"
+
+
+# ── Третий заход: тот же класс бага в /api/progress/analysis
+# (progress_session_analysis) — hrv_web/server.py резал hrv_points ДО расчёта
+# через _decimate_rows(rows, max_points_per_session). SD1/coherence/sdnn_trend
+# там точно так же считаются на разностях соседних ударов.
+
+def test_progress_session_analysis_metrics_independent_of_raw_rr_max():
+    points = _long_session_points(20000, seed=1)
+    duration = points[-1][0]
+
+    small = progress_session_analysis(points, started=0.0, ended=duration, rmssd_mean=42.0, raw_rr_max=50)
+    full = progress_session_analysis(points, started=0.0, ended=duration, rmssd_mean=42.0, raw_rr_max=None)
+
+    assert len(small["raw_rr"]) == 50
+    assert len(full["raw_rr"]) != len(small["raw_rr"])
+
+    assert small["mean_rr"] == full["mean_rr"]
+    assert small["coherence_score"] == full["coherence_score"]
+    assert small["sd1"] == full["sd1"]
+    assert small["sdnn_trend"] == full["sdnn_trend"]

@@ -366,7 +366,7 @@ ix_phrase_log_session           ON meditation_phrase_log(session_id)
 | `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); всегда по полному ряду, `max_points` режет только тахограмму RR |
 | `/api/sessions/{id}/breathing` | GET | Post-session дыхание из акселерометра (см. § «Дыхание из акселерометра»); `max_points` |
 | `/api/progress` | GET | Наложение RMSSD-кривых завершённых сессий |
-| `/api/progress/analysis` | GET | Overlay Poincaré / спектр / SDNN; фильтры сессий |
+| `/api/progress/analysis` | GET | Overlay Poincaré / спектр / SDNN; фильтры сессий; всегда по полному ряду, `max_points_per_session` режет только тахограмму RR |
 | `/api/history` | DELETE | Очистка всей истории |
 | `/api/meditation/phrase-sets` | GET | Список наборов фраз (`?prefix=sit\|lay`) |
 | `/api/meditation/phrase-manifest` | GET | Список mp3 в `static/phrases/{prefix}/{set}/` |
@@ -416,6 +416,19 @@ hrv_points (ts, rr_ms, rmssd)  — сырые RR в БД, читаются ЦЕ�
 режет их так же, децимируя индексы, а не значения перед расчётом.
 `GET /api/sessions/{id}/analysis?max_points=` передаётся в `session_analysis(...,
 raw_rr_max=max_points)` — управляет только длиной этих двух тахограмм.
+
+Тот же принцип и в `progress_session_analysis()` (`GET /api/progress/analysis`,
+overlay нескольких сессий): `max_points_per_session` передаётся как `raw_rr_max`,
+входной ряд каждой сессии в `hrv_web.server.progress_analysis` больше не режется
+`_decimate_rows` перед расчётом. На overlay это заметнее по стоимости, чем в разборе
+одной сессии — там пересчитываются сразу все длинные сессии окна (по БД их три:
+225, 91, 96) — но остаётся в пределах ~1 секунды на 40 сессий (было ~0.97 с,
+стало ~1.06 с).
+
+`_decimate_rows` остался как есть (децимация на входе) в `/api/progress` и
+`GET /api/sessions/{id}/points` — эти два эндпойнта отдают сырые точки как есть
+({x, rr} / {ts, rr_ms, rmssd}), без метрик на разностях соседних ударов; резать
+вход там нечем не испортить.
 
 ### Графики и расчёт
 

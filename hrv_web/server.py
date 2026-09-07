@@ -467,6 +467,10 @@ def progress_data(
 
     out_sessions = []
     for sid, stag, started, ended in sessions:
+        # Децимация здесь безопасна на входе: точки идут прямо в JSON как
+        # {x, rr} без каких-либо производных метрик (RMSSD/SD1 тут не
+        # считаются — в отличие от /api/progress/analysis). Ничего не строится
+        # на разности соседних ударов после прореживания, портить нечего.
         rows = conn.execute(
             "SELECT ts, rr_ms FROM hrv_points WHERE session_id = ? ORDER BY ts",
             (sid,),
@@ -854,23 +858,28 @@ def progress_analysis(
 
     out_sessions = []
     for sid, stag, started, ended in sessions:
+        # Полный ряд, без децимации на входе: SD1/coherence/sdnn_trend в
+        # progress_session_analysis считаются на разностях соседних ударов —
+        # тот же класс бага, что был в session_analysis_endpoint (см. commit
+        # "тренд считается по исправленному ряду и по всем ударам"). Резать
+        # нужно только то, что реально уходит в JSON — raw_rr (max_points_per_session).
         rows = conn.execute(
             "SELECT ts, rr_ms, rmssd FROM hrv_points WHERE session_id = ? ORDER BY ts",
             (sid,),
         ).fetchall()
         if not rows:
             continue
-        rows_dec = _decimate_rows(rows, max_points_per_session)
         stats = conn.execute(
             "SELECT AVG(rmssd) FROM hrv_points WHERE session_id = ?",
             (sid,),
         ).fetchone()
         rmssd_mean = float(stats[0]) if stats and stats[0] is not None else None
         analysis = progress_session_analysis(
-            rows_dec,
+            rows,
             started,
             ended,
             rmssd_mean,
+            raw_rr_max=max_points_per_session,
         )
         out_sessions.append(
             {
@@ -886,6 +895,10 @@ def progress_analysis(
 
 @app.get("/api/sessions/{session_id}/points")
 def session_points(session_id: int, max_points: int = 8000):
+    """Точки как лежат в БД (ts, rr_ms, rmssd — живой расчёт), без пересчёта
+    чего-либо на клиенте. Децимация на входе тут безвредна по тому же
+    рассуждению, что и в /api/progress: ничего не выводится из разности
+    соседних ударов, отдаём просто ряд как есть."""
     max_points = max(100, min(max_points, 50_000))
     conn = init_db()
     rows = conn.execute(
