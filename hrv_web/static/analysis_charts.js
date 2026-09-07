@@ -284,12 +284,42 @@
     marker.textContent = `${peakFreq.toFixed(2)} Гц`;
   }
 
+  // Тренды RMSSD/SDNN: у обоих есть null-точки (разрыв записи, см. hrv_core.analysis
+  // find_ts_gaps) и опциональная лог-ось Y (opts.scale === "log", по умолчанию линейная).
+  // Лог-ось не принимает нули/отрицательные — такие точки уходят в null отдельно от
+  // разрывов, чтобы не ронять отрисовку (см. спецификацию).
+  function finiteMax(ys, fallback) {
+    return ys.reduce((a, b) => (b == null || !Number.isFinite(b) ? a : Math.max(a, b)), fallback);
+  }
+
+  function logSafeYs(ys) {
+    return ys.map((v) => (v == null || v <= 0 || !Number.isFinite(v) ? null : v));
+  }
+
+  function rangeLogSafe(u, dataMin, dataMax) {
+    const base = u.scales.y.log ?? 10;
+    if (typeof uPlot.rangeLog === "function") return uPlot.rangeLog(dataMin, dataMax, base, true);
+    const lo = dataMin > 0 ? dataMin : 1;
+    const hi = dataMax > lo ? dataMax : lo * 10;
+    return [lo, hi];
+  }
+
+  function trendYScale(rawYs, opts, fallbackMax) {
+    if (opts?.scale !== "log") {
+      const yMax = opts?.yMax ?? (finiteMax(rawYs, fallbackMax) * 1.15);
+      return { scale: { time: false, distr: 1, range: [0, yMax] }, ys: rawYs };
+    }
+    return {
+      scale: { time: false, distr: 3, log: 10, range: rangeLogSafe },
+      ys: logSafeYs(rawYs),
+    };
+  }
+
   function makeSdnnPlot(el, trend, durationSec, height, opts) {
     if (!trend?.length) return null;
     const xs = trend.map((p) => p.x);
-    const ys = trend.map((p) => p.sdnn);
+    const { scale: yScale, ys } = trendYScale(trend.map((p) => p.sdnn), opts, 10);
     const xMax = durationSec || xs[xs.length - 1] || 1;
-    const yMax = opts?.yMax ?? (ys.reduce((a, b) => (a > b ? a : b), 10) * 1.15);
     const w = plotWidth(el);
 
     return new uPlot(
@@ -299,7 +329,7 @@
         padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
-          y: { time: false, distr: 1, range: [0, yMax] },
+          y: yScale,
         },
         series: [
           {},
@@ -312,6 +342,9 @@
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...axisStyle(), label: "SDNN, ms", size: 52 },
         ],
+        hooks: {
+          draw: [(u) => drawRejectedWindows(u, opts?.gaps)],
+        },
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
       },
@@ -320,12 +353,11 @@
     );
   }
 
-  function makeRmssdPlot(el, trend, durationSec, height) {
+  function makeRmssdPlot(el, trend, durationSec, height, opts) {
     if (!trend?.length) return null;
     const xs = trend.map((p) => p.x);
-    const ys = trend.map((p) => p.rmssd);
+    const { scale: yScale, ys } = trendYScale(trend.map((p) => p.rmssd), opts, 40);
     const xMax = durationSec || xs[xs.length - 1] || 1;
-    const yMax = ys.reduce((a, b) => (a > b ? a : b), 40) * 1.15;
     const w = plotWidth(el);
 
     return new uPlot(
@@ -335,7 +367,7 @@
         padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
-          y: { time: false, distr: 1, range: [0, yMax] },
+          y: yScale,
         },
         series: [
           {},
@@ -349,6 +381,9 @@
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...axisStyle(), label: "RMSSD, ms", size: 52 },
         ],
+        hooks: {
+          draw: [(u) => drawRejectedWindows(u, opts?.gaps)],
+        },
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
       },

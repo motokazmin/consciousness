@@ -363,7 +363,7 @@ ix_phrase_log_session           ON meditation_phrase_log(session_id)
 | `/api/sessions/{id}/explanation` | PUT | Записать разбор. Тело — JSON `{body, author}` **или** сырой markdown (тогда автор из `?author=`); лимит 20 000 символов |
 | `/api/sessions/{id}/explanation` | DELETE | Удалить разбор |
 | `/api/sessions/{id}/points` | GET | Точки (с downsampling) |
-| `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); `max_points` |
+| `/api/sessions/{id}/analysis` | GET | Post-session анализ (Poincaré, спектр, SDNN, RMSSD); всегда по полному ряду, `max_points` режет только тахограмму RR |
 | `/api/sessions/{id}/breathing` | GET | Post-session дыхание из акселерометра (см. § «Дыхание из акселерометра»); `max_points` |
 | `/api/progress` | GET | Наложение RMSSD-кривых завершённых сессий |
 | `/api/progress/analysis` | GET | Overlay Poincaré / спектр / SDNN; фильтры сессий |
@@ -399,10 +399,23 @@ curl -X PUT --data-binary @разбор.md -H 'Content-Type: text/markdown' \
 ### Поток данных
 
 ```
-hrv_points (ts, rr_ms, rmssd)  — сырые RR в БД
+hrv_points (ts, rr_ms, rmssd)  — сырые RR в БД, читаются ЦЕЛИКОМ (без децимации)
   → correct_rr_artifacts() → session_analysis() / progress_session_analysis()
   → JSON (analysis_rr_*, poincare, spectrum, …) → analysis_charts.js (uPlot)
 ```
+
+**Децимация — только на выходе, никогда на входе.** `session_analysis()` считает
+всегда по полному ряду сессии: RMSSD/SD1/тренды — это разности СОСЕДНИХ ударов, и
+любое прореживание ряда до расчёта делает соседями удары, которые ими не были —
+метрики расходятся с реальными (на записи в несколько часов — почти вдвое). Каждый
+график режет свой выход сам: `poincare_pairs(max_points=2500)`,
+`moving_sdnn`/`rmssd_trend` (`trend_max=500`, децимация индексов после расчёта),
+`compute_spectrum` (размер выхода зависит от длины записи, не от числа сырых точек —
+ресемплинг на равномерную сетку `DEFAULT_FS`). `raw_rr`/`analysis_rr` — единственные
+поля, которые до этой правки отдавались целиком; `raw_rr_timeline(max_points=…)`
+режет их так же, децимируя индексы, а не значения перед расчётом.
+`GET /api/sessions/{id}/analysis?max_points=` передаётся в `session_analysis(...,
+raw_rr_max=max_points)` — управляет только длиной этих двух тахограмм.
 
 ### Графики и расчёт
 
@@ -413,10 +426,49 @@ hrv_points (ts, rr_ms, rmssd)  — сырые RR в БД
 | **Спектр (FFT)** | `compute_spectrum` | Corrected → интерполяция 4 Гц → detrend → Welch PSD; пик в 0.04–0.15 Гц |
 | **Coherence** | `coherence_score` | Доля мощности в 0.08–0.12 Гц от суммы 0–0.5 Гц (%) |
 | **SDNN trend** | `moving_sdnn` | std(corrected RR) в окне 60 с; первые 20 с не рисуются |
-| **RMSSD trend** | `rmssd_trend` | Сохранённые значения `rmssd` по времени (как писались в live) |
+| **RMSSD trend** | `rmssd_trend` | sqrt(mean(diff²)) по corrected RR в окне 60 с (`RMSSD_WINDOW_SEC`); первые 20 с не рисуются |
 | **Дыхание** (если есть акселерометр) | `hrv_core/breathing.py` | См. § «Дыхание из акселерометра» ниже |
 
-Константы: `ARTIFACT_REL_THRESHOLD=0.20`, `ARTIFACT_MEDIAN_WINDOW=5`, `RR_PHYSIO_MIN_MS=300`, `RR_PHYSIO_MAX_MS=2000`, `MIN_SPECTRAL_SEC=60`, `SDNN_INITIAL_CROP_SEC=20`.
+`rmssd_trend` раньше рисовался по «живой» колонке `hrv_points.rmssd` — посчитанной на лету
+по нефильтрованному буферу (`hrv_core/pipeline.compute_rmssd`), а не по corrected RR, как
+остальные графики. Единичный выброс (например RR при надевании ремня) до коррекции давал
+пик, который сплющивал всю кривую тренда. Теперь `rmssd_trend` считается тем же способом,
+что и `moving_sdnn` — скользящее окно по времени над `analysis_rr` — и живёт в
+`hrv_core/analysis.py` через общий приватный `_moving_trend`. **Live-график во время
+записи (`progress_session_analysis` не используется там; экран активной сессии) на эту
+правку не завязан** — он продолжает питаться живой колонкой `hrv_points.rmssd`.
+
+`_moving_trend` считает оба тренда за один проход без O(n²): левая граница окна —
+`np.searchsorted` по отсортированному `ts` (окно монотонно), статистика — префиксными
+суммами (SDNN — сумма значений и сумма квадратов; RMSSD — префиксная сумма квадратов
+последовательных разностей). Предыдущая версия строила булеву маску по всему `ts` на
+каждой точке — на ночной записи (десятки тысяч ударов) это секунды на один тренд.
+
+**Разрывы записи в тренде** считаются по полному ряду сессии (см. «децимация — только
+на выходе» выше), не по прореженному для отрисовки RR. Критерий (`TREND_BREAK_GAP_SEC=4.0`
+в `hrv_core/constants.py`):
+пауза между соседними `ts` дольше 4 с внутри 60-секундного окна — удары физически не были
+получены, окно недостоверно. Такая точка тренда (SDNN и RMSSD — природа общая) уходит в
+ответе как `null`, сам разрыв — в список `gaps` (`{t_start, t_end, rejected: true}`,
+секунды от t₀), которым `analysis_charts.js` затеняет график (`drawRejectedWindows` — тот же
+приём и код, что и для забракованных окон дыхания). Обрезка первых `SDNN_INITIAL_CROP_SEC`
+секунд по-прежнему просто не эмитится (не путать с `null`-разрывом).
+Осознанно НЕ используется как критерий доля исправленных ударов в окне — она стирает
+и обычную кривую в местах реального содержания (см. журнал/PR: 3.8% кривой при пороге ≥2%,
+медиана тренда на этих точках была выше общей).
+
+**Полоска качества** (`quality_strip`) — доля исправленных ударов (`correct_rr_artifacts`)
+по минутным окнам, рисуется тонкой полосой под графиком тренда; в отличие от `gaps` ничего
+не скрывает, только подсвечивает плотность коррекции. **`break_summary`**
+(`{broken_minutes, total_minutes}`) — то же деление на минуты, посчитано в сводку сессии
+(«Разрывы записи: N из M мин» в `arch_summary_grid`).
+
+**Шкала Y тренда:** переключатель линейная/логарифмическая на графиках SDNN и RMSSD
+(`opts.scale` в `makeSdnnPlot`/`makeRmssdPlot`), по умолчанию линейная, выбор не хранится
+между сессиями архива. Лог-режим переводит нули/отрицательные значения в `null` отдельно от
+разрывов (`distr:1` не принимает такие точки).
+
+Константы: `ARTIFACT_REL_THRESHOLD=0.20`, `ARTIFACT_MEDIAN_WINDOW=5`, `RR_PHYSIO_MIN_MS=300`, `RR_PHYSIO_MAX_MS=2000`, `MIN_SPECTRAL_SEC=60`, `SDNN_INITIAL_CROP_SEC=20`, `TREND_BREAK_GAP_SEC=4.0`.
 
 ### Коррекция артефактов (всегда)
 
@@ -428,7 +480,7 @@ hrv_points (ts, rr_ms, rmssd)  — сырые RR в БД
 
 ### Ответ `/api/sessions/{id}/analysis`
 
-Ключевые поля: `raw_rr`, `raw_rr_x`, `analysis_rr`, `analysis_rr_x`, `poincare`, `spectrum`, `sdnn_trend`, `rmssd_trend`, `mean_rr`, `coherence_score`, `outliers`.
+Ключевые поля: `raw_rr`, `raw_rr_x`, `analysis_rr`, `analysis_rr_x`, `poincare`, `spectrum`, `sdnn_trend`, `rmssd_trend`, `gaps`, `quality_strip`, `break_summary`, `mean_rr`, `coherence_score`, `outliers`.
 
 ### Дыхание из акселерометра (`hrv_core/breathing.py`, `GET /api/sessions/{id}/breathing`)
 

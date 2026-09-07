@@ -17,6 +17,11 @@ BASELINE_MIN_SAMPLES = BASELINE_SAMPLES // 2  # 30
 # Окно усреднения RR для метрики smoothed_rr (сек)
 SMOOTHED_RR_WINDOW_SEC = 15
 
+# Разрыв в потоке RR (пауза между соседними ts дольше этого) внутри окна
+# тренда RMSSD/SDNN: удары физически не получены, окно по ним недостоверно —
+# точка тренда уходит в null, участок затеняется на графике (сек)
+TREND_BREAK_GAP_SEC = 4.0
+
 # Drift: RMSSD ниже baseline × этого коэффициента (~20% падение)
 DRIFT_THRESHOLD = 0.80
 

@@ -1812,6 +1812,9 @@ let archSpectrum = null;
 let archSdnn = null;
 let archRM = null;
 let archAnalysisCache = null;
+// Шкала Y тренда — по умолчанию линейная, переключатель не сохраняется между сессиями.
+let archSdnnScale = "linear";
+let archRmssdScale = "linear";
 let archSummaryCache = null;
 let archBreathingWave = null;
 let archBreathingRate = null;
@@ -1897,6 +1900,7 @@ function renderSummaryGrid(sum) {
   const coherence = archAnalysisCache?.coherence_score != null
     ? archAnalysisCache.coherence_score
     : sum.coherence_score;
+  const breaks = archAnalysisCache?.break_summary;
   const fields = [
     ["RMSSD mean",  sum.rmssd_mean != null ? sum.rmssd_mean.toFixed(1) + " ms" : "—"],
     ["RMSSD min",   sum.rmssd_min  != null ? sum.rmssd_min.toFixed(1)  + " ms" : "—"],
@@ -1904,6 +1908,7 @@ function renderSummaryGrid(sum) {
     ["Mean RR",     meanRr != null ? Number(meanRr).toFixed(1) + " ms" : "—"],
     ["Coherence",   coherence != null ? Number(coherence).toFixed(1) : "—"],
     ["Длительность", durMin != null ? durMin.toFixed(1) + " мин" : "—"],
+    ["Разрывы записи", breaks ? `${breaks.broken_minutes} из ${breaks.total_minutes} мин` : "—"],
     ["vs baseline", vsBl],
     ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
     ["Guided meditation", sum.opt_guided_phrases ? "да" : "нет"],
@@ -1957,13 +1962,60 @@ function destroyArchPlots() {
   destroyArchBreathingPlots();
 }
 
+// Полоска качества под трендом RMSSD/SDNN: доля исправленных ударов по
+// минутам (hrv_core.analysis.quality_strip) — метка, а не фильтр, ничего не
+// скрывает. Раскладка по ширине не завязана на uPlot-пиксели: у этих
+// графиков нет zoom/pan (в отличие от RR), поэтому пропорциональная раскладка
+// по durationSec не рассинхронизируется.
+function renderQualityStrip(el, strip, durationSec) {
+  if (!el) return;
+  el.innerHTML = "";
+  if (!strip?.length || !durationSec) return;
+  const warn = TH()?.cssVar("--yellow", "#f5c542") || "#f5c542";
+  const widthPct = Math.max(0.4, (60 / durationSec) * 100);
+  for (const bucket of strip) {
+    const seg = document.createElement("div");
+    seg.className = "quality-strip-seg";
+    seg.style.left = `${(bucket.x / durationSec) * 100}%`;
+    seg.style.width = `${widthPct}%`;
+    const alpha = Math.min(1, bucket.corrected_fraction * 5);
+    seg.style.background = alpha > 0.02
+      ? (TH()?.hexToRgba(warn, alpha) || `rgba(245,197,66,${alpha})`)
+      : "transparent";
+    el.appendChild(seg);
+  }
+}
+
+function renderArchSdnn(analysis) {
+  const dEl = $("arch_sdnn");
+  const qEl = $("arch_sdnn_quality");
+  const btn = $("arch_sdnn_scale_toggle");
+  if (btn) btn.textContent = archSdnnScale === "linear" ? "лин" : "лог";
+  if (archSdnn) { archSdnn.destroy(); archSdnn = null; }
+  if (!dEl) return;
+  dEl.innerHTML = "";
+  const charts = AC();
+  if (!charts || !analysis?.sdnn_trend?.length) {
+    charts?.setChartEmpty(dEl, "Недостаточно данных");
+    renderQualityStrip(qEl, null, 0);
+    return;
+  }
+  const profile = chartProfileFor(archSummaryCache?.tag);
+  const opts = { ...(profile.options.sdnn || {}), scale: archSdnnScale, gaps: analysis.gaps };
+  archSdnn = charts.makeSdnnPlot(dEl, analysis.sdnn_trend, analysis.duration_sec, ARCHIVE_PLOT_H, opts);
+  renderQualityStrip(qEl, analysis.quality_strip, analysis.duration_sec);
+}
+
 function renderArchRmssd(analysis) {
   const panel = $("arch_rmssd_panel");
   const mode = $("arch_rmssd_mode")?.value || "hidden";
+  const btn = $("arch_rmssd_scale_toggle");
+  if (btn) btn.textContent = archRmssdScale === "linear" ? "лин" : "лог";
   if (!panel) return;
   if (mode !== "show") {
     panel.classList.remove("visible");
     if (archRM) { archRM.destroy(); archRM = null; }
+    renderQualityStrip($("arch_rmssd_quality"), null, 0);
     return;
   }
   panel.classList.add("visible");
@@ -1974,9 +2026,12 @@ function renderArchRmssd(analysis) {
   const charts = AC();
   if (!charts || !analysis?.rmssd_trend?.length) {
     charts?.setChartEmpty(el, "Недостаточно данных");
+    renderQualityStrip($("arch_rmssd_quality"), null, 0);
     return;
   }
-  archRM = charts.makeRmssdPlot(el, analysis.rmssd_trend, analysis.duration_sec, ARCHIVE_PLOT_H);
+  const opts = { scale: archRmssdScale, gaps: analysis.gaps };
+  archRM = charts.makeRmssdPlot(el, analysis.rmssd_trend, analysis.duration_sec, ARCHIVE_PLOT_H, opts);
+  renderQualityStrip($("arch_rmssd_quality"), analysis.quality_strip, analysis.duration_sec);
 }
 
 function renderArchiveAnalysisCharts(analysis, sum) {
@@ -2046,11 +2101,9 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   }
 
   if (activePanels.has("sdnn")) {
-    if (!analysis?.sdnn_trend?.length) {
-      charts.setChartEmpty(dEl, "Недостаточно данных");
-    } else {
-      archSdnn = charts.makeSdnnPlot(dEl, analysis.sdnn_trend, analysis.duration_sec, ARCHIVE_PLOT_H, profile.options.sdnn);
-    }
+    renderArchSdnn(analysis);
+  } else {
+    renderQualityStrip($("arch_sdnn_quality"), null, 0);
   }
 
   renderArchRmssd(analysis);
@@ -2152,6 +2205,8 @@ async function openArchiveSession(id) {
   const detail = $("arch_detail");
   detail.classList.add("visible");
   $("arch_id").textContent = String(id);
+  archSdnnScale = "linear";
+  archRmssdScale = "linear";
   const delBtn = $("btn_delete_arch_session");
   if (delBtn) {
     delBtn.hidden = false;
@@ -2328,6 +2383,18 @@ $("session_expl_modal")?.addEventListener("click", (e) => {
 });
 
 $("arch_rmssd_mode")?.addEventListener("change", () => {
+  renderArchRmssd(archAnalysisCache);
+  nextFrame(resizePlots);
+});
+
+$("arch_sdnn_scale_toggle")?.addEventListener("click", () => {
+  archSdnnScale = archSdnnScale === "linear" ? "log" : "linear";
+  renderArchSdnn(archAnalysisCache);
+  nextFrame(resizePlots);
+});
+
+$("arch_rmssd_scale_toggle")?.addEventListener("click", () => {
+  archRmssdScale = archRmssdScale === "linear" ? "log" : "linear";
   renderArchRmssd(archAnalysisCache);
   nextFrame(resizePlots);
 });

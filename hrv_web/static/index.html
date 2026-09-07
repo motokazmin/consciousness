@@ -770,6 +770,39 @@
       font-size: 0.82rem;
     }
 
+    .scale-toggle-btn {
+      font-family: var(--mono);
+      font-size: 0.6rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      background: transparent;
+      border: 1px solid var(--border2);
+      border-radius: 4px;
+      padding: 3px 9px;
+      cursor: pointer;
+    }
+    .scale-toggle-btn:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+
+    /* Полоска качества под трендом: доля исправленных ударов по минутам —
+       помечаем, а не прячем точки тренда (см. ARCHITECTURE.md, разрывы записи). */
+    .quality-strip {
+      position: relative;
+      height: 12px;
+      margin: 0 4px 6px;
+      border-radius: 3px;
+      overflow: hidden;
+      background: var(--surface2);
+    }
+    .quality-strip-seg {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+    }
+
     .peak-marker-wrap {
       position: relative;
     }
@@ -1850,8 +1883,10 @@
             <div class="plot-card" style="margin-bottom:0">
               <div class="plot-header">
                 <span class="plot-title">Скользящий тренд SDNN</span>
+                <button type="button" class="scale-toggle-btn" id="arch_sdnn_scale_toggle" title="Шкала Y: линейная / логарифмическая">лин</button>
               </div>
               <div class="plot-body" id="arch_sdnn"></div>
+              <div class="quality-strip" id="arch_sdnn_quality" title="Полоска качества: доля исправленных ударов по минутам. Затенение на графике — разрыв записи (пауза в RR длиннее 4с)"></div>
             </div>
           </div>
           <div class="dashboard-grid-2x2">
@@ -1889,8 +1924,12 @@
           </div>
           <div class="arch-rmssd-panel" id="arch_rmssd_panel">
             <div class="plot-card">
-              <div class="plot-header"><span class="plot-title">RMSSD — от начала сессии</span></div>
+              <div class="plot-header">
+                <span class="plot-title">RMSSD — от начала сессии</span>
+                <button type="button" class="scale-toggle-btn" id="arch_rmssd_scale_toggle" title="Шкала Y: линейная / логарифмическая">лин</button>
+              </div>
               <div class="plot-body" id="arch_rm"></div>
+              <div class="quality-strip" id="arch_rmssd_quality" title="Полоска качества: доля исправленных ударов по минутам. Затенение на графике — разрыв записи (пауза в RR длиннее 4с)"></div>
             </div>
           </div>
           <div class="arch-breathing-block" id="arch_breathing_block" hidden>

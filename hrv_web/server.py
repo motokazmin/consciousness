@@ -713,6 +713,14 @@ def session_analysis_endpoint(
     session_id: int,
     max_points: int = 12_000,
 ):
+    """max_points — сколько точек отдать в тахограмме RR (raw_rr/analysis_rr) для
+    отрисовки, НЕ по скольким считать. Расчёт (RMSSD/SD1/тренды/спектр) всегда
+    идёт по полному ряду сессии: он строится на разностях соседних ударов, и
+    прореживание ряда ДО расчёта превращает несоседние удары в соседние — метрики
+    расходятся с реальными (на записи длиннее нескольких часов — почти вдвое:
+    RMSSD/SD1 задирает пропущенное время между оставшимися точками в разность).
+    Остальные графики режут свой выход сами (poincare/trend_max внутри
+    session_analysis, min-бакеты в quality_strip)."""
     max_points = max(100, min(max_points, 50_000))
     conn = init_db()
     row = conn.execute(
@@ -731,8 +739,7 @@ def session_analysis_endpoint(
         (session_id,),
     ).fetchall()
     conn.close()
-    rows = _decimate_rows(rows, max_points)
-    return session_analysis(rows, started, ended)
+    return session_analysis(rows, started, ended, raw_rr_max=max_points)
 
 
 @app.get("/api/sessions/{session_id}/breathing")
