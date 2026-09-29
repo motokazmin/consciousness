@@ -130,6 +130,40 @@ class BreathingAnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(res["summary"]["cpm_median"], breath_cpm, delta=1.5)
         self.assertLess(res["summary"]["good_fraction"], 1.0)
 
+    def test_posture_change_picks_axis_per_posture_and_keeps_quiet_windows(self):
+        """Поворот посреди записи: вектор силы тяжести уходит с Z на Y, дыхание
+        — с Z на Y, размах падает вчетверо. Ось выбирается в каждой позе,
+        крупная волна без движения не бракуется (раньше брак шёл по размеру
+        волны, и поза на спине выглядела как движение)."""
+        fs = 25.5
+        rng = np.random.default_rng(1)
+        dur = 360.0
+        n = int(dur * fs)
+        t = np.arange(n) / fs
+        breath = np.sin(2 * np.pi * (18.0 / 60.0) * t)
+        first = t < dur / 2
+        x = 50.0 + rng.normal(0, 1.0, n)
+        y = np.where(first, 30.0, 980.0) + rng.normal(0, 1.0, n)
+        z = np.where(first, 980.0, 30.0) + rng.normal(0, 1.0, n)
+        z = z + np.where(first, 24.0 * breath, 0.0)   # на спине — крупная волна на Z
+        y = y + np.where(first, 0.0, 6.0 * breath)    # на боку — мелкая на Y
+        samples = list(zip((1_700_000_000.0 + t).tolist(),
+                           x.round().astype(int).tolist(),
+                           y.round().astype(int).tolist(),
+                           z.round().astype(int).tolist()))
+        res = analyze_breathing(samples)
+        self.assertIsNotNone(res)
+        real = [p for p in res["postures"] if not p["transition"]]
+        self.assertEqual([p["axis"] for p in real], ["Z", "Y"])
+        # Брак — только у окон, накрывающих поворот, не у крупной волны на спине
+        rejected = [w for w in res["windows"] if w["rejected"]]
+        turn = 1_700_000_000.0 + dur / 2
+        self.assertTrue(all(w["t_start"] < turn < w["t_end"] for w in rejected))
+        self.assertAlmostEqual(res["summary"]["cpm_median"], 18.0, delta=1.0)
+        # Частота у стыка поз замаскирована, а не показывает рывок
+        i = int(np.searchsorted(res["t"], turn))
+        self.assertTrue(np.isnan(res["rate_cpm"][i]))
+
     def test_too_little_data_returns_none(self):
         samples = _accel_samples(1.0, 25.5, 18.0 / 60.0)
         self.assertIsNone(analyze_breathing(samples))

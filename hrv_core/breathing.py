@@ -12,7 +12,8 @@
 3. Несущая ось — та из трёх, у которой p75 модуля отфильтрованного сигнала
    наибольший (не назначается заранее: выбирает то, как ремень сидит на
    груди). На живых прогонах это Z (22.5 мг после нагрузки, 1.7 мг в покое)
-   против 0.4–4.3 мг у остальных осей.
+   против 0.4–4.3 мг у остальных осей. **Выбирается заново в каждой позе**
+   (`posture_segments`): после поворота дыхание может лечь на другую ось.
 4. Фаза несущей — `np.unwrap(np.angle(hilbert(v)))`. Число циклов между
    двумя моментами = разность фаз / 2π. Пики намеренно не ищутся: подъём и
    спад грудной клетки несимметричны, детектор пиков дробит вдох надвое и
@@ -22,8 +23,19 @@
 6. Границы циклов — моменты, где фаза проходит через 0 по модулю 2π (для
    будущего счёта вдохов, не используется графиками).
 7. Качество — по окнам `QUALITY_WINDOW_SEC`/`QUALITY_STEP_SEC`: амплитуда
-   (p75 модуля несущей в окне) и брак по движению, если амплитуда больше чем
-   `MOTION_REJECT_FACTOR`× медианы амплитуд по прогону.
+   (p75 модуля несущей в окне) и брак. **Брак — по движению, а не по
+   размеру волны**: окно негодно, если в нём не меньше `MOTION_MIN_SEC`
+   секунд с движением (разброс модуля ускорения за секунду больше
+   `MOTION_SEC_FACTOR` медиан, не меньше `MOTION_SEC_FLOOR_MG`) или оно
+   захватывает смену позы.
+
+   Раньше брак шёл по амплитуде (больше `MOTION_REJECT_FACTOR`× медианы по
+   прогону). На ночи это бракует не движение, а позу: размах в мг — это
+   наклон груди относительно силы тяжести, и лёжа на спине он в разы больше,
+   чем на боку, при том же дыхании (ночь 2026-09-28: переворот — размах
+   31 → 3.7 мг при частоте 18.1 → 18.9 цикл/мин). Дыхание почти не меняет
+   модуль вектора — оно его наклоняет; движение тела меняет модуль сразу
+   (поворот — 100–190 мг разброса за секунду при ~2 мг в покое).
 
 **Важно:** частота для графиков — только по фазе (см. `instantaneous_rate_cpm`).
 Оценка по argmax спектра (Уэлч) остаётся исключительно диагностикой в
@@ -57,6 +69,32 @@ QUALITY_STEP_SEC = 30.0
 # (разница ×7.9); порог ×3 берёт запас втрое меньше этого разрыва — ловит
 # явное движение, не задевая обычный разброс амплитуды дыхания между окнами.
 MOTION_REJECT_FACTOR = 3.0
+
+# Позы. Вектор силы тяжести — среднее сырого ускорения по блокам
+# POSTURE_BLOCK_SEC; новая поза — если два блока подряд отклонились от вектора
+# текущей позы больше чем на POSTURE_ANGLE_DEG (один блок — это рывок, а не
+# поза). Поза короче POSTURE_MIN_SEC — переход: окна в ней бракуются, ось
+# не выбирается.
+POSTURE_BLOCK_SEC = 10.0
+POSTURE_ANGLE_DEG = 20.0
+POSTURE_MIN_SEC = 60.0
+# Частота дыхания у границы позы негодна: несущая ось меняется скачком,
+# фаза Гильберта на стыке рвётся. Маскируется, как края ряда.
+POSTURE_EDGE_SEC = RATE_SMOOTH_SEC
+
+# Движение. Разброс (std) модуля ускорения по секундам; секунда «с движением»,
+# если разброс больше MOTION_SEC_FACTOR× медианы по прогону и не меньше
+# MOTION_SEC_FLOOR_MG. Окно бракуется, если таких секунд не меньше
+# MOTION_MIN_SEC. Ночь 2026-09-28: медиана 1.9 мг, 99-й перцентиль 15,
+# повороты 100–190.
+#
+# Порог в секундах подобран по тому, портит ли движение частоту: отклонение
+# частоты окна от соседних годных. Годные окна — 0.3 цикл/мин (медиана);
+# окна с 3–5 с подёргивания — 0.5 (ночь 2026-09-07) и 0.9 (2026-09-28);
+# с 6 с и больше — 1.3–1.7, в худших десяти процентах до 4.
+MOTION_SEC_FACTOR = 5.0
+MOTION_SEC_FLOOR_MG = 5.0
+MOTION_MIN_SEC = 6
 
 # Минимум длительности записи для оценки (сек). Меньше — не набирается даже
 # запас `filtfilt`/`hilbert` на краях после интерполяции на RESAMPLE_HZ (для
@@ -128,8 +166,102 @@ def select_carrier_axis(filtered_xyz: np.ndarray) -> tuple[int, np.ndarray]:
     return int(np.argmax(p75)), p75
 
 
+def _angle_deg(a: np.ndarray, b: np.ndarray) -> float:
+    na, nb = np.linalg.norm(a), np.linalg.norm(b)
+    if na == 0 or nb == 0:
+        return 0.0
+    return float(np.degrees(np.arccos(np.clip(np.dot(a, b) / (na * nb), -1.0, 1.0))))
+
+
+def posture_segments(
+    uni: np.ndarray,
+    fs: float,
+    *,
+    block_sec: float = POSTURE_BLOCK_SEC,
+    angle_deg: float = POSTURE_ANGLE_DEG,
+    min_sec: float = POSTURE_MIN_SEC,
+) -> list[dict]:
+    """Позы по вектору силы тяжести: [{start, end, gravity, transition}] —
+    индексы равномерной сетки, end не включительно. Переход (transition) —
+    поза короче `min_sec`: в ней человек ворочался, ось не выбирается."""
+    n = len(uni)
+    blk = max(1, int(round(block_sec * fs)))
+    n_blk = max(1, n // blk)
+    means = np.array([uni[i * blk:min(n, (i + 1) * blk)].mean(axis=0) for i in range(n_blk)])
+
+    starts = [0]
+    ref_sum = means[0].copy()
+    ref_n = 1
+    k = 1
+    while k < n_blk:
+        ref = ref_sum / ref_n
+        if (
+            _angle_deg(means[k], ref) > angle_deg
+            and (k + 1 >= n_blk or _angle_deg(means[k + 1], ref) > angle_deg)
+        ):
+            starts.append(k)
+            ref_sum = means[k].copy()
+            ref_n = 1
+        else:
+            ref_sum += means[k]
+            ref_n += 1
+        k += 1
+
+    segs = []
+    for j, sb in enumerate(starts):
+        eb = starts[j + 1] if j + 1 < len(starts) else n_blk
+        start = sb * blk
+        end = n if j + 1 == len(starts) else eb * blk
+        segs.append({
+            "start": start,
+            "end": end,
+            "gravity": means[sb:eb].mean(axis=0),
+            "transition": (end - start) / fs < min_sec,
+        })
+    return segs
+
+
+def motion_seconds(uni: np.ndarray, fs: float) -> tuple[np.ndarray, float]:
+    """Разброс модуля ускорения по секундам и порог «секунды с движением»."""
+    mag = np.linalg.norm(uni, axis=1)
+    per = max(1, int(round(fs)))
+    n_sec = len(mag) // per
+    if n_sec == 0:
+        return np.zeros(0), np.inf
+    spread = mag[:n_sec * per].reshape(n_sec, per).std(axis=1)
+    thr = max(MOTION_SEC_FLOOR_MG, MOTION_SEC_FACTOR * float(np.median(spread)))
+    return spread, thr
+
+
 def hilbert_phase(v: np.ndarray) -> np.ndarray:
     return np.unwrap(np.angle(hilbert(v)))
+
+
+def stitched_phase(wave: np.ndarray, spans: list[tuple[int, int]]) -> np.ndarray:
+    """Фаза Гильберта отдельно в каждой позе, сшитая без скачка.
+
+    Гильберт на всём ряду разносит скачок несущей оси на стыке поз далеко в
+    обе стороны (ядро спадает как 1/t): на прогоне с посадкой 2026-09-06
+    это стоило 0.7 цикла из 33 уже через 15 с после стыка. По кускам краевой
+    эффект остаётся только у самих стыков, где частота и так маскируется.
+    Сшивка: следующий кусок начинается с конца предыдущего плюс его
+    последнее приращение фазы."""
+    if len(spans) <= 1:
+        return hilbert_phase(wave)
+    out = np.empty(len(wave))
+    prev_end = None
+    prev_step = 0.0
+    for start, end in spans:
+        seg = wave[start:end]
+        ph = hilbert_phase(seg) if len(seg) >= 4 else np.zeros(len(seg))
+        if prev_end is not None and len(ph):
+            ph = ph - ph[0] + prev_end + prev_step
+        out[start:end] = ph
+        if len(ph) >= 2:
+            prev_end, prev_step = ph[-1], ph[-1] - ph[-2]
+        elif len(ph):
+            prev_end = ph[-1]
+    return out
 
 
 def cycles_between(phase: np.ndarray, i0: int, i1: int) -> float:
@@ -177,22 +309,37 @@ def quality_windows(
     *,
     window_sec: float = QUALITY_WINDOW_SEC,
     step_sec: float = QUALITY_STEP_SEC,
+    motion: tuple[np.ndarray, float] | None = None,
+    boundaries: list[int] | None = None,
+    transitions: list[tuple[int, int]] | None = None,
 ) -> list[dict]:
     """Окна качества: амплитуда (p75 модуля несущей) и медианная частота
-    (по фазе) в окне; браковка по амплитуде — см. `motion_reject_windows`."""
+    (по фазе) в окне. Брак — по движению и смене позы (см. модульный
+    docstring). Без `motion` (старые вызовы, диагностика) — прежний брак по
+    амплитуде, `motion_reject_windows`."""
     windows = []
+    per = max(1, int(round(fs)))
     for start, end in iter_windows(len(wave), fs, window_sec, step_sec):
         seg = wave[start:end]
         rate_seg = rate_cpm[start:end]
-        windows.append({
+        w = {
             "t_start": float(t_grid[start]),
             "t_end": float(t_grid[end - 1]),
             "amp_mg": float(np.percentile(np.abs(seg), 75)),
             "rate_cpm": float(np.median(rate_seg)) if len(rate_seg) else None,
-        })
-    rejected = motion_reject_windows([w["amp_mg"] for w in windows])
-    for w, r in zip(windows, rejected):
-        w["rejected"] = r
+        }
+        if motion is not None:
+            spread, thr = motion
+            n_moving = int(np.sum(spread[start // per:end // per] > thr))
+            crosses = any(start < b < end for b in (boundaries or []))
+            in_transition = any(ts < end and te > start for ts, te in (transitions or []))
+            w["moving_sec"] = n_moving
+            w["rejected"] = n_moving >= MOTION_MIN_SEC or crosses or in_transition
+        windows.append(w)
+    if motion is None:
+        rejected = motion_reject_windows([w["amp_mg"] for w in windows])
+        for w, r in zip(windows, rejected):
+            w["rejected"] = r
     return windows
 
 
@@ -220,13 +367,34 @@ def analyze_breathing(samples: list[tuple[float, int, int, int]]) -> dict | None
     t_grid, uni = resampled
 
     filtered = np.stack([bandpass(uni[:, k], RESAMPLE_HZ) for k in range(3)], axis=1)
-    axis, _p75 = select_carrier_axis(filtered)
-    wave = filtered[:, axis]
 
-    phase = hilbert_phase(wave)
+    # Несущая ось — своя в каждой позе; в переходах — ось предыдущей позы.
+    postures = posture_segments(uni, RESAMPLE_HZ)
+    wave = np.empty(len(filtered))
+    axis_time = np.zeros(3)
+    prev_axis = None
+    for p in postures:
+        sl = slice(p["start"], p["end"])
+        if p["transition"] and prev_axis is not None:
+            ax = prev_axis
+        else:
+            ax, _ = select_carrier_axis(filtered[sl])
+        p["axis"] = ax
+        wave[sl] = filtered[sl, ax]
+        axis_time[ax] += p["end"] - p["start"]
+        prev_axis = ax
+    axis = int(np.argmax(axis_time))
+
+    phase = stitched_phase(wave, [(p["start"], p["end"]) for p in postures])
     rate_cpm = instantaneous_rate_cpm(phase, RESAMPLE_HZ)
     boundaries = cycle_boundaries(phase, t_grid)
-    windows = quality_windows(t_grid, wave, rate_cpm, RESAMPLE_HZ)
+    posture_edges = [p["start"] for p in postures[1:]]
+    windows = quality_windows(
+        t_grid, wave, rate_cpm, RESAMPLE_HZ,
+        motion=motion_seconds(uni, RESAMPLE_HZ),
+        boundaries=posture_edges,
+        transitions=[(p["start"], p["end"]) for p in postures if p["transition"]],
+    )
 
     # Края ряда частоты негодны и должны быть видны как разрыв, а не как
     # медленное дыхание. `filtfilt` и `hilbert` на конечном сигнале дают
@@ -234,12 +402,19 @@ def analyze_breathing(samples: list[tuple[float, int, int, int]]) -> dict | None
     # выглядел одинаково: плавный подъём с 3.5-8.5 до нормальных 10-14
     # цикл/мин за первые ~20 секунд. Совпадение формы у трёх независимых
     # записей и есть доказательство, что это прибор, а не дыхание.
+    # То же у границы позы: ось сменилась скачком, фаза на стыке рвётся.
     # Окна качества считаются до маскирования — им нужен полный ряд.
     rate_cpm = rate_cpm.astype(float).copy()
     edge = min(int(round(RATE_SMOOTH_SEC * RESAMPLE_HZ)), len(rate_cpm) // 3)
     if edge > 0:
         rate_cpm[:edge] = np.nan
         rate_cpm[-edge:] = np.nan
+    pe = int(round(POSTURE_EDGE_SEC * RESAMPLE_HZ))
+    for b in posture_edges:
+        rate_cpm[max(0, b - pe):b + pe] = np.nan
+    for p in postures:
+        if p["transition"]:
+            rate_cpm[p["start"]:p["end"]] = np.nan
 
     good = [w for w in windows if not w["rejected"]]
     good_rates = [w["rate_cpm"] for w in good if w["rate_cpm"] is not None]
@@ -255,8 +430,19 @@ def analyze_breathing(samples: list[tuple[float, int, int, int]]) -> dict | None
         "cycle_boundaries": boundaries,
         "total_cycles": cycles_between(phase, 0, -1),
         "windows": windows,
+        "postures": [
+            {
+                "t_start": float(t_grid[p["start"]]),
+                "t_end": float(t_grid[p["end"] - 1]),
+                "axis": "XYZ"[p["axis"]],
+                "transition": bool(p["transition"]),
+                "gravity_mg": [round(float(v), 1) for v in p["gravity"]],
+            }
+            for p in postures
+        ],
         "summary": {
             "axis": "XYZ"[axis],
+            "n_postures": sum(1 for p in postures if not p["transition"]),
             "n_windows": len(windows),
             "n_good": len(good),
             "good_fraction": (len(good) / len(windows)) if windows else None,

@@ -960,6 +960,7 @@ def session_breathing_endpoint(
             "good_fraction": round(summary["good_fraction"], 3) if summary["good_fraction"] is not None else None,
             "amp_median_mg": round(summary["amp_median_mg"], 2) if summary["amp_median_mg"] is not None else None,
             "axis": summary["axis"],
+            "n_postures": summary.get("n_postures"),
         },
     }
 

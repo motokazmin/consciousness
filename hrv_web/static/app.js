@@ -1941,7 +1941,9 @@ function renderSummaryGrid(sum) {
       ["Дыхание: годный сигнал", b.good_fraction != null ? Math.round(b.good_fraction * 100) + "%" : "—"],
       // Размах в мг зависит от позы датчика, а не только от глубины дыхания.
       ["Дыхание: размах (зависит от позы)", b.amp_median_mg != null ? Number(b.amp_median_mg).toFixed(1) + " мг" : "—"],
-      ["Дыхание: несущая ось", b.axis || "—"],
+      // Ось выбирается в каждой позе заново; здесь — та, что дольше всех.
+      ["Дыхание: основная ось", b.axis || "—"],
+      ["Позы за запись", b.n_postures != null ? String(b.n_postures) : "—"],
     );
   }
   for (const [label, value] of fields) {
