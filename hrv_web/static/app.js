@@ -2037,19 +2037,56 @@ function renderArchRmssd(analysis) {
   applyArchLoupe("rmssd");
 }
 
-// Лупа на графиках истории: у каждого графика своя галочка и своя длина
-// окна в минутах; ползунок под графиком двигает окно по сессии.
-// Состояние переживает перерисовку и смену сессии.
+// Лупа на графиках истории: одна на все графики сессии — одно окно,
+// одна длина, один ползунок. Все графики и лента отрезков смотрят в одно
+// и то же время, иначе разметка расходится с тем, что видно на графике.
 const LOUPE_KEYS = ["rr", "sdnn", "rmssd", "breath_wave", "breath_rate", "breath_combo"];
-const archLoupe = Object.fromEntries(LOUPE_KEYS.map((k) => [k, { on: false, start: 0 }]));
+const archLoupe = { on: false, start: 0 };
 const archLoupePlot = () => ({
   rr: archRR, sdnn: archSdnn, rmssd: archRM,
   breath_wave: archBreathingWave, breath_rate: archBreathingRate, breath_combo: archBreathingRateRmssd,
 });
 
-function loupeWindowSec(key) {
-  const v = Number(document.querySelector(`[data-loupe-min="${key}"]`)?.value);
-  return (Number.isFinite(v) && v > 0 ? v : 2) * 60;
+function loupeWindowSec() {
+  const v = Number($("arch_loupe_min")?.value);
+  return (Number.isFinite(v) && v > 0 ? v : 10) * 60;
+}
+
+function loupeDuration() {
+  return Number(archAnalysisCache?.duration_sec) || 0;
+}
+
+function fmtLoupeClock(t) {
+  const started = archSummaryCache?.started;
+  if (!started) return `${Math.round(t)} с`;
+  return new Date((started + t) * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+}
+
+// Окно лупы [x0, x1] с поправкой положения под текущую длину.
+function loupeWindow() {
+  const dur = loupeDuration();
+  const win = Math.min(loupeWindowSec(), dur);
+  archLoupe.start = Math.min(Math.max(0, archLoupe.start), Math.max(0, dur - win));
+  return [archLoupe.start, archLoupe.start + win];
+}
+
+function syncLoupeBar() {
+  const slider = $("arch_loupe_slider");
+  const label = $("arch_loupe_range");
+  const dur = loupeDuration();
+  if (!archLoupe.on || !dur) {
+    if (slider) slider.disabled = true;
+    if (label) label.textContent = "вся запись";
+    return;
+  }
+  const [x0, x1] = loupeWindow();
+  if (slider) {
+    slider.disabled = false;
+    slider.max = String(Math.max(0, dur - (x1 - x0)));
+    slider.step = String(Math.max(1, (x1 - x0) / 20));
+    slider.value = String(x0);
+  }
+  if (label) label.textContent = `${fmtLoupeClock(x0)}–${fmtLoupeClock(x1)}`;
 }
 
 // RR и волна дыхания по умолчанию приходят прореженными (на 8-часовой
@@ -2083,47 +2120,33 @@ async function ensureLoupeFullRes(key, plot) {
 
 async function applyArchLoupe(key) {
   const plot0 = archLoupePlot()[key];
-  if (plot0 && archLoupe[key].on) await ensureLoupeFullRes(key, plot0);
+  if (plot0 && archLoupe.on) await ensureLoupeFullRes(key, plot0);
   const plot = archLoupePlot()[key];
-  const slider = document.querySelector(`[data-loupe-slider="${key}"]`);
   const L = window.HrvChartLoupe;
-  const st = archLoupe[key];
-  if (!plot || !L) {
-    if (slider) slider.hidden = true;
-    return;
-  }
-  if (!st.on) {
+  if (!plot || !L) return;
+  if (!archLoupe.on) {
     L.restore(plot);
-    if (slider) slider.hidden = true;
     return;
   }
-  const [x0, x1] = L.extent(plot);
-  const win = Math.min(loupeWindowSec(key), x1 - x0);
-  const maxStart = Math.max(0, x1 - x0 - win);
-  st.start = Math.min(Math.max(0, st.start), maxStart);
-  if (slider) {
-    slider.hidden = false;
-    slider.max = String(maxStart);
-    slider.step = String(Math.max(1, win / 20));
-    slider.value = String(st.start);
-  }
-  L.show(plot, x0 + st.start, x0 + st.start + win);
+  const [x0, x1] = loupeWindow();
+  L.show(plot, x0, x1);
 }
 
-LOUPE_KEYS.forEach((key) => {
-  const box = document.querySelector(`input[data-loupe="${key}"]`);
-  const mins = document.querySelector(`[data-loupe-min="${key}"]`);
-  const slider = document.querySelector(`[data-loupe-slider="${key}"]`);
-  box?.addEventListener("change", () => {
-    archLoupe[key].on = box.checked;
-    applyArchLoupe(key);
-  });
-  mins?.addEventListener("change", () => applyArchLoupe(key));
-  slider?.addEventListener("input", () => {
-    archLoupe[key].start = Number(slider.value);
-    applyArchLoupe(key);
-  });
+function applyArchLoupeAll() {
+  syncLoupeBar();
+  for (const key of LOUPE_KEYS) applyArchLoupe(key);
+}
+
+$("arch_loupe_on")?.addEventListener("change", (e) => {
+  archLoupe.on = e.target.checked;
+  applyArchLoupeAll();
 });
+$("arch_loupe_min")?.addEventListener("change", applyArchLoupeAll);
+$("arch_loupe_slider")?.addEventListener("input", (e) => {
+  archLoupe.start = Number(e.target.value);
+  applyArchLoupeAll();
+});
+
 
 function renderArchiveAnalysisCharts(analysis, sum) {
   const charts = AC();
@@ -2198,6 +2221,7 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   }
 
   renderArchRmssd(analysis);
+  syncLoupeBar();
   applyArchLoupe("rr");
   applyArchLoupe("sdnn");
   renderArchiveBreathing(archBreathingCache, analysis);

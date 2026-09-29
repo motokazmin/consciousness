@@ -298,7 +298,7 @@
       background-image: repeating-linear-gradient(135deg, transparent 0 4px, rgba(255,255,255,0.45) 4px 6px);
     }
     .seg-event { position: absolute; transform: translateX(-50%); font-size: 10px; line-height: 12px; color: var(--text-dim); cursor: default; }
-    .seg-e-artifact { color: var(--red); }
+    .seg-e-artifact { color: var(--red); top: -21px; font-weight: 700; text-shadow: 0 0 2px var(--surface), 0 0 2px var(--surface); }
     .seg-tip {
       position: absolute; top: 58px; z-index: 5; pointer-events: none;
       max-width: 340px; padding: 6px 10px; border-radius: 6px;
@@ -311,19 +311,26 @@
     .seg-card-time { color: var(--text-dim); font-family: var(--mono); font-size: 0.72rem; }
     .seg-conf { margin-left: auto; font-size: 0.7rem; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border2); color: var(--text-dim); }
     .seg-card-body { color: var(--text); }
-    .loupe-ctl {
-      display: inline-flex; align-items: center; gap: 6px;
-      margin-left: auto; margin-right: 12px;
-      font-size: 0.72rem; color: var(--text-dim);
+    /* Прилипание панели лупы ломают overflow и transform у предков. */
+    .card:has(#arch_loupe_bar) { overflow: visible; }
+    .card:has(#arch_loupe_bar):hover { transform: none; }
+    .loupe-bar {
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      margin-bottom: 12px; padding: 8px 16px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      box-shadow: var(--shadow-card);
+      font-size: 0.78rem; color: var(--text-dim);
     }
-    .loupe-ctl .check-label { font-size: 0.72rem; gap: 6px; }
+    .loupe-bar .check-label { font-size: 0.78rem; gap: 6px; }
     .loupe-min {
       width: 4.2em; padding: 2px 4px;
       font: inherit; color: inherit;
       background: transparent; border: 1px solid var(--border); border-radius: 4px;
     }
-    .loupe-slider { display: block; width: calc(100% - 24px); margin: 4px 12px 10px; accent-color: var(--accent); }
-    .loupe-slider[hidden] { display: none; }
+    .loupe-slider { flex: 1 1 240px; min-width: 160px; accent-color: var(--accent); }
+    .loupe-slider:disabled { opacity: 0.35; }
+    .loupe-range { font-family: var(--mono); font-size: 0.74rem; color: var(--text); min-width: 8.5em; }
     .check-label input[type=checkbox]:disabled {
       opacity: 0.45;
     }
@@ -1908,6 +1915,12 @@
             </div>
             <div class="arch-notes-text" id="arch_notes_text"></div>
           </div>
+          <div class="loupe-bar" id="arch_loupe_bar" title="Лупа: одно окно на все графики сессии. Ползунок ведёт окно по записи, шкала Y каждого графика — по видимому куску">
+            <label class="check-label"><input type="checkbox" id="arch_loupe_on" />лупа</label>
+            <input type="number" class="loupe-min" id="arch_loupe_min" min="0.5" step="0.5" value="10" aria-label="Длина окна, мин" />мин
+            <input type="range" class="loupe-slider" id="arch_loupe_slider" min="0" max="0" value="0" disabled aria-label="Положение лупы" />
+            <span class="loupe-range" id="arch_loupe_range">вся запись</span>
+          </div>
           <div class="plot-card" id="arch_segments_card" style="margin-bottom:16px" hidden>
             <div class="plot-header">
               <span class="plot-title">Отрезки</span>
@@ -1933,10 +1946,6 @@
             <div class="plot-card" style="margin-bottom:0">
               <div class="plot-header">
                 <span class="plot-title">RR — от начала сессии</span>
-                <span class="loupe-ctl" title="Лупа: окно заданной длины, ползунок под графиком двигает его по сессии, шкала Y — по видимому куску">
-                  <label class="check-label"><input type="checkbox" data-loupe="rr" />лупа</label>
-                  <input type="number" class="loupe-min" data-loupe-min="rr" min="0.5" step="0.5" value="2" />мин
-                </span>
               </div>
               <div
                 id="arch_audio_player"
@@ -1957,19 +1966,13 @@
                 <span class="arch-audio-hint">Клик по RR или перемотка</span>
               </div>
               <div class="plot-body" id="arch_rr"></div>
-              <input type="range" class="loupe-slider" data-loupe-slider="rr" min="0" max="0" value="0" hidden aria-label="Положение лупы" />
             </div>
             <div class="plot-card" style="margin-bottom:0">
               <div class="plot-header">
                 <span class="plot-title">Скользящий тренд SDNN</span>
                 <button type="button" class="scale-toggle-btn" id="arch_sdnn_scale_toggle" title="Шкала Y: линейная / логарифмическая">лин</button>
-                <span class="loupe-ctl" title="Лупа: окно заданной длины, ползунок под графиком двигает его по сессии, шкала Y — по видимому куску">
-                  <label class="check-label"><input type="checkbox" data-loupe="sdnn" />лупа</label>
-                  <input type="number" class="loupe-min" data-loupe-min="sdnn" min="0.5" step="0.5" value="30" />мин
-                </span>
               </div>
               <div class="plot-body" id="arch_sdnn"></div>
-              <input type="range" class="loupe-slider" data-loupe-slider="sdnn" min="0" max="0" value="0" hidden aria-label="Положение лупы" />
               <div class="quality-strip" id="arch_sdnn_quality" title="Полоска качества: доля исправленных ударов по минутам. Затенение на графике — разрыв записи (пауза в RR длиннее 4с)"></div>
             </div>
           </div>
@@ -2011,13 +2014,8 @@
               <div class="plot-header">
                 <span class="plot-title">RMSSD — от начала сессии</span>
                 <button type="button" class="scale-toggle-btn" id="arch_rmssd_scale_toggle" title="Шкала Y: линейная / логарифмическая">лин</button>
-                <span class="loupe-ctl" title="Лупа: окно заданной длины, ползунок под графиком двигает его по сессии, шкала Y — по видимому куску">
-                  <label class="check-label"><input type="checkbox" data-loupe="rmssd" />лупа</label>
-                  <input type="number" class="loupe-min" data-loupe-min="rmssd" min="0.5" step="0.5" value="30" />мин
-                </span>
               </div>
               <div class="plot-body" id="arch_rm"></div>
-              <input type="range" class="loupe-slider" data-loupe-slider="rmssd" min="0" max="0" value="0" hidden aria-label="Положение лупы" />
               <div class="quality-strip" id="arch_rmssd_quality" title="Полоска качества: доля исправленных ударов по минутам. Затенение на графике — разрыв записи (пауза в RR длиннее 4с)"></div>
             </div>
           </div>
@@ -2030,35 +2028,20 @@
               <div class="plot-card" style="margin-bottom:0">
                 <div class="plot-header">
                   <span class="plot-title">Волна дыхания</span>
-                  <span class="loupe-ctl" title="Лупа: окно заданной длины, ползунок под графиком двигает его по сессии, шкала Y — по видимому куску">
-                  <label class="check-label"><input type="checkbox" data-loupe="breath_wave" />лупа</label>
-                  <input type="number" class="loupe-min" data-loupe-min="breath_wave" min="0.5" step="0.5" value="2" />мин
-                </span>
                 </div>
                 <div class="plot-body" id="arch_breathing_wave"></div>
-              <input type="range" class="loupe-slider" data-loupe-slider="breath_wave" min="0" max="0" value="0" hidden aria-label="Положение лупы" />
               </div>
               <div class="plot-card" style="margin-bottom:0">
                 <div class="plot-header">
                   <span class="plot-title">Частота дыхания</span>
-                  <span class="loupe-ctl" title="Лупа: окно заданной длины, ползунок под графиком двигает его по сессии, шкала Y — по видимому куску">
-                  <label class="check-label"><input type="checkbox" data-loupe="breath_rate" />лупа</label>
-                  <input type="number" class="loupe-min" data-loupe-min="breath_rate" min="0.5" step="0.5" value="30" />мин
-                </span>
                 </div>
                 <div class="plot-body" id="arch_breathing_rate"></div>
-              <input type="range" class="loupe-slider" data-loupe-slider="breath_rate" min="0" max="0" value="0" hidden aria-label="Положение лупы" />
               </div>
               <div class="plot-card" style="margin-bottom:0">
                 <div class="plot-header">
                   <span class="plot-title">Дыхание и RMSSD</span>
-                  <span class="loupe-ctl" title="Лупа: окно заданной длины, ползунок под графиком двигает его по сессии, шкала Y — по видимому куску">
-                  <label class="check-label"><input type="checkbox" data-loupe="breath_combo" />лупа</label>
-                  <input type="number" class="loupe-min" data-loupe-min="breath_combo" min="0.5" step="0.5" value="30" />мин
-                </span>
                 </div>
                 <div class="plot-body" id="arch_breathing_rate_rmssd"></div>
-              <input type="range" class="loupe-slider" data-loupe-slider="breath_combo" min="0" max="0" value="0" hidden aria-label="Положение лупы" />
               </div>
             </div>
           </div>
@@ -2209,9 +2192,9 @@
 <script src="/assets/session_mic_recorder.js?v=2"></script>
 <script src="/assets/session_audio_player.js?v=7"></script>
 <script src="/assets/chart_zoom.js?v=1"></script>
-<script src="/assets/chart_loupe.js?v=1"></script>
-<script src="/assets/chart_segments.js?v=1"></script>
+<script src="/assets/chart_loupe.js?v=2"></script>
+<script src="/assets/chart_segments.js?v=2"></script>
 <script src="/assets/analysis_charts.js?v=12"></script>
-<script src="/assets/app.js?v=37"></script>
+<script src="/assets/app.js?v=38"></script>
 </body>
 </html>
