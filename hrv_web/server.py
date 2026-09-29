@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import math
 import queue
 import re
 from contextlib import asynccontextmanager
@@ -17,14 +18,19 @@ from pydantic import BaseModel, Field
 import numpy as np
 
 from hrv_core.analysis import progress_session_analysis, session_analysis, session_sd1
-from hrv_core.constants import DB_PATH, DEFAULT_OPT_ACC_RECORDING
+from hrv_core.breathing import analyze_breathing, decimate_for_transport
+from hrv_core.constants import DB_PATH
 from hrv_core.db import (
     delete_session,
+    delete_session_explanation,
     ensure_session_audio_dir,
     finalize_orphaned_sessions,
     finalize_session,
     init_db,
+    load_accel_samples,
     load_hour_baseline,
+    load_session_explanation,
+    save_session_explanation,
     session_audio_path,
     set_session_has_audio,
     wipe_all_history,
@@ -67,7 +73,6 @@ class StartSessionBody(BaseModel):
     opt_guided_phrases: bool = False
     opt_audio_biofeedback: bool = False
     opt_mic_recording: bool = False
-    opt_acc_recording: bool = DEFAULT_OPT_ACC_RECORDING
 
 
 class PhraseLogBody(BaseModel):
@@ -87,6 +92,14 @@ class PhraseLogPatchBody(BaseModel):
 
 class PatchSessionNotesBody(BaseModel):
     session_name: str | None = Field(None, max_length=12000)
+
+
+EXPLANATION_MAX_LEN = 20_000
+
+
+class PutExplanationBody(BaseModel):
+    body: str = Field(..., min_length=1, max_length=EXPLANATION_MAX_LEN)
+    author: str = Field("claude", min_length=1, max_length=40)
 
 
 class CreateSessionTypeBody(BaseModel):
@@ -280,7 +293,6 @@ def start_session(body: StartSessionBody):
             opt_guided_phrases=body.opt_guided_phrases,
             opt_audio_biofeedback=body.opt_audio_biofeedback,
             opt_mic_recording=body.opt_mic_recording,
-            opt_acc_recording=body.opt_acc_recording,
         )
     except RuntimeError as e:
         if "already_running" in str(e):
@@ -293,6 +305,7 @@ def start_session(body: StartSessionBody):
         "first_beat_at": rs.first_beat_at,
         "duration_minutes": rs.duration_minutes,
         "tag": tag,
+        "device_state": rs.device_state,
     }
 
 
@@ -306,6 +319,9 @@ def recording_status():
         "session_id": active.session_id,
         "started_at": active.started_at,
         "first_beat_at": active.first_beat_at,
+        "device_state": active.device_state,
+        "accel_missing": active.accel_missing,
+        "last_accel_at": active.last_accel_at,
     }
 
 
@@ -380,7 +396,8 @@ def list_sessions(
     q = (
         "SELECT id, tag, session_name, participant, source, started, ended, "
         "drift_events, opt_guided_phrases, opt_audio_biofeedback, "
-        "opt_mic_recording, has_audio"
+        "opt_mic_recording, has_audio, "
+        "EXISTS(SELECT 1 FROM session_explanations e WHERE e.session_id = sessions.id)"
         + filt
         + " ORDER BY id DESC LIMIT ?"
     )
@@ -410,6 +427,7 @@ def list_sessions(
                 "opt_audio_biofeedback": bool(r[9]),
                 "opt_mic_recording": bool(r[10]),
                 "has_audio": bool(r[11]),
+                "has_explanation": bool(r[12]),
                 "note_tags": parse_note_tags(r[2]),
                 "sd1": sd1,
             }
@@ -449,6 +467,10 @@ def progress_data(
 
     out_sessions = []
     for sid, stag, started, ended in sessions:
+        # Децимация здесь безопасна на входе: точки идут прямо в JSON как
+        # {x, rr} без каких-либо производных метрик (RMSSD/SD1 тут не
+        # считаются — в отличие от /api/progress/analysis). Ничего не строится
+        # на разности соседних ударов после прореживания, портить нечего.
         rows = conn.execute(
             "SELECT ts, rr_ms FROM hrv_points WHERE session_id = ? ORDER BY ts",
             (sid,),
@@ -540,6 +562,7 @@ def get_session(session_id: int):
     first_rr = conn.execute(
         "SELECT MIN(ts) FROM hrv_points WHERE session_id = ?", (session_id,)
     ).fetchone()
+    explanation = load_session_explanation(conn, session_id)
     conn.close()
     if summary is not None:
         summary["opt_guided_phrases"] = bool(opt_guided)
@@ -548,6 +571,7 @@ def get_session(session_id: int):
         summary["opt_acc_recording"] = bool(opt_acc)
         summary["has_audio"] = bool(has_audio)
         summary["note_tags"] = parse_note_tags(session_name)
+        summary["explanation"] = explanation
         if first_rr and first_rr[0] is not None:
             summary["first_rr_ts"] = float(first_rr[0])
             summary["timeline_skew_sec"] = round(float(first_rr[0]) - float(started), 3)
@@ -556,6 +580,76 @@ def get_session(session_id: int):
             if 0 <= delay <= 2.0:
                 summary["audio_offset_sec"] = delay
     return summary
+
+
+def _require_session(conn, session_id: int) -> None:
+    row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Сессия не найдена")
+
+
+@app.get("/api/sessions/{session_id}/explanation")
+def get_session_explanation(session_id: int):
+    """Разбор сессии: качественное объяснение графиков, написанное Claude."""
+    conn = init_db()
+    try:
+        _require_session(conn, session_id)
+        return {"explanation": load_session_explanation(conn, session_id)}
+    finally:
+        conn.close()
+
+
+@app.put("/api/sessions/{session_id}/explanation")
+async def put_session_explanation(session_id: int, request: Request):
+    """Записать разбор. Тело — JSON {body, author} или сырой markdown-текст.
+
+    Сырой текст нужен, чтобы разбор можно было положить одной командой
+    (`curl --data-binary @file`), не экранируя markdown в JSON.
+    """
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
+    author = "claude"
+    if ctype == "application/json":
+        try:
+            payload = await request.json()
+        except Exception as e:
+            raise HTTPException(400, "Тело не разобралось как JSON") from e
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "Ожидался объект {body, author}")
+        parsed = PutExplanationBody(**payload)
+        text = parsed.body
+        author = parsed.author
+    else:
+        raw = await request.body()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise HTTPException(400, "Текст должен быть в UTF-8") from e
+        author = (request.query_params.get("author") or "claude").strip() or "claude"
+    text = text.strip()
+    if not text:
+        raise HTTPException(400, "Пустой разбор")
+    if len(text) > EXPLANATION_MAX_LEN:
+        raise HTTPException(
+            413, f"Разбор длиннее {EXPLANATION_MAX_LEN} символов"
+        )
+    conn = init_db()
+    try:
+        _require_session(conn, session_id)
+        saved = save_session_explanation(conn, session_id, text, author[:40])
+    finally:
+        conn.close()
+    return {"ok": True, "explanation": saved}
+
+
+@app.delete("/api/sessions/{session_id}/explanation")
+def delete_session_explanation_endpoint(session_id: int):
+    conn = init_db()
+    try:
+        _require_session(conn, session_id)
+        deleted = delete_session_explanation(conn, session_id)
+    finally:
+        conn.close()
+    return {"ok": True, "deleted": deleted}
 
 
 _AUDIO_MAX_BYTES = 500 * 1024 * 1024  # 500 MiB
@@ -623,6 +717,14 @@ def session_analysis_endpoint(
     session_id: int,
     max_points: int = 12_000,
 ):
+    """max_points — сколько точек отдать в тахограмме RR (raw_rr/analysis_rr) для
+    отрисовки, НЕ по скольким считать. Расчёт (RMSSD/SD1/тренды/спектр) всегда
+    идёт по полному ряду сессии: он строится на разностях соседних ударов, и
+    прореживание ряда ДО расчёта превращает несоседние удары в соседние — метрики
+    расходятся с реальными (на записи длиннее нескольких часов — почти вдвое:
+    RMSSD/SD1 задирает пропущенное время между оставшимися точками в разность).
+    Остальные графики режут свой выход сами (poincare/trend_max внутри
+    session_analysis, min-бакеты в quality_strip)."""
     max_points = max(100, min(max_points, 50_000))
     conn = init_db()
     row = conn.execute(
@@ -641,8 +743,91 @@ def session_analysis_endpoint(
         (session_id,),
     ).fetchall()
     conn.close()
-    rows = _decimate_rows(rows, max_points)
-    return session_analysis(rows, started, ended)
+    return session_analysis(rows, started, ended, raw_rr_max=max_points)
+
+
+@app.get("/api/sessions/{session_id}/breathing")
+def session_breathing_endpoint(
+    session_id: int,
+    max_points: int = 4000,
+):
+    """Дыхание из акселерометра PMD — только post-session (см. ARCHITECTURE.md:
+    живого графика во время записи нет, решено отдельно). Ось времени та же,
+    что у /analysis: `ts - sessions.started` (started уже приведён к моменту
+    взведения — своей коррекции здесь не нужно, см. hrv_web/session_manager.py).
+
+    Явно отличает «акселерометра в сессии нет» (все сессии до Части A) от
+    «есть, но короткая/шумная» — фронт не должен рисовать это как нулевые
+    графики (см. ARCHITECTURE.md).
+
+    Потолок max_points — 200 000: лупа в архиве запрашивает волну в полном
+    разрешении (4 Гц × 8 ч ≈ 115 000 точек), иначе на длинной записи между
+    точками выходит больше периода дыхания и форма вдоха теряется."""
+    max_points = max(100, min(max_points, 200_000))
+    conn = init_db()
+    row = conn.execute(
+        "SELECT started, ended FROM sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404)
+    started, ended = row
+    if ended is None:
+        conn.close()
+        raise HTTPException(400, "Сессия ещё не завершена — дыхание после stop")
+    samples = load_accel_samples(conn, session_id)
+    conn.close()
+
+    if not samples:
+        return {
+            "has_accel": False,
+            "insufficient_data": True,
+            "message": "В этой сессии нет данных акселерометра",
+        }
+
+    result = analyze_breathing(samples)
+    if result is None:
+        return {
+            "has_accel": True,
+            "insufficient_data": True,
+            "message": "Данных акселерометра мало для оценки дыхания",
+        }
+
+    t = result["t"] - float(started)
+    t_dec, (wave_dec, rate_dec) = decimate_for_transport(
+        t, [result["wave"], result["rate_cpm"]], max_points
+    )
+    windows = [
+        {
+            "t_start": round(w["t_start"] - float(started), 2),
+            "t_end": round(w["t_end"] - float(started), 2),
+            "amp_mg": round(w["amp_mg"], 2),
+            "rejected": bool(w["rejected"]),
+        }
+        for w in result["windows"]
+    ]
+    summary = result["summary"]
+    return {
+        "has_accel": True,
+        "insufficient_data": False,
+        "t": [round(float(x), 2) for x in t_dec],
+        "wave_mg": [round(float(x), 2) for x in wave_dec],
+        # Края ряда частоты приходят как NaN (переходный процесс фильтра, см.
+        # hrv_core/breathing.py) — отдаём null: JSON не знает NaN, а uPlot
+        # рисует null разрывом, что здесь и требуется.
+        "rate_cpm": [
+            None if not math.isfinite(float(x)) else round(float(x), 2)
+            for x in rate_dec
+        ],
+        "windows": windows,
+        "summary": {
+            "cpm_median": round(summary["cpm_median"], 1) if summary["cpm_median"] is not None else None,
+            "good_fraction": round(summary["good_fraction"], 3) if summary["good_fraction"] is not None else None,
+            "amp_median_mg": round(summary["amp_median_mg"], 2) if summary["amp_median_mg"] is not None else None,
+            "axis": summary["axis"],
+        },
+    }
 
 
 @app.get("/api/progress/analysis")
@@ -677,23 +862,28 @@ def progress_analysis(
 
     out_sessions = []
     for sid, stag, started, ended in sessions:
+        # Полный ряд, без децимации на входе: SD1/coherence/sdnn_trend в
+        # progress_session_analysis считаются на разностях соседних ударов —
+        # тот же класс бага, что был в session_analysis_endpoint (см. commit
+        # "тренд считается по исправленному ряду и по всем ударам"). Резать
+        # нужно только то, что реально уходит в JSON — raw_rr (max_points_per_session).
         rows = conn.execute(
             "SELECT ts, rr_ms, rmssd FROM hrv_points WHERE session_id = ? ORDER BY ts",
             (sid,),
         ).fetchall()
         if not rows:
             continue
-        rows_dec = _decimate_rows(rows, max_points_per_session)
         stats = conn.execute(
             "SELECT AVG(rmssd) FROM hrv_points WHERE session_id = ?",
             (sid,),
         ).fetchone()
         rmssd_mean = float(stats[0]) if stats and stats[0] is not None else None
         analysis = progress_session_analysis(
-            rows_dec,
+            rows,
             started,
             ended,
             rmssd_mean,
+            raw_rr_max=max_points_per_session,
         )
         out_sessions.append(
             {
@@ -709,6 +899,10 @@ def progress_analysis(
 
 @app.get("/api/sessions/{session_id}/points")
 def session_points(session_id: int, max_points: int = 8000):
+    """Точки как лежат в БД (ts, rr_ms, rmssd — живой расчёт), без пересчёта
+    чего-либо на клиенте. Децимация на входе тут безвредна по тому же
+    рассуждению, что и в /api/progress: ничего не выводится из разности
+    соседних ударов, отдаём просто ряд как есть."""
     max_points = max(100, min(max_points, 50_000))
     conn = init_db()
     rows = conn.execute(
@@ -739,6 +933,8 @@ async def session_stream(websocket: WebSocket, session_id: int):
             "started_at": rs.started_at,
             "first_beat_at": rs.first_beat_at,
             "duration_minutes": rs.duration_minutes,
+            "device_state": rs.device_state,
+            "accel_missing": rs.accel_missing,
         }
     )
 

@@ -23,6 +23,14 @@ let sessionBaseline = null;
 let sessionArmed = false;
 let pendingArm = null;
 
+// ── КАНАЛ АКСЕЛЕРОМЕТРА (PMD) ────────────────────────────────────────────
+// Живого графика дыхания во время записи нет (решено отдельно) — только
+// строка состояния: идут ли пачки и когда пришла последняя. PMD умеет
+// отказывать молча (см. ARCHITECTURE.md), поэтому это не косметика.
+let accelExpected = false;      // true только для source === "ble"
+let accelMissing = false;       // канал не ответил за ACC_ARM_WAIT_SEC — сессия без дыхания
+let lastAccelWallMs = null;     // Date.now() момента последнего "accel_status"
+
 // ── AUDIO BIOFEEDBACK ─────────────────────────────────────────────────────
 let audioEngine = null;
 let audioSessionActive = false;
@@ -163,11 +171,6 @@ function micOptions() {
   return { micRecording: el ? el.checked : false };
 }
 
-function accOptions() {
-  const el = $("opt_acc_recording");
-  return { accRecording: el ? el.checked : false };
-}
-
 function setMicStatus(text) {
   const el = $("mic_status");
   if (!el) return;
@@ -175,6 +178,39 @@ function setMicStatus(text) {
   const on = !!text;
   el.style.display = on ? "block" : "none";
   el.classList.toggle("visible", on);
+}
+
+function setAccStatus(text) {
+  const el = $("acc_status");
+  if (!el) return;
+  el.textContent = text || "";
+  const on = !!text;
+  el.style.display = on ? "block" : "none";
+  el.classList.toggle("visible", on);
+}
+
+// Строка состояния канала акселерометра в панели идущей записи. Обновляется
+// раз в секунду (см. setInterval внизу файла) — только "жив ли канал" и
+// "когда была последняя пачка", без графика.
+function updateAccStatusTick() {
+  if (!accelExpected || !sessionArmed) {
+    setAccStatus("");
+    return;
+  }
+  if (accelMissing) {
+    setAccStatus("акселерометр: канал не ответил — сессия без дыхания");
+    return;
+  }
+  if (lastAccelWallMs == null) {
+    setAccStatus("акселерометр: ожидание первой пачки…");
+    return;
+  }
+  const ageSec = (Date.now() - lastAccelWallMs) / 1000;
+  if (ageSec > 5) {
+    setAccStatus(`акселерометр: нет данных ${ageSec.toFixed(0)}с — канал мог прерваться`);
+  } else {
+    setAccStatus(`акселерометр: пишет (последняя пачка ${ageSec.toFixed(1)}с назад)`);
+  }
 }
 
 async function uploadSessionAudio(sessionId, blob, delaySeconds) {
@@ -826,6 +862,16 @@ function noteBodyHtml(body) {
   return escapeHtml(body).replace(/\n/g, "<br>");
 }
 
+function explanationBodyHtml(body) {
+  // Разбор — связный текст, а не заметка: одиночный перенос строки в исходнике
+  // не должен становиться <br> (в заметках Романа — должен, там так пишется).
+  if (!body) return "";
+  if (typeof marked === "undefined") return escapeHtml(body).replace(/\n/g, "<br>");
+  ensureNoteMarkdown();
+  const html = marked.parse(body, { async: false, breaks: false });
+  return typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(html) : html;
+}
+
 function renderNoteContentHtml(raw) {
   const notes = (raw || "").trim();
   if (!notes) return '<span class="note-empty">—</span>';
@@ -1102,13 +1148,22 @@ function makeRRPlot(el, timed) {
   return rrPlot;
 }
 
+// mode — состояния подключения устройства (см. hrv_web/session_manager.py:
+// RunningSession.device_state) плюс пара локальных ("idle", "waiting").
+// "device" оставлен как синоним "waiting_beat" для чисто mock-сессий.
 function setLiveEmptyState(mode) {
   const empty = $("live_rr_empty");
   if (!empty) return;
   if (mode === "idle") {
     empty.textContent = "Служба готова к запуску";
     empty.classList.remove("hidden");
-  } else if (mode === "device") {
+  } else if (mode === "ble_repair") {
+    empty.textContent = "Пересопряжение ремня (~20с) — нужно для канала дыхания";
+    empty.classList.remove("hidden");
+  } else if (mode === "waiting_accel") {
+    empty.textContent = "Ожидание акселерометра — отсчёт начнётся с первой пачки данных";
+    empty.classList.remove("hidden");
+  } else if (mode === "device" || mode === "waiting_beat") {
     empty.textContent = "Ожидание устройства — отсчёт начнётся с первого удара";
     empty.classList.remove("hidden");
   } else if (mode === "waiting") {
@@ -1149,6 +1204,15 @@ function resizePlots() {
     }
     if (archSdnn && $("arch_sdnn")) archSdnn.setSize({ width: plotWidth($("arch_sdnn")), height: ARCHIVE_PLOT_H });
     if (archRM && $("arch_rm")) archRM.setSize({ width: plotWidth($("arch_rm")), height: ARCHIVE_PLOT_H });
+    if (archBreathingWave && $("arch_breathing_wave")) {
+      archBreathingWave.setSize({ width: plotWidth($("arch_breathing_wave")), height: ARCHIVE_PLOT_H });
+    }
+    if (archBreathingRate && $("arch_breathing_rate")) {
+      archBreathingRate.setSize({ width: plotWidth($("arch_breathing_rate")), height: ARCHIVE_PLOT_H });
+    }
+    if (archBreathingRateRmssd && $("arch_breathing_rate_rmssd")) {
+      archBreathingRateRmssd.setSize({ width: plotWidth($("arch_breathing_rate_rmssd")), height: ARCHIVE_PLOT_H });
+    }
   }
   if (progressVisible) {
     if (progPoincare && $("prog_poincare")) progPoincare.setSize({ width: plotWidth($("prog_poincare")), height: PROGRESS_PLOT_H });
@@ -1277,11 +1341,26 @@ function armSession(t0) {
 function onWsMessage(ev) {
   const msg = JSON.parse(ev.data);
   if (msg.type === "meta") {
-    if (msg.first_beat_at != null) armSession(msg.first_beat_at);
-    else if (msg.started_at != null && sessionArmed) sessionT0 = msg.started_at;
+    if (msg.accel_missing) accelMissing = true;
+    if (msg.first_beat_at != null) {
+      armSession(msg.first_beat_at);
+    } else if (msg.started_at != null && sessionArmed) {
+      sessionT0 = msg.started_at;
+    } else if (msg.device_state) {
+      setLiveEmptyState(msg.device_state);
+    }
+    return;
+  }
+  if (msg.type === "device_state") {
+    if (!sessionArmed) setLiveEmptyState(msg.state);
+    return;
+  }
+  if (msg.type === "accel_status") {
+    lastAccelWallMs = Date.now();
     return;
   }
   if (msg.type === "armed") {
+    if (msg.accel_missing) accelMissing = true;
     if (msg.started_at != null) armSession(msg.started_at);
     return;
   }
@@ -1316,6 +1395,10 @@ function finalizeLiveSession() {
   stopBiofeedbackSession();
   sessionArmed = false;
   pendingArm = null;
+  accelExpected = false;
+  accelMissing = false;
+  lastAccelWallMs = null;
+  setAccStatus("");
 }
 
 function onSessionEnded(statusText) {
@@ -1446,13 +1529,11 @@ function setBiofeedbackControlsEnabled(on) {
   const intervalEl = $("guided_phrase_interval");
   const setEl = $("guided_phrase_set");
   const micEl = $("opt_mic_recording");
-  const accEl = $("opt_acc_recording");
   if (audioEl) audioEl.disabled = !on;
   if (guidedEl) guidedEl.disabled = !on;
   if (intervalEl) intervalEl.disabled = !on;
   if (setEl) setEl.disabled = !on || !phraseSetsForPrefix(phrasePrefixForTag($("tag")?.value)).length;
   if (micEl) micEl.disabled = !on;
-  if (accEl) accEl.disabled = !on;
 }
 
 function syncSourceFields() {
@@ -1485,7 +1566,7 @@ async function startLive() {
     return;
   }
   const isRelease = isReleaseTag(tag);
-  const opts = { ...audioOptions(), ...guidedPhraseOptions(), ...micOptions(), ...accOptions() };
+  const opts = { ...audioOptions(), ...guidedPhraseOptions(), ...micOptions() };
   if (isRelease) {
     opts.guidedPhrases = true;
     opts.phraseSet = opts.phraseSet || "soft";
@@ -1500,7 +1581,6 @@ async function startLive() {
     opt_guided_phrases: isRelease ? true : opts.guidedPhrases,
     opt_audio_biofeedback: opts.audioBiofeedback,
     opt_mic_recording: opts.micRecording,
-    opt_acc_recording: opts.accRecording,
   };
 
   try {
@@ -1541,6 +1621,10 @@ async function startLive() {
     liveMode    = timed ? "timed" : "window";
     sessionT0   = 0;
     sessionArmed = false;
+    accelExpected = source === "ble";
+    accelMissing = false;
+    lastAccelWallMs = null;
+    setAccStatus("");
     durationSec = isRelease ? RELEASE_PROTOCOL_DURATION_SEC : (timed ? body.minutes * 60 : 0);
     lastRmssd   = null;
     lastRmssdNormalized = null;
@@ -1571,7 +1655,7 @@ async function startLive() {
 
     rrBuf = [];
     makeRRPlot($("rrPlot"), timed);
-    setLiveEmptyState("device");
+    setLiveEmptyState(res.device_state || "device");
     nextFrame(resizePlots);
 
     setStatus(`Сессия #${currentSessionId} · ожидание устройства…`);
@@ -1690,7 +1774,9 @@ async function loadArchive() {
     const isActive = !s.ended;
     const tr = document.createElement("tr");
     tr.innerHTML =
-      `<td style="color:var(--text-dim);font-family:var(--mono);font-size:.8rem">${s.id}</td>` +
+      `<td style="color:var(--text-dim);font-family:var(--mono);font-size:.8rem">${s.id}` +
+      (s.has_explanation ? `<span class="expl-badge" title="Есть разбор Claude">разбор</span>` : "") +
+      `</td>` +
       `<td>${escapeHtml(s.participant || "")}</td>` +
       `<td>${tagPill(s.tag)}</td>` +
       `<td>${noteTagsHtml(tags)}</td>` +
@@ -1726,10 +1812,21 @@ let archSpectrum = null;
 let archSdnn = null;
 let archRM = null;
 let archAnalysisCache = null;
+// Шкала Y тренда — по умолчанию линейная, переключатель не сохраняется между сессиями.
+let archSdnnScale = "linear";
+let archRmssdScale = "linear";
 let archSummaryCache = null;
+let archBreathingWave = null;
+let archBreathingRate = null;
+let archBreathingRateRmssd = null;
+let archBreathingCache = null;
 
 function sessionAnalysisUrl(sessionId) {
   return `/api/sessions/${sessionId}/analysis`;
+}
+
+function sessionBreathingUrl(sessionId) {
+  return `/api/sessions/${sessionId}/breathing`;
 }
 
 function rrTimelineSeries(analysis) {
@@ -1758,6 +1855,37 @@ function renderArchNotes(sum) {
   }
 }
 
+function renderArchExplanation(sum) {
+  const block = $("arch_expl_block");
+  const textEl = $("arch_expl_text");
+  const metaEl = $("arch_expl_meta");
+  const editBtn = $("btn_edit_arch_expl");
+  const delBtn = $("btn_delete_arch_expl");
+  if (!block || !textEl) return;
+  block.hidden = false;
+  const expl = sum?.explanation || null;
+  const body = (expl?.body || "").trim();
+  block.classList.toggle("is-empty", !body);
+  if (body) {
+    textEl.innerHTML = `<div class="note-md">${explanationBodyHtml(body)}</div>`;
+  } else {
+    textEl.innerHTML =
+      '<span class="note-empty">Разбора нет. Попросите Claude объяснить эту сессию по номеру ' +
+      `— он запишет разбор сюда (сессия ${sum?.id ?? "—"}).</span>`;
+  }
+  if (metaEl) {
+    if (expl?.updated_at) {
+      metaEl.hidden = false;
+      metaEl.textContent = `${expl.author || "claude"} · обновлено ${fmtTime(expl.updated_at)}`;
+    } else {
+      metaEl.hidden = true;
+      metaEl.textContent = "";
+    }
+  }
+  if (editBtn) editBtn.textContent = body ? "Изменить" : "Написать вручную";
+  if (delBtn) delBtn.hidden = !body;
+}
+
 function renderSummaryGrid(sum) {
   const grid = $("arch_summary_grid");
   grid.innerHTML = "";
@@ -1772,6 +1900,7 @@ function renderSummaryGrid(sum) {
   const coherence = archAnalysisCache?.coherence_score != null
     ? archAnalysisCache.coherence_score
     : sum.coherence_score;
+  const breaks = archAnalysisCache?.break_summary;
   const fields = [
     ["RMSSD mean",  sum.rmssd_mean != null ? sum.rmssd_mean.toFixed(1) + " ms" : "—"],
     ["RMSSD min",   sum.rmssd_min  != null ? sum.rmssd_min.toFixed(1)  + " ms" : "—"],
@@ -1779,6 +1908,7 @@ function renderSummaryGrid(sum) {
     ["Mean RR",     meanRr != null ? Number(meanRr).toFixed(1) + " ms" : "—"],
     ["Coherence",   coherence != null ? Number(coherence).toFixed(1) : "—"],
     ["Длительность", durMin != null ? durMin.toFixed(1) + " мин" : "—"],
+    ["Разрывы записи", breaks ? `${breaks.broken_minutes} из ${breaks.total_minutes} мин` : "—"],
     ["vs baseline", vsBl],
     ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
     ["Guided meditation", sum.opt_guided_phrases ? "да" : "нет"],
@@ -1816,6 +1946,12 @@ function destroyPlotInstance(plot) {
   plot.destroy();
 }
 
+function destroyArchBreathingPlots() {
+  if (archBreathingWave) { archBreathingWave.destroy(); archBreathingWave = null; }
+  if (archBreathingRate) { archBreathingRate.destroy(); archBreathingRate = null; }
+  if (archBreathingRateRmssd) { archBreathingRateRmssd.destroy(); archBreathingRateRmssd = null; }
+}
+
 function destroyArchPlots() {
   archAudioPlayer?.detachPlot();
   if (archRR) { destroyPlotInstance(archRR); archRR = null; }
@@ -1823,15 +1959,64 @@ function destroyArchPlots() {
   if (archSpectrum?.plot) { archSpectrum.plot.destroy(); archSpectrum = null; }
   if (archSdnn) { archSdnn.destroy(); archSdnn = null; }
   if (archRM) { archRM.destroy(); archRM = null; }
+  destroyArchBreathingPlots();
+}
+
+// Полоска качества под трендом RMSSD/SDNN: доля исправленных ударов по
+// минутам (hrv_core.analysis.quality_strip) — метка, а не фильтр, ничего не
+// скрывает. Раскладка по ширине не завязана на uPlot-пиксели: у этих
+// графиков нет zoom/pan (в отличие от RR), поэтому пропорциональная раскладка
+// по durationSec не рассинхронизируется.
+function renderQualityStrip(el, strip, durationSec) {
+  if (!el) return;
+  el.innerHTML = "";
+  if (!strip?.length || !durationSec) return;
+  const warn = TH()?.cssVar("--yellow", "#f5c542") || "#f5c542";
+  const widthPct = Math.max(0.4, (60 / durationSec) * 100);
+  for (const bucket of strip) {
+    const seg = document.createElement("div");
+    seg.className = "quality-strip-seg";
+    seg.style.left = `${(bucket.x / durationSec) * 100}%`;
+    seg.style.width = `${widthPct}%`;
+    const alpha = Math.min(1, bucket.corrected_fraction * 5);
+    seg.style.background = alpha > 0.02
+      ? (TH()?.hexToRgba(warn, alpha) || `rgba(245,197,66,${alpha})`)
+      : "transparent";
+    el.appendChild(seg);
+  }
+}
+
+function renderArchSdnn(analysis) {
+  const dEl = $("arch_sdnn");
+  const qEl = $("arch_sdnn_quality");
+  const btn = $("arch_sdnn_scale_toggle");
+  if (btn) btn.textContent = archSdnnScale === "linear" ? "лин" : "лог";
+  if (archSdnn) { archSdnn.destroy(); archSdnn = null; }
+  if (!dEl) return;
+  dEl.innerHTML = "";
+  const charts = AC();
+  if (!charts || !analysis?.sdnn_trend?.length) {
+    charts?.setChartEmpty(dEl, "Недостаточно данных");
+    renderQualityStrip(qEl, null, 0);
+    return;
+  }
+  const profile = chartProfileFor(archSummaryCache?.tag);
+  const opts = { ...(profile.options.sdnn || {}), scale: archSdnnScale, gaps: analysis.gaps };
+  archSdnn = charts.makeSdnnPlot(dEl, analysis.sdnn_trend, analysis.duration_sec, ARCHIVE_PLOT_H, opts);
+  applyArchLoupe("sdnn");
+  renderQualityStrip(qEl, analysis.quality_strip, analysis.duration_sec);
 }
 
 function renderArchRmssd(analysis) {
   const panel = $("arch_rmssd_panel");
   const mode = $("arch_rmssd_mode")?.value || "hidden";
+  const btn = $("arch_rmssd_scale_toggle");
+  if (btn) btn.textContent = archRmssdScale === "linear" ? "лин" : "лог";
   if (!panel) return;
   if (mode !== "show") {
     panel.classList.remove("visible");
     if (archRM) { archRM.destroy(); archRM = null; }
+    renderQualityStrip($("arch_rmssd_quality"), null, 0);
     return;
   }
   panel.classList.add("visible");
@@ -1842,10 +2027,102 @@ function renderArchRmssd(analysis) {
   const charts = AC();
   if (!charts || !analysis?.rmssd_trend?.length) {
     charts?.setChartEmpty(el, "Недостаточно данных");
+    renderQualityStrip($("arch_rmssd_quality"), null, 0);
     return;
   }
-  archRM = charts.makeRmssdPlot(el, analysis.rmssd_trend, analysis.duration_sec, ARCHIVE_PLOT_H);
+  const opts = { scale: archRmssdScale, gaps: analysis.gaps };
+  archRM = charts.makeRmssdPlot(el, analysis.rmssd_trend, analysis.duration_sec, ARCHIVE_PLOT_H, opts);
+  renderQualityStrip($("arch_rmssd_quality"), analysis.quality_strip, analysis.duration_sec);
+  applyArchLoupe("rmssd");
 }
+
+// Лупа на графиках истории: у каждого графика своя галочка и своя длина
+// окна в минутах; ползунок под графиком двигает окно по сессии.
+// Состояние переживает перерисовку и смену сессии.
+const LOUPE_KEYS = ["rr", "sdnn", "rmssd", "breath_wave", "breath_rate", "breath_combo"];
+const archLoupe = Object.fromEntries(LOUPE_KEYS.map((k) => [k, { on: false, start: 0 }]));
+const archLoupePlot = () => ({
+  rr: archRR, sdnn: archSdnn, rmssd: archRM,
+  breath_wave: archBreathingWave, breath_rate: archBreathingRate, breath_combo: archBreathingRateRmssd,
+});
+
+function loupeWindowSec(key) {
+  const v = Number(document.querySelector(`[data-loupe-min="${key}"]`)?.value);
+  return (Number.isFinite(v) && v > 0 ? v : 2) * 60;
+}
+
+// RR и волна дыхания по умолчанию приходят прореженными (на 8-часовой
+// записи — точка на несколько секунд). Лупе нужна форма каждого удара и
+// вдоха, поэтому при первом включении подгружаем полное разрешение.
+const LOUPE_FULL_RES = {
+  rr: {
+    url: (id) => `${sessionAnalysisUrl(id)}?max_points=50000`,
+    data: (j) => { const { xs, ys } = rrTimelineSeries(j); return [xs, ys]; },
+  },
+  breath_wave: {
+    url: (id) => `${sessionBreathingUrl(id)}?max_points=200000`,
+    data: (j) => [j.t, j.wave_mg],
+  },
+};
+const archLoupeFull = {};
+
+async function ensureLoupeFullRes(key, plot) {
+  const spec = LOUPE_FULL_RES[key];
+  const id = archSummaryCache?.id;
+  if (!spec || !id || plot._hrvLoupeFull) return;
+  const cacheKey = `${id}:${key}`;
+  if (!archLoupeFull[cacheKey]) {
+    archLoupeFull[cacheKey] = api(spec.url(id)).then(spec.data).catch(() => null);
+  }
+  const data = await archLoupeFull[cacheKey];
+  if (!data?.[0]?.length || archLoupePlot()[key] !== plot) return;
+  plot._hrvLoupeFull = true;
+  plot.setData(data, false);
+}
+
+async function applyArchLoupe(key) {
+  const plot0 = archLoupePlot()[key];
+  if (plot0 && archLoupe[key].on) await ensureLoupeFullRes(key, plot0);
+  const plot = archLoupePlot()[key];
+  const slider = document.querySelector(`[data-loupe-slider="${key}"]`);
+  const L = window.HrvChartLoupe;
+  const st = archLoupe[key];
+  if (!plot || !L) {
+    if (slider) slider.hidden = true;
+    return;
+  }
+  if (!st.on) {
+    L.restore(plot);
+    if (slider) slider.hidden = true;
+    return;
+  }
+  const [x0, x1] = L.extent(plot);
+  const win = Math.min(loupeWindowSec(key), x1 - x0);
+  const maxStart = Math.max(0, x1 - x0 - win);
+  st.start = Math.min(Math.max(0, st.start), maxStart);
+  if (slider) {
+    slider.hidden = false;
+    slider.max = String(maxStart);
+    slider.step = String(Math.max(1, win / 20));
+    slider.value = String(st.start);
+  }
+  L.show(plot, x0 + st.start, x0 + st.start + win);
+}
+
+LOUPE_KEYS.forEach((key) => {
+  const box = document.querySelector(`input[data-loupe="${key}"]`);
+  const mins = document.querySelector(`[data-loupe-min="${key}"]`);
+  const slider = document.querySelector(`[data-loupe-slider="${key}"]`);
+  box?.addEventListener("change", () => {
+    archLoupe[key].on = box.checked;
+    applyArchLoupe(key);
+  });
+  mins?.addEventListener("change", () => applyArchLoupe(key));
+  slider?.addEventListener("input", () => {
+    archLoupe[key].start = Number(slider.value);
+    applyArchLoupe(key);
+  });
+});
 
 function renderArchiveAnalysisCharts(analysis, sum) {
   const charts = AC();
@@ -1914,15 +2191,92 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   }
 
   if (activePanels.has("sdnn")) {
-    if (!analysis?.sdnn_trend?.length) {
-      charts.setChartEmpty(dEl, "Недостаточно данных");
-    } else {
-      archSdnn = charts.makeSdnnPlot(dEl, analysis.sdnn_trend, analysis.duration_sec, ARCHIVE_PLOT_H, profile.options.sdnn);
-    }
+    renderArchSdnn(analysis);
+  } else {
+    renderQualityStrip($("arch_sdnn_quality"), null, 0);
   }
 
   renderArchRmssd(analysis);
+  applyArchLoupe("rr");
+  applyArchLoupe("sdnn");
+  renderArchiveBreathing(archBreathingCache, analysis);
   nextFrame(resizePlots);
+}
+
+function fmtCpm(v) {
+  return v != null ? Number(v).toFixed(1) + " цикл/мин" : "—";
+}
+
+// Дыхание — только post-session (живого графика во время записи нет,
+// решено отдельно, см. ARCHITECTURE.md). Блок скрыт целиком, если у сессии
+// нет данных акселерометра (has_accel=false) — так выглядит большинство
+// старых сессий, до Части A. Пустых графиков с нулевой линией это не рисует.
+function renderArchiveBreathing(breathing, analysis) {
+  const block = $("arch_breathing_block");
+  if (!block) return;
+  destroyArchBreathingPlots();
+
+  if (!breathing?.has_accel || breathing.insufficient_data) {
+    block.hidden = true;
+    return;
+  }
+  block.hidden = false;
+
+  const charts = AC();
+  const waveEl = $("arch_breathing_wave");
+  const rateEl = $("arch_breathing_rate");
+  const comboEl = $("arch_breathing_rate_rmssd");
+  if (waveEl) waveEl.innerHTML = "";
+  if (rateEl) rateEl.innerHTML = "";
+  if (comboEl) comboEl.innerHTML = "";
+  if (!charts) return;
+
+  const durationSec = analysis?.duration_sec;
+
+  if (breathing.t?.length && breathing.wave_mg?.length) {
+    archBreathingWave = charts.makeBreathingWavePlot(
+      waveEl, breathing.t, breathing.wave_mg, breathing.windows, durationSec, ARCHIVE_PLOT_H
+    );
+  } else if (waveEl) {
+    charts.setChartEmpty(waveEl, "Недостаточно данных");
+  }
+
+  if (breathing.t?.length && breathing.rate_cpm?.length) {
+    archBreathingRate = charts.makeBreathingRatePlot(
+      rateEl, breathing.t, breathing.rate_cpm, durationSec, ARCHIVE_PLOT_H
+    );
+  } else if (rateEl) {
+    charts.setChartEmpty(rateEl, "Недостаточно данных");
+  }
+
+  if (breathing.t?.length && breathing.rate_cpm?.length && analysis?.rmssd_trend?.length) {
+    archBreathingRateRmssd = charts.makeBreathingRateRmssdPlot(
+      comboEl, breathing.t, breathing.rate_cpm, analysis.rmssd_trend, durationSec, ARCHIVE_PLOT_H
+    );
+  } else if (comboEl) {
+    charts.setChartEmpty(comboEl, "Недостаточно данных (нет тренда RMSSD)");
+  }
+
+  applyArchLoupe("breath_wave");
+  applyArchLoupe("breath_rate");
+  applyArchLoupe("breath_combo");
+
+  const metricsRow = $("arch_breathing_metrics_row");
+  if (metricsRow) {
+    metricsRow.innerHTML = "";
+    const s = breathing.summary || {};
+    const metrics = [
+      ["Частота (медиана)", fmtCpm(s.cpm_median)],
+      ["Годный сигнал", s.good_fraction != null ? Math.round(s.good_fraction * 100) + "%" : "—"],
+      ["Амплитуда", s.amp_median_mg != null ? Number(s.amp_median_mg).toFixed(1) + " мг" : "—"],
+      ["Несущая ось", s.axis || "—"],
+    ];
+    for (const [label, value] of metrics) {
+      const cell = document.createElement("div");
+      cell.innerHTML = `<div class="s-label">${label}</div><div class="s-value">${value}</div>`;
+      metricsRow.appendChild(cell);
+    }
+  }
 }
 
 async function syncArchAudioPlayer(sum) {
@@ -1947,6 +2301,8 @@ async function openArchiveSession(id) {
   const detail = $("arch_detail");
   detail.classList.add("visible");
   $("arch_id").textContent = String(id);
+  archSdnnScale = "linear";
+  archRmssdScale = "linear";
   const delBtn = $("btn_delete_arch_session");
   if (delBtn) {
     delBtn.hidden = false;
@@ -1956,6 +2312,7 @@ async function openArchiveSession(id) {
   destroyArchPlots();
   archAnalysisCache = null;
   archSummaryCache = null;
+  archBreathingCache = null;
 
   let sum = null;
   try {
@@ -1964,6 +2321,8 @@ async function openArchiveSession(id) {
     $("arch_summary_grid").innerHTML = "<p style='color:var(--text-dim);font-size:.8rem'>Сводка недоступна (сессия ещё идёт?)</p>";
     const notesBlock = $("arch_notes_block");
     if (notesBlock) notesBlock.hidden = true;
+    const explBlock = $("arch_expl_block");
+    if (explBlock) explBlock.hidden = true;
   }
 
   let analysis = null;
@@ -1974,9 +2333,16 @@ async function openArchiveSession(id) {
     setErr(String(e.message || e));
   }
 
+  try {
+    archBreathingCache = await api(sessionBreathingUrl(id));
+  } catch {
+    archBreathingCache = null;  // эндпойнт недоступен — блок просто скрыт
+  }
+
   if (sum) {
     archSummaryCache = sum;
     renderSummaryGrid(sum);
+    renderArchExplanation(sum);
     renderArchNotes(sum);
   } else {
     ensureArchAudioPlayer()?.load(null, false);
@@ -2016,7 +2382,115 @@ $("btn_edit_arch_notes")?.addEventListener("click", (e) => {
   });
 });
 
+// ── Разбор сессии (пишет Claude, правится здесь) ──────────────────────────
+const EXPL_MAX_LEN = 20000;
+let _explModalSessionId = null;
+
+function closeSessionExplModal() {
+  $("session_expl_modal")?.classList.remove("visible");
+  _explModalSessionId = null;
+}
+
+function showSessionExplModal(sessionId, body) {
+  const modal = $("session_expl_modal");
+  const input = $("session_expl_input");
+  if (!modal || !input) return;
+  _explModalSessionId = sessionId;
+  const idEl = $("session_expl_id");
+  if (idEl) idEl.textContent = String(sessionId);
+  input.value = body || "";
+  updateExplCounter();
+  input.oninput = () => updateExplCounter();
+  modal.classList.add("visible");
+  input.focus();
+}
+
+function updateExplCounter() {
+  const countEl = $("expl_char_count");
+  const input = $("session_expl_input");
+  if (!countEl || !input) return;
+  const len = (input.value || "").length;
+  countEl.textContent = String(len);
+  countEl.style.color = len > EXPL_MAX_LEN ? "var(--danger)" : "var(--text-muted)";
+}
+
+async function saveSessionExplanation() {
+  const sessionId = _explModalSessionId;
+  if (!sessionId) {
+    closeSessionExplModal();
+    return;
+  }
+  const text = ($("session_expl_input")?.value || "").trim();
+  if (text.length > EXPL_MAX_LEN) {
+    setErr(`Разбор слишком длинный: ${text.length}/${EXPL_MAX_LEN}.`);
+    return;
+  }
+  try {
+    if (!text) {
+      await api(`/api/sessions/${sessionId}/explanation`, { method: "DELETE" });
+      if (archSummaryCache?.id === sessionId) archSummaryCache.explanation = null;
+    } else {
+      const res = await api(`/api/sessions/${sessionId}/explanation`, {
+        method: "PUT",
+        body: JSON.stringify({ body: text, author: "roman" }),
+      });
+      if (archSummaryCache?.id === sessionId) {
+        archSummaryCache.explanation = res.explanation || null;
+      }
+    }
+    closeSessionExplModal();
+    if (archSummaryCache?.id === sessionId) renderArchExplanation(archSummaryCache);
+    loadArchive().catch(() => {});
+  } catch (e) {
+    setErr(String(e.message || e));
+  }
+}
+
+async function deleteSessionExplanation(sessionId) {
+  if (!confirm(`Удалить разбор сессии ${sessionId}?`)) return;
+  try {
+    await api(`/api/sessions/${sessionId}/explanation`, { method: "DELETE" });
+    if (archSummaryCache?.id === sessionId) {
+      archSummaryCache.explanation = null;
+      renderArchExplanation(archSummaryCache);
+    }
+    loadArchive().catch(() => {});
+  } catch (e) {
+    setErr(String(e.message || e));
+  }
+}
+
+$("btn_edit_arch_expl")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!archSummaryCache?.id) return;
+  showSessionExplModal(archSummaryCache.id, archSummaryCache.explanation?.body || "");
+});
+
+$("btn_delete_arch_expl")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!archSummaryCache?.id) return;
+  deleteSessionExplanation(archSummaryCache.id);
+});
+
+$("session_expl_save")?.addEventListener("click", () => saveSessionExplanation());
+$("session_expl_cancel")?.addEventListener("click", () => closeSessionExplModal());
+$("session_expl_modal")?.addEventListener("click", (e) => {
+  if (e.target === $("session_expl_modal")) closeSessionExplModal();
+});
+
 $("arch_rmssd_mode")?.addEventListener("change", () => {
+  renderArchRmssd(archAnalysisCache);
+  nextFrame(resizePlots);
+});
+
+$("arch_sdnn_scale_toggle")?.addEventListener("click", () => {
+  archSdnnScale = archSdnnScale === "linear" ? "log" : "linear";
+  renderArchSdnn(archAnalysisCache);
+  nextFrame(resizePlots);
+});
+
+$("arch_rmssd_scale_toggle")?.addEventListener("click", () => {
+  archRmssdScale = archRmssdScale === "linear" ? "log" : "linear";
   renderArchRmssd(archAnalysisCache);
   nextFrame(resizePlots);
 });
@@ -2252,3 +2726,5 @@ function onThemeChange() {
 }
 
 window.addEventListener("hrv-theme-change", onThemeChange);
+
+setInterval(updateAccStatusTick, 1000);
