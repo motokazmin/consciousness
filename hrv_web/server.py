@@ -25,6 +25,7 @@ from hrv_core.db import (
     delete_session,
     delete_session_explanation,
     delete_session_segments,
+    ensure_baseline_current,
     ensure_session_audio_dir,
     finalize_orphaned_sessions,
     finalize_session,
@@ -114,6 +115,8 @@ async def _lifespan(app: FastAPI):
         finalized = finalize_orphaned_sessions(conn)
         if finalized:
             log.info("Завершены незакрытые сессии после перезапуска: %s", finalized)
+        if ensure_baseline_current(conn):
+            log.info("Baseline пересобран по исправленному ряду")
         loaded = import_razbor_files(conn)
         if loaded:
             log.info("Подхвачены разборы из research/razbor: %s", ", ".join(loaded))

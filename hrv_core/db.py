@@ -217,6 +217,11 @@ def init_db(path: Path | None = None) -> sqlite3.Connection:
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
         )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )""")
     # Размеченные отрезки сессии (стадии сна, фазы практики, события) —
     # данные для ленты над графиками архива. Одна JSON-запись на сессию:
     # разметка пишется и переписывается целиком, как разбор.
@@ -281,16 +286,49 @@ def load_hour_baseline(conn: sqlite3.Connection, hour: int) -> float | None:
     return float(row[0]) if row else None
 
 
+# Версия способа, которым собрана таблица baseline. 2 — по исправленному ряду
+# (correct_rr_artifacts + скользящий RMSSD, как график и сводка архива);
+# 1 — по «живой» колонке hrv_points.rmssd с артефактами. При несовпадении
+# таблица пересобирается целиком (ensure_baseline_current).
+BASELINE_VERSION = 2
+
+
+def _session_rmssd_by_hour(
+    conn: sqlite3.Connection, session_id: int
+) -> list[tuple[int, float, int]]:
+    """(час по местному времени, средний RMSSD, число точек) по исправленному ряду."""
+    # Импорт внутри: analysis/preprocessing тяжёлые и db не должен от них
+    # зависеть при импорте (db нужен и лёгким скриптам).
+    import datetime
+
+    import numpy as np
+
+    from hrv_core.analysis import rmssd_trend
+    from hrv_core.preprocessing import correct_rr_artifacts
+
+    row = conn.execute("SELECT started FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    rows = conn.execute(
+        "SELECT ts, rr_ms FROM hrv_points WHERE session_id = ? ORDER BY ts",
+        (session_id,),
+    ).fetchall()
+    if not row or len(rows) < 2:
+        return []
+    ts = np.array([r[0] for r in rows], dtype=float)
+    rr, _, _ = correct_rr_artifacts(np.array([r[1] for r in rows], dtype=float))
+    started = float(row[0]) if row[0] is not None else float(ts[0])
+    sums: dict[int, list[float]] = {}
+    for p in rmssd_trend(ts, rr, started, max_points=10**7):
+        if p["rmssd"] is None:
+            continue
+        hour = datetime.datetime.fromtimestamp(started + p["x"]).hour
+        acc = sums.setdefault(hour, [0.0, 0])
+        acc[0] += p["rmssd"]
+        acc[1] += 1
+    return [(h, v[0] / v[1], v[1]) for h, v in sorted(sums.items())]
+
+
 def update_session_baseline(conn: sqlite3.Connection, session_id: int) -> None:
-    rows = conn.execute("""
-        SELECT
-            CAST(strftime('%H', datetime(ts, 'unixepoch', 'localtime')) AS INTEGER) AS hour,
-            AVG(rmssd)  AS session_mean,
-            COUNT(*)    AS n
-        FROM hrv_points
-        WHERE session_id = ?
-        GROUP BY hour
-    """, (session_id,)).fetchall()
+    rows = _session_rmssd_by_hour(conn, session_id)
 
     if not rows:
         return
@@ -321,6 +359,32 @@ def update_session_baseline(conn: sqlite3.Connection, session_id: int) -> None:
     conn.commit()
     updated = [r[0] for r in rows]
     log.debug("Baseline updated for hours %s", updated)
+
+
+def rebuild_baseline(conn: sqlite3.Connection) -> int:
+    """Пересобрать baseline с нуля: все завершённые сессии по порядку начала."""
+    conn.execute("DELETE FROM baseline")
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM sessions WHERE ended IS NOT NULL ORDER BY started"
+    )]
+    for sid in ids:
+        update_session_baseline(conn, sid)
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('baseline_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (str(BASELINE_VERSION),),
+    )
+    conn.commit()
+    return len(ids)
+
+
+def ensure_baseline_current(conn: sqlite3.Connection) -> bool:
+    """Пересобрать baseline, если он собран старым способом. True — пересобран."""
+    row = conn.execute("SELECT value FROM meta WHERE key = 'baseline_version'").fetchone()
+    if row and row[0] == str(BASELINE_VERSION):
+        return False
+    rebuild_baseline(conn)
+    return True
 
 
 def finalize_session(conn: sqlite3.Connection, session_id: int) -> bool:

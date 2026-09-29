@@ -1856,6 +1856,15 @@ function renderArchNotes(sum) {
   }
 }
 
+function setArchExplCollapsed(collapsed) {
+  $("arch_expl_block")?.classList.toggle("collapsed", collapsed);
+  $("arch_expl_toggle")?.setAttribute("aria-expanded", String(!collapsed));
+}
+
+$("arch_expl_toggle")?.addEventListener("click", () => {
+  setArchExplCollapsed(!$("arch_expl_block")?.classList.contains("collapsed"));
+});
+
 function renderArchExplanation(sum) {
   const block = $("arch_expl_block");
   const textEl = $("arch_expl_text");
@@ -1867,6 +1876,9 @@ function renderArchExplanation(sum) {
   const expl = sum?.explanation || null;
   const body = (expl?.body || "").trim();
   block.classList.toggle("is-empty", !body);
+  // Разбор свёрнут по умолчанию при каждом открытии сессии: сначала графики,
+  // текст — по клику на заголовок. Пустой разбор показываем сразу (одна строка).
+  setArchExplCollapsed(!!body);
   if (body) {
     textEl.innerHTML = `<div class="note-md">${explanationBodyHtml(body)}</div>`;
   } else {
@@ -1891,6 +1903,10 @@ function renderSummaryGrid(sum) {
   const grid = $("arch_summary_grid");
   grid.innerHTML = "";
   const durMin = sum.duration_sec != null ? sum.duration_sec / 60 : null;
+  const vsBl =
+    sum.vs_baseline_pct != null
+      ? (sum.vs_baseline_pct >= 0 ? "+" : "") + sum.vs_baseline_pct.toFixed(0) + "%"
+      : "—";
   const meanRr = archAnalysisCache?.mean_rr != null
     ? archAnalysisCache.mean_rr
     : sum.mean_rr;
@@ -1907,6 +1923,7 @@ function renderSummaryGrid(sum) {
     ["Coherence",   coherence != null ? Number(coherence).toFixed(1) : "—"],
     ["Длительность", durMin != null ? durMin.toFixed(1) + " мин" : "—"],
     ["Разрывы записи", breaks ? `${breaks.broken_minutes} из ${breaks.total_minutes} мин` : "—"],
+    ["vs baseline", vsBl],
     ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
     ["Guided meditation", sum.opt_guided_phrases ? "да" : "нет"],
     ["Аудио-биофидбек", sum.opt_audio_biofeedback ? "да" : "нет"],

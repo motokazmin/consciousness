@@ -14,7 +14,7 @@ from hrv_core.preprocessing import correct_rr_artifacts, preprocess_rr_session
 def session_summary_dict(
     conn: sqlite3.Connection,
     session_id: int,
-    baseline_at_start: float | None,  # не используется, см. vs_baseline_pct ниже
+    baseline_at_start: float | None,
     drift_count: int,
 ) -> dict[str, Any] | None:
     row = conn.execute(
@@ -44,10 +44,6 @@ def session_summary_dict(
         "rmssd_min": None,
         "rmssd_max": None,
         "point_count": 0,
-        # vs baseline больше не считается: baseline (таблица по часам) и
-        # «живая» колонка hrv_points.rmssd, по которым он шёл, собраны по
-        # сырому буферу с артефактами — на ночах сравнение давало +114% на
-        # сбоях датчика. Сопоставимый baseline по исправленному ряду — отдельно.
         "vs_baseline_pct": None,
     }
 
@@ -76,6 +72,12 @@ def session_summary_dict(
             out["rmssd_p90"] = round(float(np.percentile(vals, 90)), 1)
             out["rmssd_min"] = round(float(vals.min()), 1)
             out["rmssd_max"] = round(float(vals.max()), 1)
+            # Baseline собран тем же способом — по исправленному ряду
+            # (hrv_core.db.BASELINE_VERSION = 2), так что сравнение честное.
+            if baseline_at_start is not None and baseline_at_start > 0:
+                out["vs_baseline_pct"] = round(
+                    (float(vals.mean()) - baseline_at_start) / baseline_at_start * 100.0, 1
+                )
         m_rr = mean_rr(analysis_rr)
         out["mean_rr"] = round(m_rr, 1) if m_rr is not None else None
         spec = compute_spectrum(ts_arr, analysis_rr, fft_rr=fft_rr)

@@ -1318,6 +1318,15 @@
       margin-bottom: 0;
     }
     .arch-expl-block.is-empty .s-label { color: var(--text-dim); }
+    .arch-expl-toggle {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 0; border: 0; background: none; cursor: pointer; color: inherit;
+    }
+    .arch-expl-caret { color: var(--accent); font-size: 0.8rem; transition: transform .15s ease; }
+    .arch-expl-block:not(.collapsed) .arch-expl-caret { transform: rotate(90deg); }
+    .arch-expl-block.collapsed .arch-expl-header { margin-bottom: 0; }
+    .arch-expl-block.collapsed .arch-expl-text,
+    .arch-expl-block.collapsed .arch-expl-meta { display: none; }
     .arch-expl-meta {
       font-family: var(--mono);
       font-size: 0.62rem;
@@ -1898,7 +1907,10 @@
           <div class="err-bar" id="arch_err"></div>
           <div class="arch-expl-block" id="arch_expl_block" hidden>
             <div class="arch-expl-header">
-              <div class="s-label">Разбор сессии · пишет Claude</div>
+              <button type="button" class="arch-expl-toggle" id="arch_expl_toggle" aria-expanded="false">
+                <span class="arch-expl-caret">▸</span>
+                <span class="s-label">Разбор сессии · пишет Claude</span>
+              </button>
               <div style="display:flex;gap:8px">
                 <button type="button" class="btn btn-secondary" id="btn_edit_arch_expl" style="font-size:.72rem;padding:4px 12px">Изменить</button>
                 <button type="button" class="btn btn-danger" id="btn_delete_arch_expl" style="font-size:.72rem;padding:4px 12px" hidden>Удалить</button>
@@ -2181,6 +2193,6 @@
 <script src="/assets/chart_loupe.js?v=2"></script>
 <script src="/assets/chart_segments.js?v=2"></script>
 <script src="/assets/analysis_charts.js?v=13"></script>
-<script src="/assets/app.js?v=41"></script>
+<script src="/assets/app.js?v=42"></script>
 </body>
 </html>
