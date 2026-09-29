@@ -2137,6 +2137,87 @@ function applyArchLoupeAll() {
   for (const key of LOUPE_KEYS) applyArchLoupe(key);
 }
 
+// Колесо и перетаскивание над RR и лентой отрезков управляют общей лупой:
+// колесо — длина окна вокруг курсора, перетаскивание и Shift+колесо — сдвиг.
+// Над остальными графиками колесо остаётся прокруткой страницы.
+const LOUPE_MIN_SEC = 30;
+let loupeFrame = 0;
+
+function scheduleLoupe() {
+  if (loupeFrame) return;
+  loupeFrame = requestAnimationFrame(() => {
+    loupeFrame = 0;
+    applyArchLoupeAll();
+  });
+}
+
+function currentLoupeView() {
+  const dur = loupeDuration();
+  return archLoupe.on ? loupeWindow() : [0, dur];
+}
+
+function setLoupeView(x0, win) {
+  const dur = loupeDuration();
+  if (!dur) return;
+  if (win >= dur) {
+    archLoupe.on = false;
+    archLoupe.start = 0;
+    const minEl = $("arch_loupe_min");
+    if (minEl) minEl.value = "10";
+  } else {
+    archLoupe.on = true;
+    archLoupe.start = Math.min(Math.max(0, x0), dur - win);
+    const minEl = $("arch_loupe_min");
+    if (minEl) minEl.value = String(+(win / 60).toFixed(2));
+  }
+  const box = $("arch_loupe_on");
+  if (box) box.checked = archLoupe.on;
+  scheduleLoupe();
+}
+
+function attachLoupeGestures(el) {
+  if (!el || el._hrvLoupeGestures) return;
+  el._hrvLoupeGestures = true;
+  const frac = (clientX) => {
+    const r = el.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+  };
+  el.addEventListener("wheel", (e) => {
+    if (!loupeDuration()) return;
+    e.preventDefault();
+    const [x0, x1] = currentLoupeView();
+    const win = x1 - x0;
+    if (e.shiftKey) {
+      setLoupeView(x0 + (e.deltaY / 500) * win, win);
+      return;
+    }
+    const t = x0 + frac(e.clientX) * win;
+    const f = e.deltaY < 0 ? 0.8 : 1.25;
+    const nw = Math.max(LOUPE_MIN_SEC, win * f);
+    setLoupeView(t - (t - x0) * (nw / win), nw);
+  }, { passive: false });
+
+  let drag = null;
+  el.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || !archLoupe.on) return;
+    const [x0, x1] = currentLoupeView();
+    drag = { x: e.clientX, x0, win: x1 - x0, w: el.getBoundingClientRect().width, moved: false };
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    if (Math.abs(dx) > 4) drag.moved = true;
+    if (drag.moved) setLoupeView(drag.x0 - (dx / drag.w) * drag.win, drag.win);
+  });
+  window.addEventListener("mouseup", () => {
+    if (drag?.moved) {
+      // клик после перетаскивания не должен открывать карточку отрезка
+      el.addEventListener("click", (ev) => ev.stopPropagation(), { capture: true, once: true });
+    }
+    drag = null;
+  });
+}
+
 $("arch_loupe_on")?.addEventListener("change", (e) => {
   archLoupe.on = e.target.checked;
   applyArchLoupeAll();
@@ -2172,6 +2253,7 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   if (rrTitle) rrTitle.textContent = "RR — от начала сессии";
 
   const rrOpts = {
+    noZoom: true,
     ...(profile.options.rr || {}),
     ...(sum?.has_audio ? { noCursor: true } : {}),
   };
@@ -2221,6 +2303,7 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   }
 
   renderArchRmssd(analysis);
+  attachLoupeGestures(archRR?.over);
   syncLoupeBar();
   applyArchLoupe("rr");
   applyArchLoupe("sdnn");
@@ -2405,7 +2488,10 @@ function renderArchSegments() {
     return;
   }
   card.hidden = false;
-  if (!archSegStrip) archSegStrip = window.HrvSegmentStrip.create(root);
+  if (!archSegStrip) {
+    archSegStrip = window.HrvSegmentStrip.create(root);
+    attachLoupeGestures(root.querySelector(".seg-lane"));
+  }
   archSegStrip.set(data, archRR, archSummaryCache?.started);
   archSegStrip.setConfidentOnly($("arch_segments_confident")?.checked);
 }

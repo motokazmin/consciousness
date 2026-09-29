@@ -228,7 +228,9 @@
       el
     );
 
-    const zoom = global.HrvChartZoom?.attach(plot, {
+    // noZoom: в архиве зумом управляет общая лупа (app.js), свой зум
+    // графика разводил бы его с остальными графиками и лентой отрезков.
+    const zoom = opts?.noZoom ? null : global.HrvChartZoom?.attach(plot, {
       getBaseline: () => baseline,
       minSpan: { x: 1, y: 20 },
     });
