@@ -7,14 +7,14 @@ from typing import Any
 
 import numpy as np
 
-from hrv_core.analysis import coherence_score, compute_spectrum, mean_rr
+from hrv_core.analysis import coherence_score, compute_spectrum, mean_rr, rmssd_trend
 from hrv_core.preprocessing import correct_rr_artifacts, preprocess_rr_session
 
 
 def session_summary_dict(
     conn: sqlite3.Connection,
     session_id: int,
-    baseline_at_start: float | None,
+    baseline_at_start: float | None,  # не используется, см. vs_baseline_pct ниже
     drift_count: int,
 ) -> dict[str, Any] | None:
     row = conn.execute(
@@ -27,12 +27,6 @@ def session_summary_dict(
     if ended is None or started is None:
         return None
 
-    stats = conn.execute(
-        "SELECT MIN(rmssd), MAX(rmssd), AVG(rmssd), COUNT(*) "
-        "FROM hrv_points WHERE session_id = ?",
-        (session_id,),
-    ).fetchone()
-
     out: dict[str, Any] = {
         "id": session_id,
         "tag": tag,
@@ -43,23 +37,19 @@ def session_summary_dict(
         "ended": ended,
         "duration_sec": ended - started,
         "drift_events": drift_count,
+        "rmssd_mean": None,
+        "rmssd_median": None,
+        "rmssd_p10": None,
+        "rmssd_p90": None,
+        "rmssd_min": None,
+        "rmssd_max": None,
+        "point_count": 0,
+        # vs baseline больше не считается: baseline (таблица по часам) и
+        # «живая» колонка hrv_points.rmssd, по которым он шёл, собраны по
+        # сырому буферу с артефактами — на ночах сравнение давало +114% на
+        # сбоях датчика. Сопоставимый baseline по исправленному ряду — отдельно.
+        "vs_baseline_pct": None,
     }
-    if stats and stats[3] and stats[3] > 0:
-        out["rmssd_min"] = float(stats[0])
-        out["rmssd_max"] = float(stats[1])
-        out["rmssd_mean"] = float(stats[2])
-        out["point_count"] = int(stats[3])
-    else:
-        out["rmssd_min"] = None
-        out["rmssd_max"] = None
-        out["rmssd_mean"] = None
-        out["point_count"] = 0
-
-    if baseline_at_start is not None and baseline_at_start > 0 and out.get("rmssd_mean"):
-        mean_rmssd = float(out["rmssd_mean"])
-        out["vs_baseline_pct"] = (mean_rmssd - baseline_at_start) / baseline_at_start * 100.0
-    else:
-        out["vs_baseline_pct"] = None
 
     rr_rows = conn.execute(
         "SELECT ts, rr_ms FROM hrv_points WHERE session_id = ? ORDER BY ts",
@@ -72,6 +62,20 @@ def session_summary_dict(
         preprocessed = preprocess_rr_session(rr_corr)
         analysis_rr = np.array(preprocessed["raw_rr"], dtype=float)
         fft_rr = np.array(preprocessed["fft_input_rr"], dtype=float)
+        out["point_count"] = int(rr_arr.size)
+        # RMSSD — по скользящему окну над исправленным рядом, тем же способом,
+        # что график RMSSD в архиве. Раньше сводка брала «живую» колонку
+        # hrv_points.rmssd, посчитанную по нефильтрованному буферу: один сбой
+        # датчика давал 600+ мс и завышал среднее ночи почти вдвое.
+        trend = rmssd_trend(ts_arr, rr_corr, float(started), max_points=10**7)
+        vals = np.array([p["rmssd"] for p in trend if p["rmssd"] is not None], dtype=float)
+        if vals.size:
+            out["rmssd_mean"] = round(float(vals.mean()), 1)
+            out["rmssd_median"] = round(float(np.median(vals)), 1)
+            out["rmssd_p10"] = round(float(np.percentile(vals, 10)), 1)
+            out["rmssd_p90"] = round(float(np.percentile(vals, 90)), 1)
+            out["rmssd_min"] = round(float(vals.min()), 1)
+            out["rmssd_max"] = round(float(vals.max()), 1)
         m_rr = mean_rr(analysis_rr)
         out["mean_rr"] = round(m_rr, 1) if m_rr is not None else None
         spec = compute_spectrum(ts_arr, analysis_rr, fft_rr=fft_rr)

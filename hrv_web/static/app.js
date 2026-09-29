@@ -1891,10 +1891,6 @@ function renderSummaryGrid(sum) {
   const grid = $("arch_summary_grid");
   grid.innerHTML = "";
   const durMin = sum.duration_sec != null ? sum.duration_sec / 60 : null;
-  const vsBl =
-    sum.vs_baseline_pct != null
-      ? (sum.vs_baseline_pct >= 0 ? "+" : "") + sum.vs_baseline_pct.toFixed(0) + "%"
-      : "—";
   const meanRr = archAnalysisCache?.mean_rr != null
     ? archAnalysisCache.mean_rr
     : sum.mean_rr;
@@ -1903,14 +1899,14 @@ function renderSummaryGrid(sum) {
     : sum.coherence_score;
   const breaks = archAnalysisCache?.break_summary;
   const fields = [
-    ["RMSSD mean",  sum.rmssd_mean != null ? sum.rmssd_mean.toFixed(1) + " ms" : "—"],
-    ["RMSSD min",   sum.rmssd_min  != null ? sum.rmssd_min.toFixed(1)  + " ms" : "—"],
-    ["RMSSD max",   sum.rmssd_max  != null ? sum.rmssd_max.toFixed(1)  + " ms" : "—"],
+    // По исправленному ряду, как график RMSSD. Медиана и 10–90% вместо
+    // mean/min/max: единичный сбой датчика двигал max на сотни мс.
+    ["RMSSD медиана", sum.rmssd_median != null ? sum.rmssd_median.toFixed(1) + " ms" : "—"],
+    ["RMSSD 10–90%", sum.rmssd_p10 != null ? `${sum.rmssd_p10.toFixed(0)}–${sum.rmssd_p90.toFixed(0)} ms` : "—"],
     ["Mean RR",     meanRr != null ? Number(meanRr).toFixed(1) + " ms" : "—"],
     ["Coherence",   coherence != null ? Number(coherence).toFixed(1) : "—"],
     ["Длительность", durMin != null ? durMin.toFixed(1) + " мин" : "—"],
     ["Разрывы записи", breaks ? `${breaks.broken_minutes} из ${breaks.total_minutes} мин` : "—"],
-    ["vs baseline", vsBl],
     ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
     ["Guided meditation", sum.opt_guided_phrases ? "да" : "нет"],
     ["Аудио-биофидбек", sum.opt_audio_biofeedback ? "да" : "нет"],
