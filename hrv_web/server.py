@@ -10,6 +10,7 @@ import queue
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -23,6 +24,7 @@ from hrv_core.constants import DB_PATH
 from hrv_core.db import (
     delete_session,
     delete_session_explanation,
+    delete_session_segments,
     ensure_session_audio_dir,
     finalize_orphaned_sessions,
     finalize_session,
@@ -30,7 +32,9 @@ from hrv_core.db import (
     load_accel_samples,
     load_hour_baseline,
     load_session_explanation,
+    load_session_segments,
     save_session_explanation,
+    save_session_segments,
     session_audio_path,
     set_session_has_audio,
     wipe_all_history,
@@ -99,6 +103,30 @@ EXPLANATION_MAX_LEN = 20_000
 
 class PutExplanationBody(BaseModel):
     body: str = Field(..., min_length=1, max_length=EXPLANATION_MAX_LEN)
+    author: str = Field("claude", min_length=1, max_length=40)
+
+
+class SegmentItem(BaseModel):
+    """Отрезок разметки. kind — вид (для сна: wake/nrem/rem/unknown; для
+    практики — свои), confidence — know/assume/guess (знаю/предполагаю/догадка)."""
+    t0: float = Field(..., ge=0)
+    t1: float = Field(..., ge=0)
+    kind: str = Field(..., min_length=1, max_length=32)
+    label: str = Field(..., min_length=1, max_length=120)
+    confidence: Literal["know", "assume", "guess"]
+    basis: str = Field("", max_length=2000)
+
+
+class SegmentEvent(BaseModel):
+    """Точечное событие на ленте: поворот, сбой датчика и т.п."""
+    t: float = Field(..., ge=0)
+    kind: str = Field(..., min_length=1, max_length=32)
+    label: str = Field(..., min_length=1, max_length=200)
+
+
+class PutSegmentsBody(BaseModel):
+    segments: list[SegmentItem] = Field(default_factory=list, max_length=500)
+    events: list[SegmentEvent] = Field(default_factory=list, max_length=1000)
     author: str = Field("claude", min_length=1, max_length=40)
 
 
@@ -647,6 +675,51 @@ def delete_session_explanation_endpoint(session_id: int):
     try:
         _require_session(conn, session_id)
         deleted = delete_session_explanation(conn, session_id)
+    finally:
+        conn.close()
+    return {"ok": True, "deleted": deleted}
+
+
+@app.get("/api/sessions/{session_id}/segments")
+def get_session_segments(session_id: int):
+    """Разметка отрезков сессии для ленты над графиками архива."""
+    conn = init_db()
+    try:
+        _require_session(conn, session_id)
+        return {"segments": load_session_segments(conn, session_id)}
+    finally:
+        conn.close()
+
+
+@app.put("/api/sessions/{session_id}/segments")
+def put_session_segments(session_id: int, body: PutSegmentsBody):
+    """Записать разметку целиком (JSON {segments, events, author})."""
+    for s in body.segments:
+        if s.t1 <= s.t0:
+            raise HTTPException(400, f"Отрезок «{s.label}»: t1 должен быть больше t0")
+    conn = init_db()
+    try:
+        _require_session(conn, session_id)
+        saved = save_session_segments(
+            conn,
+            session_id,
+            {
+                "segments": [s.model_dump() for s in sorted(body.segments, key=lambda s: s.t0)],
+                "events": [e.model_dump() for e in sorted(body.events, key=lambda e: e.t)],
+            },
+            body.author,
+        )
+    finally:
+        conn.close()
+    return {"ok": True, "segments": saved}
+
+
+@app.delete("/api/sessions/{session_id}/segments")
+def delete_session_segments_endpoint(session_id: int):
+    conn = init_db()
+    try:
+        _require_session(conn, session_id)
+        deleted = delete_session_segments(conn, session_id)
     finally:
         conn.close()
     return {"ok": True, "deleted": deleted}

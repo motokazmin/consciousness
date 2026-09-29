@@ -55,6 +55,10 @@
     }
 
     html[data-theme="light"] {
+      --seg-nrem:  #2f6fc4;
+      --seg-rem:   #7d4fd6;
+      --seg-wake:  #e0701f;
+      --seg-unknown: #9aa4b4;
       --bg:        #f0f3f8;
       --surface:   #ffffff;
       --surface2:  #e8edf4;
@@ -271,6 +275,42 @@
       width: 16px; height: 16px;
       accent-color: var(--accent);
     }
+
+    /* ── Лента отрезков (стадии/фазы) над графиками архива ── */
+    .seg-card-wrap { padding: 10px 16px 12px; position: relative; }
+    .seg-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
+    .seg-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.72rem; color: var(--text-dim); }
+    .seg-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .seg-chip { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+    .seg-lane { position: relative; height: 34px; }
+    .seg-track { position: absolute; inset: 0 0 12px 0; border-radius: 4px; background: var(--surface2); overflow: hidden; }
+    .seg-events { position: absolute; left: 0; right: 0; bottom: 0; height: 12px; }
+    .seg { position: absolute; top: 0; bottom: 0; cursor: pointer; border-right: 1px solid var(--surface); }
+    .seg:hover, .seg-selected { outline: 2px solid var(--text); outline-offset: -2px; z-index: 1; }
+    .seg-k-nrem { background: var(--seg-nrem); }
+    .seg-k-rem { background: var(--seg-rem); }
+    .seg-k-wake { background: var(--seg-wake); }
+    .seg-k-unknown { background: var(--seg-unknown); }
+    .seg.seg-c-know { opacity: 1; }
+    .seg.seg-c-assume { opacity: 0.62; }
+    .seg.seg-c-guess {
+      opacity: 0.45;
+      background-image: repeating-linear-gradient(135deg, transparent 0 4px, rgba(255,255,255,0.45) 4px 6px);
+    }
+    .seg-event { position: absolute; transform: translateX(-50%); font-size: 10px; line-height: 12px; color: var(--text-dim); cursor: default; }
+    .seg-e-artifact { color: var(--red); }
+    .seg-tip {
+      position: absolute; top: 58px; z-index: 5; pointer-events: none;
+      max-width: 340px; padding: 6px 10px; border-radius: 6px;
+      background: var(--surface); border: 1px solid var(--border2); box-shadow: var(--shadow-card);
+      font-size: 0.76rem; line-height: 1.35; color: var(--text);
+    }
+    .seg-tip-dim { color: var(--text-dim); }
+    .seg-card { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface2); font-size: 0.8rem; line-height: 1.45; }
+    .seg-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+    .seg-card-time { color: var(--text-dim); font-family: var(--mono); font-size: 0.72rem; }
+    .seg-conf { margin-left: auto; font-size: 0.7rem; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border2); color: var(--text-dim); }
+    .seg-card-body { color: var(--text); }
     .loupe-ctl {
       display: inline-flex; align-items: center; gap: 6px;
       margin-left: auto; margin-right: 12px;
@@ -1868,6 +1908,27 @@
             </div>
             <div class="arch-notes-text" id="arch_notes_text"></div>
           </div>
+          <div class="plot-card" id="arch_segments_card" style="margin-bottom:16px" hidden>
+            <div class="plot-header">
+              <span class="plot-title">Отрезки</span>
+              <label class="check-label" style="font-size:.72rem;margin-left:auto" title="Спрятать отрезки с уверенностью «догадка»">
+                <input type="checkbox" id="arch_segments_confident" />только уверенные
+              </label>
+            </div>
+            <div class="seg-card-wrap">
+              <div class="seg-head">
+                <div class="seg-legend">
+                  <span><i class="seg-chip seg-k-nrem"></i>без сновидений (NREM)</span>
+                  <span><i class="seg-chip seg-k-rem"></i>быстрый сон (REM)</span>
+                  <span><i class="seg-chip seg-k-wake"></i>бодрствование / движение</span>
+                  <span><i class="seg-chip seg-k-unknown"></i>неопределённо</span>
+                  <span>· насыщенность — уверенность: знаю / предполагаю / <u>догадка</u> (штрих)</span>
+                  <span>· ▾ поворот · <b style="color:var(--red)">✕</b> сбой датчика</span>
+                </div>
+              </div>
+              <div id="arch_segments"></div>
+            </div>
+          </div>
           <div class="archive-timeseries-stack">
             <div class="plot-card" style="margin-bottom:0">
               <div class="plot-header">
@@ -2149,7 +2210,8 @@
 <script src="/assets/session_audio_player.js?v=7"></script>
 <script src="/assets/chart_zoom.js?v=1"></script>
 <script src="/assets/chart_loupe.js?v=1"></script>
+<script src="/assets/chart_segments.js?v=1"></script>
 <script src="/assets/analysis_charts.js?v=12"></script>
-<script src="/assets/app.js?v=36"></script>
+<script src="/assets/app.js?v=37"></script>
 </body>
 </html>

@@ -1197,6 +1197,7 @@ function resizePlots() {
   }
   if (archiveVisible) {
     if (archRR && $("arch_rr")) archRR.setSize({ width: plotWidth($("arch_rr")), height: ARCHIVE_PLOT_H });
+    archSegStrip?.refresh();
     if (archPoincare && $("arch_poincare")) archPoincare.setSize({ width: plotWidth($("arch_poincare")), height: ARCHIVE_PLOT_H });
     if (archSpectrum?.plot && $("arch_spectrum")) {
       archSpectrum.plot.setSize({ width: plotWidth($("arch_spectrum")), height: ARCHIVE_PLOT_H });
@@ -2339,6 +2340,12 @@ async function openArchiveSession(id) {
     archBreathingCache = null;  // эндпойнт недоступен — блок просто скрыт
   }
 
+  try {
+    archSegments = (await api(`/api/sessions/${id}/segments`)).segments;
+  } catch {
+    archSegments = null;
+  }
+
   if (sum) {
     archSummaryCache = sum;
     renderSummaryGrid(sum);
@@ -2351,6 +2358,7 @@ async function openArchiveSession(id) {
   if (analysis) {
     renderArchiveAnalysisCharts(analysis, sum);
   }
+  renderArchSegments();
 
   if (sum) {
     await syncArchAudioPlayer(sum);
@@ -2358,6 +2366,29 @@ async function openArchiveSession(id) {
 
   detail.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+// ── Лента отрезков ────────────────────────────────────────────────────────
+let archSegments = null;
+let archSegStrip = null;
+
+function renderArchSegments() {
+  const card = $("arch_segments_card");
+  const root = $("arch_segments");
+  if (!card || !root || !window.HrvSegmentStrip) return;
+  const data = archSegments;
+  if (!data?.segments?.length || !archRR) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  if (!archSegStrip) archSegStrip = window.HrvSegmentStrip.create(root);
+  archSegStrip.set(data, archRR, archSummaryCache?.started);
+  archSegStrip.setConfidentOnly($("arch_segments_confident")?.checked);
+}
+
+$("arch_segments_confident")?.addEventListener("change", (e) => {
+  archSegStrip?.setConfidentOnly(e.target.checked);
+});
 
 function rerenderArchiveCharts() {
   const id = Number($("arch_id")?.textContent);
@@ -2368,6 +2399,7 @@ function rerenderArchiveCharts() {
       destroyArchPlots();
       renderSummaryGrid(archSummaryCache);
       renderArchiveAnalysisCharts(analysis, archSummaryCache);
+      renderArchSegments();
       await syncArchAudioPlayer(archSummaryCache);
     })
     .catch((e) => setErr(String(e.message || e)));
