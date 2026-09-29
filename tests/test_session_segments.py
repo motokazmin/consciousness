@@ -98,5 +98,37 @@ class SessionSegmentsTests(unittest.TestCase):
         self.assertIsNone(load_session_segments(self.conn, sid))
 
 
+    # ── подхват файлов из research/razbor ─────────────────────────────────
+
+    def test_import_razbor_files(self):
+        import json
+        import os
+
+        sid = self._session()
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / f"{sid}.segments.json").write_text(
+                json.dumps({"segments": [_seg(0, 600)], "events": []}), encoding="utf-8")
+            (d / f"{sid}.md").write_text("## Коротко\nтекст", encoding="utf-8")
+            (d / "9999.md").write_text("чужая сессия", encoding="utf-8")
+            (d / "README.md").write_text("не разбор", encoding="utf-8")
+            (d / f"{sid + 1}.segments.json").write_text("{битый", encoding="utf-8")
+
+            loaded = server.import_razbor_files(self.conn, d)
+            self.assertEqual(sorted(loaded), sorted([f"{sid}.md", f"{sid}.segments.json"]))
+            self.assertEqual(load_session_segments(self.conn, sid)["segments"][0]["t1"], 600)
+
+            # Повторный старт без правок — ничего не перезаписывается.
+            self.assertEqual(server.import_razbor_files(self.conn, d), [])
+
+            # Файл правили — подхватывается снова.
+            f = d / f"{sid}.segments.json"
+            f.write_text(json.dumps({"segments": [_seg(0, 900)]}), encoding="utf-8")
+            future = time.time() + 5
+            os.utime(f, (future, future))
+            self.assertEqual(server.import_razbor_files(self.conn, d), [f"{sid}.segments.json"])
+            self.assertEqual(load_session_segments(self.conn, sid)["segments"][0]["t1"], 900)
+
+
 if __name__ == "__main__":
     unittest.main()

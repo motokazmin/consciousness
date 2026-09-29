@@ -8,16 +8,9 @@
   `events` — `{t, kind, label}`. `t` — секунды от начала сессии.
   `confidence`: `know` / `assume` / `guess` (знаю / предполагаю / догадка).
 
-Загрузить в свою базу (сервер поднят):
-
-```bash
-curl -X PUT -H 'Content-Type: application/json' \
-     --data-binary @research/razbor/245.segments.json \
-     http://127.0.0.1:8765/api/sessions/245/segments
-curl -X PUT -H 'Content-Type: text/markdown' \
-     --data-binary @research/razbor/245.md \
-     http://127.0.0.1:8765/api/sessions/245/explanation
-```
+**Загружаются сами:** при запуске `python -m hrv_web` сервер подхватывает
+файлы этой папки в `hrv_data.sqlite` — если записи в базе нет или файл новее.
+Поправил файл — перезапусти сервер. Сессии, которой нет в базе, пропускаются.
 
 **Не источник для выводов исследования.** Находки из разбора переносятся в
 `journal.md` со ссылкой на `session_id`; разметка стадий — предположение, а не

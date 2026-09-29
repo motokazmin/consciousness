@@ -52,6 +52,61 @@ PHRASE_FILE_RE = re.compile(r"^(\w+)_(.+)_(\d+)\.mp3$")
 log = logging.getLogger(__name__)
 
 
+RAZBOR_DIR = Path(__file__).resolve().parent.parent / "research" / "razbor"
+
+
+def import_razbor_files(conn, directory: Path = RAZBOR_DIR) -> list[str]:
+    """Подхватить разборы из research/razbor в БД: `<id>.md` → разбор,
+    `<id>.segments.json` → разметка отрезков. Файл кладётся, если записи в
+    БД нет или файл новее её — правка файла и перезапуск сервера обновляют
+    карточку архива без ручных команд. Сессии, которой нет в этой БД,
+    пропускаются. Возвращает список загруженных файлов."""
+    import json
+
+    loaded: list[str] = []
+    if not directory.is_dir():
+        return loaded
+    for path in sorted(directory.iterdir()):
+        name = path.name
+        if name.endswith(".segments.json"):
+            sid_str, kind = name[: -len(".segments.json")], "segments"
+        elif name.endswith(".md") and name[:-3].isdigit():
+            sid_str, kind = name[:-3], "explanation"
+        else:
+            continue
+        if not sid_str.isdigit():
+            continue
+        sid = int(sid_str)
+        if not conn.execute("SELECT 1 FROM sessions WHERE id = ?", (sid,)).fetchone():
+            continue
+        mtime = path.stat().st_mtime
+        try:
+            if kind == "segments":
+                cur = load_session_segments(conn, sid)
+                if cur and cur["updated_at"] >= mtime:
+                    continue
+                body = PutSegmentsBody(**json.loads(path.read_text(encoding="utf-8")))
+                save_session_segments(
+                    conn, sid,
+                    {"segments": [x.model_dump() for x in body.segments],
+                     "events": [x.model_dump() for x in body.events]},
+                    body.author,
+                )
+            else:
+                cur = load_session_explanation(conn, sid)
+                if cur and cur["updated_at"] >= mtime:
+                    continue
+                text = path.read_text(encoding="utf-8").strip()
+                if not text or len(text) > EXPLANATION_MAX_LEN:
+                    raise ValueError("пустой или слишком длинный текст")
+                save_session_explanation(conn, sid, text, "claude")
+        except Exception as e:  # битый файл не должен ронять старт сервера
+            log.warning("research/razbor/%s не загружен: %s", name, e)
+            continue
+        loaded.append(name)
+    return loaded
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     conn = init_db()
@@ -59,6 +114,9 @@ async def _lifespan(app: FastAPI):
         finalized = finalize_orphaned_sessions(conn)
         if finalized:
             log.info("Завершены незакрытые сессии после перезапуска: %s", finalized)
+        loaded = import_razbor_files(conn)
+        if loaded:
+            log.info("Подхвачены разборы из research/razbor: %s", ", ".join(loaded))
     finally:
         conn.close()
     yield
