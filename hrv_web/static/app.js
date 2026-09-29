@@ -1916,7 +1916,21 @@ function renderSummaryGrid(sum) {
     ["Аудио-биофидбек", sum.opt_audio_biofeedback ? "да" : "нет"],
     ["Запись микрофона", sum.has_audio ? "есть файл" : (sum.opt_mic_recording ? "запрошена" : "нет")],
     ["Акселерометр PMD", sum.opt_acc_recording ? "да" : "нет"],
+    ["SD1", fmtMetricMs(archAnalysisCache?.poincare?.sd1)],
+    ["Peak Hz", archAnalysisCache?.spectrum?.peak_freq != null ? archAnalysisCache.spectrum.peak_freq + " Гц" : "—"],
   ];
+  // Дыхание — только если в сессии есть акселерометр и оценка получилась.
+  const br = archBreathingCache;
+  if (br?.has_accel && !br.insufficient_data) {
+    const b = br.summary || {};
+    fields.push(
+      ["Дыхание, медиана", fmtCpm(b.cpm_median)],
+      ["Дыхание: годный сигнал", b.good_fraction != null ? Math.round(b.good_fraction * 100) + "%" : "—"],
+      // Размах в мг зависит от позы датчика, а не только от глубины дыхания.
+      ["Дыхание: размах (зависит от позы)", b.amp_median_mg != null ? Number(b.amp_median_mg).toFixed(1) + " мг" : "—"],
+      ["Дыхание: несущая ось", b.axis || "—"],
+    );
+  }
   for (const [label, value] of fields) {
     const cell = document.createElement("div");
     cell.className = "summary-cell";
@@ -1924,21 +1938,6 @@ function renderSummaryGrid(sum) {
     grid.appendChild(cell);
   }
 
-  const metricsRow = $("arch_metrics_row");
-  if (metricsRow) {
-    metricsRow.innerHTML = "";
-    const metrics = [
-      ["Mean RR", meanRr != null ? Number(meanRr).toFixed(1) + " ms" : "—"],
-      ["Coherence", coherence != null ? Number(coherence).toFixed(1) : "—"],
-      ["SD1", fmtMetricMs(archAnalysisCache?.poincare?.sd1)],
-      ["Peak Hz", archAnalysisCache?.spectrum?.peak_freq != null ? archAnalysisCache.spectrum.peak_freq + " Гц" : "—"],
-    ];
-    for (const [label, value] of metrics) {
-      const cell = document.createElement("div");
-      cell.innerHTML = `<div class="s-label">${label}</div><div class="s-value">${value}</div>`;
-      metricsRow.appendChild(cell);
-    }
-  }
 }
 
 function destroyPlotInstance(plot) {
@@ -2010,16 +2009,9 @@ function renderArchSdnn(analysis) {
 
 function renderArchRmssd(analysis) {
   const panel = $("arch_rmssd_panel");
-  const mode = $("arch_rmssd_mode")?.value || "hidden";
   const btn = $("arch_rmssd_scale_toggle");
   if (btn) btn.textContent = archRmssdScale === "linear" ? "лин" : "лог";
   if (!panel) return;
-  if (mode !== "show") {
-    panel.classList.remove("visible");
-    if (archRM) { archRM.destroy(); archRM = null; }
-    renderQualityStrip($("arch_rmssd_quality"), null, 0);
-    return;
-  }
   panel.classList.add("visible");
   const el = $("arch_rm");
   if (!el) return;
@@ -2368,23 +2360,6 @@ function renderArchiveBreathing(breathing, analysis) {
   applyArchLoupe("breath_wave");
   applyArchLoupe("breath_rate");
   applyArchLoupe("breath_combo");
-
-  const metricsRow = $("arch_breathing_metrics_row");
-  if (metricsRow) {
-    metricsRow.innerHTML = "";
-    const s = breathing.summary || {};
-    const metrics = [
-      ["Частота (медиана)", fmtCpm(s.cpm_median)],
-      ["Годный сигнал", s.good_fraction != null ? Math.round(s.good_fraction * 100) + "%" : "—"],
-      ["Амплитуда", s.amp_median_mg != null ? Number(s.amp_median_mg).toFixed(1) + " мг" : "—"],
-      ["Несущая ось", s.axis || "—"],
-    ];
-    for (const [label, value] of metrics) {
-      const cell = document.createElement("div");
-      cell.innerHTML = `<div class="s-label">${label}</div><div class="s-value">${value}</div>`;
-      metricsRow.appendChild(cell);
-    }
-  }
 }
 
 async function syncArchAudioPlayer(sum) {
@@ -2620,10 +2595,6 @@ $("session_expl_modal")?.addEventListener("click", (e) => {
   if (e.target === $("session_expl_modal")) closeSessionExplModal();
 });
 
-$("arch_rmssd_mode")?.addEventListener("change", () => {
-  renderArchRmssd(archAnalysisCache);
-  nextFrame(resizePlots);
-});
 
 $("arch_sdnn_scale_toggle")?.addEventListener("click", () => {
   archSdnnScale = archSdnnScale === "linear" ? "log" : "linear";
