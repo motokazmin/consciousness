@@ -46,6 +46,28 @@ def get_bluez_version_sync() -> tuple[int, int] | None:
     return None
 
 
+def bluetoothctl_paired(mac: str) -> bool | None:
+    """Статус сопряжения (`Paired: yes/no` из `bluetoothctl info <mac>`).
+
+    None — bluetoothctl недоступен или устройство ему не известно (не значит
+    «не сопряжено»: просто не удалось узнать).
+    """
+    try:
+        proc = subprocess.run(
+            ["bluetoothctl", "info", mac],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    m = re.search(r"Paired:\s*(yes|no)", proc.stdout or "", re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1).lower() == "yes"
+
+
 def bleak_adapter_kwargs(adapter: str | None = None) -> dict[str, str]:
     """Параметры bleak для явного hci (0.22 и 3.x)."""
     hci = adapter or default_bluetooth_adapter()

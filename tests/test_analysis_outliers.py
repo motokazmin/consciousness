@@ -41,3 +41,25 @@ def test_session_analysis_always_corrects_spike():
     assert 1400.0 in result["raw_rr"]
     assert 1400.0 not in result["analysis_rr"]
     assert len(result["analysis_rr"]) == len(result["raw_rr"])
+
+
+def test_artifact_mask_survives_slow_drift():
+    """Опора не должна замерзать: медленный дрейф пульса — не артефакт.
+
+    Регрессия на храповик (см. ARTIFACT_MEDIAN_WINDOW в preprocessing): опора по
+    последнему принятому интервалу после первого же отказа переставала
+    обновляться и браковала весь остаток записи.
+    """
+    rr = np.linspace(700.0, 1100.0, 2000)  # плавный уход ЧСС с 86 до 55
+    rr[500] = 1600.0  # одиночный артефакт поверх дрейфа
+    mask = artifact_mask(rr)
+    assert not mask[500]
+    assert mask.sum() == rr.size - 1
+
+
+def test_artifact_mask_flags_short_burst_not_the_tail():
+    rr = np.full(500, 850.0)
+    rr[200:203] = [1500.0, 300.0, 1500.0]
+    mask = artifact_mask(rr)
+    assert mask[200:203].sum() == 0
+    assert mask[203:].all()
