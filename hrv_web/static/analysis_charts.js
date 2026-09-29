@@ -186,6 +186,82 @@
     ctx.restore();
   }
 
+  // ── Сглаживание («перспектива») ─────────────────────────────────────────
+  // Графики истории несут вторую серию — скользящее среднее по времени.
+  // По умолчанию она скрыта; галочка включает её, а сырая кривая бледнеет,
+  // но остаётся на месте: данные не теряются, меняется только акцент.
+  const SMOOTH_RAW_ALPHA = 0.22;
+
+  // Окно ≈ 1/150 длительности, в пределах 10 с … 10 мин: на 20-минутной
+  // сессии это 10 с, на 8-часовой записи — около 3 мин.
+  function smoothWindowSec(durationSec) {
+    const d = Number(durationSec) || 0;
+    return Math.min(600, Math.max(10, d / 150));
+  }
+
+  // Центрированное скользящее среднее по окну winSec (x в секундах,
+  // шаг может быть неравномерным). null/NaN пропускаются. O(n).
+  function movingAverage(xs, ys, winSec) {
+    const n = xs.length;
+    const out = new Array(n).fill(null);
+    const half = winSec / 2;
+    let lo = 0;
+    let hi = 0;
+    let sum = 0;
+    let cnt = 0;
+    for (let i = 0; i < n; i++) {
+      while (hi < n && xs[hi] <= xs[i] + half) {
+        const v = ys[hi];
+        if (v != null && Number.isFinite(v)) { sum += v; cnt++; }
+        hi++;
+      }
+      while (xs[lo] < xs[i] - half) {
+        const v = ys[lo];
+        if (v != null && Number.isFinite(v)) { sum -= v; cnt--; }
+        lo++;
+      }
+      if (cnt > 0 && ys[i] != null) out[i] = sum / cnt;
+    }
+    return out;
+  }
+
+  function fadeColor(color, alpha) {
+    if (typeof color !== "string") return color;
+    const m = color.match(/^rgba?\(([^)]+)\)$/);
+    if (m) {
+      const [r, g, b] = m[1].split(",").map((t) => t.trim());
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+    return color.startsWith("#") ? hexToRgba(color, alpha) : color;
+  }
+
+  // Превращает сырую серию в пару [сырая, сглаженная] и достраивает данные.
+  function withSmoothing(rawSeries, xs, ys, durationSec) {
+    const win = smoothWindowSec(durationSec);
+    const stroke = rawSeries.stroke;
+    const fill = rawSeries.fill;
+    const raw = {
+      ...rawSeries,
+      stroke: (u) => (u._hrvSmooth ? fadeColor(stroke, SMOOTH_RAW_ALPHA) : stroke),
+      fill: fill ? (u) => (u._hrvSmooth ? null : fill) : undefined,
+    };
+    const smooth = {
+      stroke,
+      width: 2.5,
+      points: { show: false },
+      spanGaps: true,
+      show: false,
+    };
+    return { series: [raw, smooth], extra: movingAverage(xs, ys, win), win };
+  }
+
+  function setSmoothed(plot, on) {
+    if (!plot || plot.series.length < 3) return;
+    plot._hrvSmooth = !!on;
+    plot.setSeries(2, { show: !!on });
+    plot.redraw(true);
+  }
+
   function makeRawRrPlot(el, rawRrX, rawRr, durationSec, height, opts) {
     if (!rawRr?.length || !rawRrX?.length) return null;
     const xMax = durationSec || rawRrX[rawRrX.length - 1] || 1;
@@ -194,6 +270,13 @@
     const w = plotWidth(el);
     const trimOpts = opts?.trim;
     const baseline = { x: [0, xMax], y: [yMin, yMax] };
+    const sm = withSmoothing(
+      applySeriesOpts(
+        { width: 1.5, points: { show: false }, ...seriesColor("--chart-rr", "#00d4ff", 0.04) },
+        opts
+      ),
+      rawRrX, rawRr, xMax
+    );
 
     const plot = new uPlot(
       {
@@ -207,13 +290,7 @@
           x: { ...xScaleLinear, range: (_u, min, max) => [min ?? 0, max ?? xMax] },
           y: { time: false, distr: 1, range: [yMin, yMax] },
         },
-        series: [
-          {},
-          applySeriesOpts(
-            { width: 1.5, points: { show: false }, ...seriesColor("--chart-rr", "#00d4ff", 0.04) },
-            opts
-          ),
-        ],
+        series: [{}, ...sm.series],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...axisStyle(), label: "RR, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
@@ -224,7 +301,7 @@
           : { show: true, x: true, y: false, drag: { setScale: false, x: false, y: false } },
         legend: { show: false },
       },
-      [rawRrX, rawRr],
+      [rawRrX, rawRr, sm.extra],
       el
     );
 
@@ -233,6 +310,7 @@
       minSpan: { x: 1, y: 20 },
     });
     if (zoom) plot._hrvZoom = zoom;
+    plot._hrvSmoothWin = sm.win;
 
     return plot;
   }
@@ -291,8 +369,15 @@
     const xMax = durationSec || xs[xs.length - 1] || 1;
     const yMax = opts?.yMax ?? (ys.reduce((a, b) => (a > b ? a : b), 10) * 1.15);
     const w = plotWidth(el);
+    const sm = withSmoothing(
+      applySeriesOpts(
+        { width: 2, points: { show: false }, ...seriesColor("--chart-sdnn", "#9d8ef0", 0.08) },
+        opts
+      ),
+      xs, ys, xMax
+    );
 
-    return new uPlot(
+    const plot = new uPlot(
       {
         width: w,
         height: height || 260,
@@ -301,13 +386,7 @@
           x: { ...xScaleLinear, range: [0, xMax] },
           y: { time: false, distr: 1, range: [0, yMax] },
         },
-        series: [
-          {},
-          applySeriesOpts(
-            { width: 2, points: { show: false }, ...seriesColor("--chart-sdnn", "#9d8ef0", 0.08) },
-            opts
-          ),
-        ],
+        series: [{}, ...sm.series],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...axisStyle(), label: "SDNN, ms", size: 52 },
@@ -315,9 +394,11 @@
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
       },
-      [xs, ys],
+      [xs, ys, sm.extra],
       el
     );
+    plot._hrvSmoothWin = sm.win;
+    return plot;
   }
 
   function makeRmssdPlot(el, trend, durationSec, height) {
@@ -327,8 +408,12 @@
     const xMax = durationSec || xs[xs.length - 1] || 1;
     const yMax = ys.reduce((a, b) => (a > b ? a : b), 40) * 1.15;
     const w = plotWidth(el);
+    const sm = withSmoothing(
+      { width: 2, points: { show: false }, ...seriesColor("--chart-rmssd", "#39e085", 0.07) },
+      xs, ys, xMax
+    );
 
-    return new uPlot(
+    const plot = new uPlot(
       {
         width: w,
         height: height || 260,
@@ -337,14 +422,7 @@
           x: { ...xScaleLinear, range: [0, xMax] },
           y: { time: false, distr: 1, range: [0, yMax] },
         },
-        series: [
-          {},
-          {
-            width: 2,
-            points: { show: false },
-            ...seriesColor("--chart-rmssd", "#39e085", 0.07),
-          },
-        ],
+        series: [{}, ...sm.series],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...axisStyle(), label: "RMSSD, ms", size: 52 },
@@ -352,9 +430,11 @@
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
       },
-      [xs, ys],
+      [xs, ys, sm.extra],
       el
     );
+    plot._hrvSmoothWin = sm.win;
+    return plot;
   }
 
   function buildProgressPoincarePlot(el, sessions, visible, colors, height) {
@@ -625,5 +705,8 @@
     buildProgressSpectrumPlot,
     buildProgressSdnnPlot,
     setChartEmpty,
+    setSmoothed,
+    smoothWindowSec,
+    movingAverage,
   };
 })(window);

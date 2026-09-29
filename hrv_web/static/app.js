@@ -1845,7 +1845,33 @@ function renderArchRmssd(analysis) {
     return;
   }
   archRM = charts.makeRmssdPlot(el, analysis.rmssd_trend, analysis.duration_sec, ARCHIVE_PLOT_H);
+  applyArchSmooth("rmssd");
 }
+
+// Галочки «сгладить» на графиках истории: у каждого графика своя,
+// состояние переживает перерисовку и смену сессии.
+const archSmooth = { rr: false, sdnn: false, rmssd: false };
+const archSmoothPlot = () => ({ rr: archRR, sdnn: archSdnn, rmssd: archRM });
+
+function fmtSmoothWin(sec) {
+  return sec >= 60 ? `~${Math.round(sec / 60)} мин` : `${Math.round(sec)} с`;
+}
+
+function applyArchSmooth(key) {
+  const plot = archSmoothPlot()[key];
+  AC()?.setSmoothed(plot, archSmooth[key]);
+  const win = document.querySelector(`[data-smooth-win="${key}"]`);
+  if (win) win.textContent = plot?._hrvSmoothWin ? ` (${fmtSmoothWin(plot._hrvSmoothWin)})` : "";
+}
+
+document.querySelectorAll("input[data-smooth]").forEach((box) => {
+  const key = box.dataset.smooth;
+  box.checked = archSmooth[key];
+  box.addEventListener("change", () => {
+    archSmooth[key] = box.checked;
+    applyArchSmooth(key);
+  });
+});
 
 function renderArchiveAnalysisCharts(analysis, sum) {
   const charts = AC();
@@ -1922,6 +1948,8 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   }
 
   renderArchRmssd(analysis);
+  applyArchSmooth("rr");
+  applyArchSmooth("sdnn");
   nextFrame(resizePlots);
 }
 

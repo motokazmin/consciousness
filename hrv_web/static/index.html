@@ -269,6 +269,8 @@
       width: 16px; height: 16px;
       accent-color: var(--accent);
     }
+    .smooth-toggle { font-size: 0.72rem; gap: 6px; }
+    .smooth-win { opacity: 0.7; margin-left: 4px; }
     .check-label input[type=checkbox]:disabled {
       opacity: 0.45;
     }
@@ -1761,6 +1763,10 @@
             <div class="plot-card" style="margin-bottom:0">
               <div class="plot-header">
                 <span class="plot-title">RR — от начала сессии</span>
+                <label class="check-label smooth-toggle" title="Скользящее среднее поверх бледной сырой кривой — видна общая форма">
+                  <input type="checkbox" data-smooth="rr" />
+                  <span>сгладить<span class="smooth-win" data-smooth-win="rr"></span></span>
+                </label>
               </div>
               <div
                 id="arch_audio_player"
@@ -1785,6 +1791,10 @@
             <div class="plot-card" style="margin-bottom:0">
               <div class="plot-header">
                 <span class="plot-title">Скользящий тренд SDNN</span>
+                <label class="check-label smooth-toggle" title="Скользящее среднее поверх бледной сырой кривой — видна общая форма">
+                  <input type="checkbox" data-smooth="sdnn" />
+                  <span>сгладить<span class="smooth-win" data-smooth-win="sdnn"></span></span>
+                </label>
               </div>
               <div class="plot-body" id="arch_sdnn"></div>
             </div>
@@ -1824,7 +1834,13 @@
           </div>
           <div class="arch-rmssd-panel" id="arch_rmssd_panel">
             <div class="plot-card">
-              <div class="plot-header"><span class="plot-title">RMSSD — от начала сессии</span></div>
+              <div class="plot-header">
+                <span class="plot-title">RMSSD — от начала сессии</span>
+                <label class="check-label smooth-toggle" title="Скользящее среднее поверх бледной сырой кривой — видна общая форма">
+                  <input type="checkbox" data-smooth="rmssd" />
+                  <span>сгладить<span class="smooth-win" data-smooth-win="rmssd"></span></span>
+                </label>
+              </div>
               <div class="plot-body" id="arch_rm"></div>
             </div>
           </div>
