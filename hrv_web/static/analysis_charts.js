@@ -235,9 +235,19 @@
     return color.startsWith("#") ? hexToRgba(color, alpha) : color;
   }
 
-  // Превращает сырую серию в пару [сырая, сглаженная] и достраивает данные.
-  function withSmoothing(rawSeries, xs, ys, durationSec) {
-    const win = smoothWindowSec(durationSec);
+  // Скользящая амплитуда колебания вокруг нуля: среднее |y| × π/2
+  // (для синусоиды это её амплитуда). Для волны дыхания среднее само
+  // по себе ≈ 0, смысл имеет только огибающая.
+  function movingEnvelope(xs, ys, winSec) {
+    const abs = ys.map((v) => (v == null ? null : Math.abs(v)));
+    return movingAverage(xs, abs, winSec).map((v) => (v == null ? null : v * Math.PI / 2));
+  }
+
+  // Сырая серия → бледнеющая сырая + скрытые сглаженные серии с данными.
+  //   envelope: вместо среднего — огибающая ±амплитуда (две линии).
+  //   minWin: нижняя граница окна, с.
+  function withSmoothing(rawSeries, xs, ys, durationSec, { envelope = false, minWin = 0 } = {}) {
+    const win = Math.max(minWin, smoothWindowSec(durationSec));
     const stroke = rawSeries.stroke;
     const fill = rawSeries.fill;
     const raw = {
@@ -245,20 +255,51 @@
       stroke: (u) => (u._hrvSmooth ? fadeColor(stroke, SMOOTH_RAW_ALPHA) : stroke),
       fill: fill ? (u) => (u._hrvSmooth ? null : fill) : undefined,
     };
-    const smooth = {
+    const line = {
+      ...(rawSeries.scale ? { scale: rawSeries.scale } : {}),
       stroke,
       width: 2.5,
       points: { show: false },
       spanGaps: true,
       show: false,
     };
-    return { series: [raw, smooth], extra: movingAverage(xs, ys, win), win };
+    if (envelope) {
+      const env = movingEnvelope(xs, ys, win);
+      return {
+        raw,
+        smooth: [line, { ...line }],
+        extras: [env, env.map((v) => (v == null ? null : -v))],
+        win,
+      };
+    }
+    return { raw, smooth: [line], extras: [movingAverage(xs, ys, win)], win };
+  }
+
+  // Собирает series/data из сглаживаемых серий и запоминает на графике,
+  // какие индексы переключать галочкой.
+  function smoothedLayout(xs, rawYs, parts) {
+    const raws = parts.map((p) => p.raw);
+    const smooths = parts.flatMap((p) => p.smooth);
+    const first = 1 + raws.length;
+    return {
+      series: [{}, ...raws, ...smooths],
+      data: [xs, ...rawYs, ...parts.flatMap((p) => p.extras)],
+      idx: smooths.map((_, i) => first + i),
+      win: parts[0].win,
+    };
+  }
+
+  function markSmoothable(plot, layout) {
+    if (!plot) return plot;
+    plot._hrvSmoothIdx = layout.idx;
+    plot._hrvSmoothWin = layout.win;
+    return plot;
   }
 
   function setSmoothed(plot, on) {
-    if (!plot || plot.series.length < 3) return;
+    if (!plot?._hrvSmoothIdx) return;
     plot._hrvSmooth = !!on;
-    plot.setSeries(2, { show: !!on });
+    for (const i of plot._hrvSmoothIdx) plot.setSeries(i, { show: !!on });
     plot.redraw(true);
   }
 
@@ -277,6 +318,7 @@
       ),
       rawRrX, rawRr, xMax
     );
+    const lay = smoothedLayout(rawRrX, [rawRr], [sm]);
 
     const plot = new uPlot(
       {
@@ -290,7 +332,7 @@
           x: { ...xScaleLinear, range: (_u, min, max) => [min ?? 0, max ?? xMax] },
           y: { time: false, distr: 1, range: [yMin, yMax] },
         },
-        series: [{}, ...sm.series],
+        series: lay.series,
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...axisStyle(), label: "RR, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
@@ -301,7 +343,7 @@
           : { show: true, x: true, y: false, drag: { setScale: false, x: false, y: false } },
         legend: { show: false },
       },
-      [rawRrX, rawRr, sm.extra],
+      lay.data,
       el
     );
 
@@ -310,7 +352,7 @@
       minSpan: { x: 1, y: 20 },
     });
     if (zoom) plot._hrvZoom = zoom;
-    plot._hrvSmoothWin = sm.win;
+    markSmoothable(plot, lay);
 
     return plot;
   }
@@ -362,12 +404,42 @@
     marker.textContent = `${peakFreq.toFixed(2)} Гц`;
   }
 
+  // Тренды RMSSD/SDNN: у обоих есть null-точки (разрыв записи, см. hrv_core.analysis
+  // find_ts_gaps) и опциональная лог-ось Y (opts.scale === "log", по умолчанию линейная).
+  // Лог-ось не принимает нули/отрицательные — такие точки уходят в null отдельно от
+  // разрывов, чтобы не ронять отрисовку (см. спецификацию).
+  function finiteMax(ys, fallback) {
+    return ys.reduce((a, b) => (b == null || !Number.isFinite(b) ? a : Math.max(a, b)), fallback);
+  }
+
+  function logSafeYs(ys) {
+    return ys.map((v) => (v == null || v <= 0 || !Number.isFinite(v) ? null : v));
+  }
+
+  function rangeLogSafe(u, dataMin, dataMax) {
+    const base = u.scales.y.log ?? 10;
+    if (typeof uPlot.rangeLog === "function") return uPlot.rangeLog(dataMin, dataMax, base, true);
+    const lo = dataMin > 0 ? dataMin : 1;
+    const hi = dataMax > lo ? dataMax : lo * 10;
+    return [lo, hi];
+  }
+
+  function trendYScale(rawYs, opts, fallbackMax) {
+    if (opts?.scale !== "log") {
+      const yMax = opts?.yMax ?? (finiteMax(rawYs, fallbackMax) * 1.15);
+      return { scale: { time: false, distr: 1, range: [0, yMax] }, ys: rawYs };
+    }
+    return {
+      scale: { time: false, distr: 3, log: 10, range: rangeLogSafe },
+      ys: logSafeYs(rawYs),
+    };
+  }
+
   function makeSdnnPlot(el, trend, durationSec, height, opts) {
     if (!trend?.length) return null;
     const xs = trend.map((p) => p.x);
-    const ys = trend.map((p) => p.sdnn);
+    const { scale: yScale, ys } = trendYScale(trend.map((p) => p.sdnn), opts, 10);
     const xMax = durationSec || xs[xs.length - 1] || 1;
-    const yMax = opts?.yMax ?? (ys.reduce((a, b) => (a > b ? a : b), 10) * 1.15);
     const w = plotWidth(el);
     const sm = withSmoothing(
       applySeriesOpts(
@@ -376,6 +448,7 @@
       ),
       xs, ys, xMax
     );
+    const lay = smoothedLayout(xs, [ys], [sm]);
 
     const plot = new uPlot(
       {
@@ -384,34 +457,37 @@
         padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
-          y: { time: false, distr: 1, range: [0, yMax] },
+          y: yScale,
         },
-        series: [{}, ...sm.series],
+        series: lay.series,
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...axisStyle(), label: "SDNN, ms", size: 52 },
         ],
+        hooks: {
+          draw: [(u) => drawRejectedWindows(u, opts?.gaps)],
+        },
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
       },
-      [xs, ys, sm.extra],
+      lay.data,
       el
     );
-    plot._hrvSmoothWin = sm.win;
+    markSmoothable(plot, lay);
     return plot;
   }
 
-  function makeRmssdPlot(el, trend, durationSec, height) {
+  function makeRmssdPlot(el, trend, durationSec, height, opts) {
     if (!trend?.length) return null;
     const xs = trend.map((p) => p.x);
-    const ys = trend.map((p) => p.rmssd);
+    const { scale: yScale, ys } = trendYScale(trend.map((p) => p.rmssd), opts, 40);
     const xMax = durationSec || xs[xs.length - 1] || 1;
-    const yMax = ys.reduce((a, b) => (a > b ? a : b), 40) * 1.15;
     const w = plotWidth(el);
     const sm = withSmoothing(
       { width: 2, points: { show: false }, ...seriesColor("--chart-rmssd", "#39e085", 0.07) },
       xs, ys, xMax
     );
+    const lay = smoothedLayout(xs, [ys], [sm]);
 
     const plot = new uPlot(
       {
@@ -420,20 +496,23 @@
         padding: CHART_PADDING,
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
-          y: { time: false, distr: 1, range: [0, yMax] },
+          y: yScale,
         },
-        series: [{}, ...sm.series],
+        series: lay.series,
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
           { ...axisStyle(), label: "RMSSD, ms", size: 52 },
         ],
+        hooks: {
+          draw: [(u) => drawRejectedWindows(u, opts?.gaps)],
+        },
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
       },
-      [xs, ys, sm.extra],
+      lay.data,
       el
     );
-    plot._hrvSmoothWin = sm.win;
+    markSmoothable(plot, lay);
     return plot;
   }
 
@@ -530,25 +609,12 @@
     );
   }
 
+  // Общая реализация — interpolateSeries (ниже, используется и графиком
+  // "дыхание + RMSSD"); здесь только контракт "нет данных → нули", который
+  // ждёт buildProgressSpectrumPlot.
   function interpolateSpectrum(freqs, power, grid) {
     if (!freqs?.length) return grid.map(() => 0);
-    const n = freqs.length;
-    return grid.map((f) => {
-      if (f <= freqs[0]) return power[0];
-      if (f >= freqs[n - 1]) return power[n - 1];
-      let lo = 0;
-      let hi = n - 1;
-      while (lo + 1 < hi) {
-        const mid = (lo + hi) >> 1;
-        if (freqs[mid] <= f) lo = mid;
-        else hi = mid;
-      }
-      const f0 = freqs[lo];
-      const f1 = freqs[hi];
-      if (f1 === f0) return power[lo];
-      const t = (f - f0) / (f1 - f0);
-      return power[lo] + t * (power[hi] - power[lo]);
-    });
+    return interpolateSeries(freqs, power, grid);
   }
 
   function buildProgressSpectrumPlot(el, sessions, visible, colors, height) {
@@ -687,6 +753,172 @@
     );
   }
 
+  // ── ДЫХАНИЕ (акселерометр PMD) ──────────────────────────────────────────
+  // Общий рецепт расчёта — hrv_core/breathing.py; здесь только отрисовка.
+  // Живого графика во время записи нет (решено отдельно) — эти три графика
+  // только в разборе завершённой сессии, и только если у неё вообще есть
+  // данные акселерометра (has_accel в ответе /breathing).
+
+  function drawRejectedWindows(u, windows) {
+    if (!windows?.length) return;
+    const { ctx } = u;
+    const oy = u.bbox.top;
+    const h = u.bbox.height;
+    ctx.save();
+    ctx.fillStyle = T().chartLine("--chart-trim-overlay", "rgba(0,0,0,0.28)");
+    for (const win of windows) {
+      if (!win.rejected) continue;
+      const x0 = u.valToPos(win.t_start, "x", true);
+      const x1 = u.valToPos(win.t_end, "x", true);
+      ctx.fillRect(x0, oy, x1 - x0, h);
+    }
+    ctx.restore();
+  }
+
+  function makeBreathingWavePlot(el, t, waveMg, windows, durationSec, height) {
+    if (!t?.length || !waveMg?.length) return null;
+    const w = plotWidth(el);
+    const xMax = durationSec || t[t.length - 1] || 1;
+    const absMax = waveMg.reduce((a, b) => Math.max(a, Math.abs(b)), 1) * 1.15;
+    // Огибающая, а не среднее; окно не короче 20 с — несколько вдохов.
+    const lay = smoothedLayout(t, [waveMg], [withSmoothing(
+      { width: 1.5, points: { show: false }, ...seriesColor("--chart-breathing", "#f0a83c", 0.06) },
+      t, waveMg, xMax, { envelope: true, minWin: 20 }
+    )]);
+
+    const plot = new uPlot(
+      {
+        width: w,
+        height: height || 260,
+        padding: CHART_PADDING,
+        scales: {
+          x: { ...xScaleLinear, range: [0, xMax] },
+          y: { time: false, distr: 1, range: [-absMax, absMax] },
+        },
+        series: lay.series,
+        axes: [
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), label: "мг (0.10–0.45 Гц)", size: 60 },
+        ],
+        hooks: {
+          draw: [(u) => drawRejectedWindows(u, windows)],
+        },
+        cursor: { show: true, x: true, y: false },
+        legend: { show: false },
+      },
+      lay.data,
+      el
+    );
+    return markSmoothable(plot, lay);
+  }
+
+  function makeBreathingRatePlot(el, t, rateCpm, durationSec, height) {
+    if (!t?.length || !rateCpm?.length) return null;
+    const w = plotWidth(el);
+    const xMax = durationSec || t[t.length - 1] || 1;
+    const yMax = rateCpm.reduce((a, b) => Math.max(a, b), 10) * 1.15;
+    const lay = smoothedLayout(t, [rateCpm], [withSmoothing(
+      { width: 2, points: { show: false }, ...seriesColor("--chart-breathing", "#f0a83c", 0.08) },
+      t, rateCpm, xMax
+    )]);
+
+    const plot = new uPlot(
+      {
+        width: w,
+        height: height || 260,
+        padding: CHART_PADDING,
+        scales: {
+          x: { ...xScaleLinear, range: [0, xMax] },
+          y: { time: false, distr: 1, range: [0, yMax] },
+        },
+        series: lay.series,
+        axes: [
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), label: "дыхание, цикл/мин", size: 56 },
+        ],
+        cursor: { show: true, x: true, y: false },
+        legend: { show: false },
+      },
+      lay.data,
+      el
+    );
+    return markSmoothable(plot, lay);
+  }
+
+  // Линейная интерполяция ys(xs) на произвольную сетку grid — общая с
+  // interpolateSpectrum (там же бинарный поиск), нужна тут, чтобы свести
+  // RMSSD-тренд (неравномерные точки из hrv_points) на сетку дыхания
+  // (равномерная, ~10 Гц до прореживания) для общего графика с двумя Y.
+  function interpolateSeries(xs, ys, grid) {
+    if (!xs?.length) return grid.map(() => null);
+    const n = xs.length;
+    return grid.map((x) => {
+      if (x <= xs[0]) return ys[0];
+      if (x >= xs[n - 1]) return ys[n - 1];
+      let lo = 0;
+      let hi = n - 1;
+      while (lo + 1 < hi) {
+        const mid = (lo + hi) >> 1;
+        if (xs[mid] <= x) lo = mid;
+        else hi = mid;
+      }
+      const x0 = xs[lo];
+      const x1 = xs[hi];
+      if (x1 === x0) return ys[lo];
+      const t = (x - x0) / (x1 - x0);
+      return ys[lo] + t * (ys[hi] - ys[lo]);
+    });
+  }
+
+  function makeBreathingRateRmssdPlot(el, t, rateCpm, rmssdTrend, durationSec, height) {
+    if (!t?.length || !rateCpm?.length || !rmssdTrend?.length) return null;
+    const w = plotWidth(el);
+    const xMax = durationSec || t[t.length - 1] || 1;
+    const rmssdXs = rmssdTrend.map((p) => p.x);
+    const rmssdYs = rmssdTrend.map((p) => p.rmssd);
+    const rmssdOnGrid = interpolateSeries(rmssdXs, rmssdYs, t);
+    const rateMax = rateCpm.reduce((a, b) => Math.max(a, b), 10) * 1.15;
+    const rmssdMax = rmssdYs.reduce((a, b) => Math.max(a, b), 40) * 1.15;
+    const lay = smoothedLayout(t, [rateCpm, rmssdOnGrid], [
+      withSmoothing({
+        scale: "cpm", width: 2, points: { show: false },
+        stroke: T().cssVar("--chart-breathing", "#f0a83c"),
+        label: "дыхание",
+      }, t, rateCpm, xMax),
+      withSmoothing({
+        scale: "rmssd", width: 1.5, points: { show: false },
+        stroke: T().cssVar("--chart-rmssd", "#39e085"),
+        label: "RMSSD",
+      }, t, rmssdOnGrid, xMax),
+    ]);
+    lay.series[3].label = "дыхание, сглаж.";
+    lay.series[4].label = "RMSSD, сглаж.";
+
+    const plot = new uPlot(
+      {
+        width: w,
+        height: height || 260,
+        padding: [8, 46, 4, 4],
+        scales: {
+          x: { ...xScaleLinear, range: [0, xMax] },
+          cpm: { time: false, distr: 1, range: [0, rateMax] },
+          rmssd: { time: false, distr: 1, range: [0, rmssdMax] },
+        },
+        series: lay.series,
+        axes: [
+          { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
+          { ...axisStyle(), scale: "cpm", label: "дыхание, цикл/мин", size: 56 },
+          { ...axisStyle(), scale: "rmssd", label: "RMSSD, ms", side: 1, size: 52 },
+        ],
+        cursor: { show: true, x: true, y: false },
+        legend: { show: true },
+      },
+      lay.data,
+      el
+    );
+    return markSmoothable(plot, lay);
+  }
+
   function setChartEmpty(el, message) {
     if (!el) return;
     el.innerHTML = `<div class="chart-empty">${message}</div>`;
@@ -708,5 +940,9 @@
     setSmoothed,
     smoothWindowSec,
     movingAverage,
+    makeBreathingWavePlot,
+    makeBreathingRatePlot,
+    makeBreathingRateRmssdPlot,
+    interpolateSeries,
   };
 })(window);

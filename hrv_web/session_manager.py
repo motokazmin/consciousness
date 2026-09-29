@@ -10,7 +10,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from hrv_core.constants import DEFAULT_OPT_ACC_RECORDING
 from hrv_core.db import (
     init_db,
     insert_accel_batch,
@@ -24,6 +23,16 @@ from hrv_core.summary import session_summary_dict
 
 # Если за это время не пришёл ни один RR — сессия останавливается сама.
 ARM_TIMEOUT_SEC = 300.0
+
+# BLE: сколько ждём после первого RR первую пачку акселерометра, прежде чем
+# взвести сессию по самому RR и писать без канала дыхания. Заказчик хочет,
+# чтобы t0 совпадал с реальным стартом акселерометра (обе кривые должны
+# покрывать сессию целиком) — но PMD документированно умеет отказывать молча
+# (SUCCESS без единого кадра, см. ARCHITECTURE.md), и если ждать его
+# безусловно, такая сессия никогда не взведётся и умрёт по ARM_TIMEOUT_SEC,
+# унеся с собой RR. Это прямое нарушение «RR неприкосновенен», поэтому у
+# ожидания есть потолок.
+ACC_ARM_WAIT_SEC = 60.0
 
 
 def _source_label(kind: str, address: str | None, *, mock_tag: str | None = None) -> str:
@@ -51,6 +60,19 @@ class RunningSession:
     first_beat_at: float | None = None
     ws_queue: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=2000))
     timer: threading.Timer | None = None
+    # ts первого сырого RR — считается только для отмера ACC_ARM_WAIT_SEC,
+    # сам этот удар может быть отброшен (если сессия в итоге взведётся по
+    # акселерометру).
+    first_rr_at: float | None = None
+    # True, если взвели по RR-запасу, а не по акселерометру: канал дыхания в
+    # этой записи не ответил за ACC_ARM_WAIT_SEC.
+    accel_missing: bool = False
+    # Для фронта: "ble_repair" → "waiting_accel" → "recording" (BLE),
+    # либо "waiting_beat" → "recording" (mock — акселерометра нет вовсе).
+    device_state: str = "waiting_beat"
+    # Метка последней принятой пачки акселерометра — строка состояния канала
+    # в панели идущей записи (PMD умеет умирать молча, см. ARCHITECTURE.md).
+    last_accel_at: float | None = None
 
     def _enqueue_ws(self, payload: dict[str, Any]) -> None:
         try:
@@ -103,6 +125,8 @@ class RunningSession:
         ошибка здесь логируется и проглатывается, запись RR не прерывается."""
         if self.stop_event.is_set():
             return
+        self.last_accel_at = batch_ts
+        self._enqueue_ws({"type": "accel_status", "ts": batch_ts})
         try:
             with self.conn_lock:
                 insert_accel_batch(self.conn, self.session_id, batch_ts, samples, hz)
@@ -147,7 +171,6 @@ class SessionManager:
         opt_guided_phrases: bool = False,
         opt_audio_biofeedback: bool = False,
         opt_mic_recording: bool = False,
-        opt_acc_recording: bool = DEFAULT_OPT_ACC_RECORDING,
     ) -> RunningSession:
         if source_kind not in ("mock", "ble"):
             raise ValueError(f"неизвестный source: {source_kind}")
@@ -163,7 +186,12 @@ class SessionManager:
             "(tag, source, session_name, participant, started, drift_events, "
             "opt_guided_phrases, opt_audio_biofeedback, opt_mic_recording, "
             "opt_acc_recording) "
-            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            # Акселерометр обязателен для каждой записи (решение заказчика) —
+            # opt_acc_recording пишется 1 всегда; колонка остаётся только
+            # затем, чтобы отличать старые сессии (см. ARCHITECTURE.md).
+            # Фактическое наличие канала в сессии — по строкам в
+            # hrv_accel_batches, не по этому полю.
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1)",
             (
                 tag,
                 label,
@@ -173,7 +201,6 @@ class SessionManager:
                 int(opt_guided_phrases),
                 int(opt_audio_biofeedback),
                 int(opt_mic_recording),
-                int(opt_acc_recording),
             ),
         )
         session_id = int(cur.lastrowid)
@@ -184,30 +211,61 @@ class SessionManager:
         stop_event = threading.Event()
         conn_lock = threading.Lock()
         state = HRVSessionState(pers, desktop_notify=False)
-        source = build_source(
-            source_kind,
-            session_stop=stop_event,
-            address=address,
-            mock_tag=tag if source_kind == "mock" else None,
-        )
+        # Акселерометр не умеет только mock — там взводим по первому RR, как
+        # раньше. BLE ждёт первую пачку PMD (см. ACC_ARM_WAIT_SEC).
+        wait_for_accel = source_kind == "ble"
         rs = RunningSession(
             session_id=session_id,
             conn=conn,
             conn_lock=conn_lock,
             stop_event=stop_event,
             state=state,
-            source=source,
+            source=None,
             baseline_at_start=pers,
             started_at=started,
             duration_minutes=minutes,
+            device_state="ble_repair" if wait_for_accel else "waiting_beat",
         )
 
+        def _device_state(new_state: str) -> None:
+            rs.device_state = new_state
+            rs._enqueue_ws({"type": "device_state", "state": new_state})
+
+        source = build_source(
+            source_kind,
+            session_stop=stop_event,
+            address=address,
+            mock_tag=tag if source_kind == "mock" else None,
+            on_state=_device_state if wait_for_accel else None,
+        )
+        rs.source = source
+
         def _beat(rr: float, ts: float) -> None:
-            if rs.first_beat_at is None:
+            if rs.first_beat_at is not None:
+                rs.on_beat(rr, ts)
+                return
+            if not wait_for_accel:
                 self._arm(rs, ts)
+                rs.on_beat(rr, ts)
+                return
+            if rs.first_rr_at is None:
+                rs.first_rr_at = ts
+            if ts - rs.first_rr_at < ACC_ARM_WAIT_SEC:
+                # Ждём акселерометр — этот удар как будто не приходил: не
+                # пишем в БД и не отдаём в HRVSessionState (иначе первый
+                # «настоящий» удар после взведения перестанет быть первым для
+                # расчёта дельт RMSSD).
+                return
+            print(
+                f"PMD: акселерометр не дал ни одной пачки за {ACC_ARM_WAIT_SEC:.0f}с "
+                "после первого RR — сессия взведена по RR, без канала дыхания."
+            )
+            self._arm(rs, ts, accel_missing=True)
             rs.on_beat(rr, ts)
 
         def _accel(batch_ts: float, samples: list[tuple[int, int, int]], hz: float) -> None:
+            if wait_for_accel and rs.first_beat_at is None:
+                self._arm(rs, batch_ts)
             rs.on_accel_batch(batch_ts, samples, hz)
 
         with self._lock:
@@ -218,7 +276,7 @@ class SessionManager:
                 raise RuntimeError("already_running")
             self._running = rs
 
-        source.start(_beat, _accel if opt_acc_recording else None)
+        source.start(_beat, _accel)
 
         def _arm_timeout() -> None:
             self.stop(session_id)
@@ -229,11 +287,17 @@ class SessionManager:
 
         return rs
 
-    def _arm(self, rs: RunningSession, ts: float) -> None:
-        """Первый RR: отсчёт длительности, sessions.started и ws «armed»."""
+    def _arm(self, rs: RunningSession, ts: float, *, accel_missing: bool = False) -> None:
+        """Взведение: отсчёт длительности, sessions.started и ws «armed».
+
+        Момент взведения — первая пачка акселерометра (BLE) или первый RR
+        (mock, либо BLE после ACC_ARM_WAIT_SEC без акселерометра —
+        `accel_missing=True`, см. вызовы в `start()`)."""
         if rs.first_beat_at is not None:
             return
         rs.first_beat_at = ts
+        rs.accel_missing = accel_missing
+        rs.device_state = "recording"
         if rs.timer is not None:
             try:
                 rs.timer.cancel()
@@ -246,7 +310,7 @@ class SessionManager:
                 (ts, rs.session_id),
             )
             rs.conn.commit()
-        rs._enqueue_ws({"type": "armed", "started_at": ts})
+        rs._enqueue_ws({"type": "armed", "started_at": ts, "accel_missing": accel_missing})
         if (
             rs.duration_minutes is not None
             and rs.duration_minutes > 0
