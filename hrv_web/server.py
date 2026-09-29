@@ -758,8 +758,12 @@ def session_breathing_endpoint(
 
     Явно отличает «акселерометра в сессии нет» (все сессии до Части A) от
     «есть, но короткая/шумная» — фронт не должен рисовать это как нулевые
-    графики (см. ARCHITECTURE.md)."""
-    max_points = max(100, min(max_points, 20_000))
+    графики (см. ARCHITECTURE.md).
+
+    Потолок max_points — 200 000: лупа в архиве запрашивает волну в полном
+    разрешении (4 Гц × 8 ч ≈ 115 000 точек), иначе на длинной записи между
+    точками выходит больше периода дыхания и форма вдоха теряется."""
+    max_points = max(100, min(max_points, 200_000))
     conn = init_db()
     row = conn.execute(
         "SELECT started, ended FROM sessions WHERE id = ?",

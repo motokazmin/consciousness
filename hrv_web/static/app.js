@@ -2003,7 +2003,7 @@ function renderArchSdnn(analysis) {
   const profile = chartProfileFor(archSummaryCache?.tag);
   const opts = { ...(profile.options.sdnn || {}), scale: archSdnnScale, gaps: analysis.gaps };
   archSdnn = charts.makeSdnnPlot(dEl, analysis.sdnn_trend, analysis.duration_sec, ARCHIVE_PLOT_H, opts);
-  applyArchSmooth("sdnn");
+  applyArchLoupe("sdnn");
   renderQualityStrip(qEl, analysis.quality_strip, analysis.duration_sec);
 }
 
@@ -2033,34 +2033,94 @@ function renderArchRmssd(analysis) {
   const opts = { scale: archRmssdScale, gaps: analysis.gaps };
   archRM = charts.makeRmssdPlot(el, analysis.rmssd_trend, analysis.duration_sec, ARCHIVE_PLOT_H, opts);
   renderQualityStrip($("arch_rmssd_quality"), analysis.quality_strip, analysis.duration_sec);
-  applyArchSmooth("rmssd");
+  applyArchLoupe("rmssd");
 }
 
-// Галочки «сгладить» на графиках истории: у каждого графика своя,
-// состояние переживает перерисовку и смену сессии.
-const archSmooth = { rr: false, sdnn: false, rmssd: false, breath_wave: false, breath_rate: false, breath_combo: false };
-const archSmoothPlot = () => ({
+// Лупа на графиках истории: у каждого графика своя галочка и своя длина
+// окна в минутах; ползунок под графиком двигает окно по сессии.
+// Состояние переживает перерисовку и смену сессии.
+const LOUPE_KEYS = ["rr", "sdnn", "rmssd", "breath_wave", "breath_rate", "breath_combo"];
+const archLoupe = Object.fromEntries(LOUPE_KEYS.map((k) => [k, { on: false, start: 0 }]));
+const archLoupePlot = () => ({
   rr: archRR, sdnn: archSdnn, rmssd: archRM,
   breath_wave: archBreathingWave, breath_rate: archBreathingRate, breath_combo: archBreathingRateRmssd,
 });
 
-function fmtSmoothWin(sec) {
-  return sec >= 60 ? `~${Math.round(sec / 60)} мин` : `${Math.round(sec)} с`;
+function loupeWindowSec(key) {
+  const v = Number(document.querySelector(`[data-loupe-min="${key}"]`)?.value);
+  return (Number.isFinite(v) && v > 0 ? v : 2) * 60;
 }
 
-function applyArchSmooth(key) {
-  const plot = archSmoothPlot()[key];
-  AC()?.setSmoothed(plot, archSmooth[key]);
-  const win = document.querySelector(`[data-smooth-win="${key}"]`);
-  if (win) win.textContent = plot?._hrvSmoothWin ? ` (${fmtSmoothWin(plot._hrvSmoothWin)})` : "";
+// RR и волна дыхания по умолчанию приходят прореженными (на 8-часовой
+// записи — точка на несколько секунд). Лупе нужна форма каждого удара и
+// вдоха, поэтому при первом включении подгружаем полное разрешение.
+const LOUPE_FULL_RES = {
+  rr: {
+    url: (id) => `${sessionAnalysisUrl(id)}?max_points=50000`,
+    data: (j) => { const { xs, ys } = rrTimelineSeries(j); return [xs, ys]; },
+  },
+  breath_wave: {
+    url: (id) => `${sessionBreathingUrl(id)}?max_points=200000`,
+    data: (j) => [j.t, j.wave_mg],
+  },
+};
+const archLoupeFull = {};
+
+async function ensureLoupeFullRes(key, plot) {
+  const spec = LOUPE_FULL_RES[key];
+  const id = archSummaryCache?.id;
+  if (!spec || !id || plot._hrvLoupeFull) return;
+  const cacheKey = `${id}:${key}`;
+  if (!archLoupeFull[cacheKey]) {
+    archLoupeFull[cacheKey] = api(spec.url(id)).then(spec.data).catch(() => null);
+  }
+  const data = await archLoupeFull[cacheKey];
+  if (!data?.[0]?.length || archLoupePlot()[key] !== plot) return;
+  plot._hrvLoupeFull = true;
+  plot.setData(data, false);
 }
 
-document.querySelectorAll("input[data-smooth]").forEach((box) => {
-  const key = box.dataset.smooth;
-  box.checked = archSmooth[key];
-  box.addEventListener("change", () => {
-    archSmooth[key] = box.checked;
-    applyArchSmooth(key);
+async function applyArchLoupe(key) {
+  const plot0 = archLoupePlot()[key];
+  if (plot0 && archLoupe[key].on) await ensureLoupeFullRes(key, plot0);
+  const plot = archLoupePlot()[key];
+  const slider = document.querySelector(`[data-loupe-slider="${key}"]`);
+  const L = window.HrvChartLoupe;
+  const st = archLoupe[key];
+  if (!plot || !L) {
+    if (slider) slider.hidden = true;
+    return;
+  }
+  if (!st.on) {
+    L.restore(plot);
+    if (slider) slider.hidden = true;
+    return;
+  }
+  const [x0, x1] = L.extent(plot);
+  const win = Math.min(loupeWindowSec(key), x1 - x0);
+  const maxStart = Math.max(0, x1 - x0 - win);
+  st.start = Math.min(Math.max(0, st.start), maxStart);
+  if (slider) {
+    slider.hidden = false;
+    slider.max = String(maxStart);
+    slider.step = String(Math.max(1, win / 20));
+    slider.value = String(st.start);
+  }
+  L.show(plot, x0 + st.start, x0 + st.start + win);
+}
+
+LOUPE_KEYS.forEach((key) => {
+  const box = document.querySelector(`input[data-loupe="${key}"]`);
+  const mins = document.querySelector(`[data-loupe-min="${key}"]`);
+  const slider = document.querySelector(`[data-loupe-slider="${key}"]`);
+  box?.addEventListener("change", () => {
+    archLoupe[key].on = box.checked;
+    applyArchLoupe(key);
+  });
+  mins?.addEventListener("change", () => applyArchLoupe(key));
+  slider?.addEventListener("input", () => {
+    archLoupe[key].start = Number(slider.value);
+    applyArchLoupe(key);
   });
 });
 
@@ -2137,8 +2197,8 @@ function renderArchiveAnalysisCharts(analysis, sum) {
   }
 
   renderArchRmssd(analysis);
-  applyArchSmooth("rr");
-  applyArchSmooth("sdnn");
+  applyArchLoupe("rr");
+  applyArchLoupe("sdnn");
   renderArchiveBreathing(archBreathingCache, analysis);
   nextFrame(resizePlots);
 }
@@ -2197,9 +2257,9 @@ function renderArchiveBreathing(breathing, analysis) {
     charts.setChartEmpty(comboEl, "Недостаточно данных (нет тренда RMSSD)");
   }
 
-  applyArchSmooth("breath_wave");
-  applyArchSmooth("breath_rate");
-  applyArchSmooth("breath_combo");
+  applyArchLoupe("breath_wave");
+  applyArchLoupe("breath_rate");
+  applyArchLoupe("breath_combo");
 
   const metricsRow = $("arch_breathing_metrics_row");
   if (metricsRow) {
