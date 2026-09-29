@@ -2125,8 +2125,26 @@ async function ensureLoupeFullRes(key, plot) {
   plot.setData(data, false);
 }
 
+// Выделение интервала мышью на графике во времени — это тоже лупа: окно
+// ставится общим для всех графиков и ленты. Встроенный зум uPlot менял бы
+// только свой график, и синхронность по времени терялась.
+function attachSelectToLoupe(plot) {
+  if (!plot || plot._hrvSelectLoupe) return;
+  plot._hrvSelectLoupe = true;
+  if (plot.cursor?.drag) plot.cursor.drag.setScale = false;
+  (plot.hooks.setSelect ||= []).push((u) => {
+    const { left, width } = u.select;
+    if (width < 5) return;
+    const t0 = u.posToVal(left, "x");
+    const t1 = u.posToVal(left + width, "x");
+    u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
+    setLoupeView(t0, Math.max(LOUPE_MIN_SEC, t1 - t0));
+  });
+}
+
 async function applyArchLoupe(key) {
   const plot0 = archLoupePlot()[key];
+  if (key !== "rr") attachSelectToLoupe(plot0);
   if (plot0 && archLoupe.on) await ensureLoupeFullRes(key, plot0);
   const plot = archLoupePlot()[key];
   const L = window.HrvChartLoupe;
