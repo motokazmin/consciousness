@@ -553,6 +553,13 @@ def session_analysis(
     }
 
 
+def _trend_mean(trend, key: str, fallback: float | None) -> float | None:
+    vals = [p[key] for p in (trend or []) if p.get(key) is not None]
+    if vals:
+        return round(float(np.mean(vals)), 1)
+    return round(fallback, 1) if fallback is not None else None
+
+
 def progress_session_analysis(
     points: list[tuple[float, float, float]],
     started: float,
@@ -583,7 +590,10 @@ def progress_session_analysis(
         "mean_rr": full["mean_rr"],
         "coherence_score": full["coherence_score"],
         "outliers": full.get("outliers"),
-        "rmssd_mean": round(rmssd_mean, 1) if rmssd_mean is not None else None,
+        # Среднее скользящего RMSSD по исправленному ряду — как сводка архива
+        # (hrv_core.summary). Прежде сюда шло среднее «живой» колонки с
+        # артефактами: для ночи 245 — 30.4 против 18.3 в архиве.
+        "rmssd_mean": _trend_mean(full.get("rmssd_trend"), "rmssd", rmssd_mean),
         "duration_sec": full["duration_sec"],
         "raw_rr": poincare_rr,
         "raw_rr_x": poincare_rr_x,

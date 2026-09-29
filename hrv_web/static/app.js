@@ -10,6 +10,7 @@ let raf    = null;
 let currentSessionId = null;
 let _sessionEndHandled = false;
 let _notesModalSessionId = null;
+let _notesModalFromArchive = false;
 let _dirty = false;
 const SESSION_NOTES_MAX_LEN = 12000;
 
@@ -335,7 +336,7 @@ function syncBiofeedbackStats() {
     rnEl.textContent = lastRmssdNormalized !== null ? lastRmssdNormalized.toFixed(2) : "—";
     rnEl.className = "stat-value" + (lastRmssdNormalized != null && lastRmssdNormalized >= 2.5 ? " good" : "");
   }
-  if (srEl && bioTabVisible) srEl.textContent = lastSmoothedRr !== null ? Math.round(lastSmoothedRr) + " ms" : "—";
+  if (srEl && bioTabVisible) srEl.textContent = lastSmoothedRr !== null ? Math.round(lastSmoothedRr) + " мс" : "—";
   if (modeEl && bioTabVisible) {
     modeEl.textContent = audioMode === "smooth_rr" ? "Дышащий Эмбиент" : "Трансовый Порог";
   }
@@ -504,7 +505,9 @@ function api(path, opts = {}) {
       const msg = Array.isArray(d)
         ? d.map(x => x.msg || JSON.stringify(x)).join("; ")
         : d || j.error || t || r.statusText || String(r.status);
-      throw new Error(msg);
+      const err = new Error(msg);
+      err.status = r.status;
+      throw err;
     }
     return j;
   });
@@ -808,6 +811,16 @@ function parseNoteTagsClient(text) {
 // Объединяет свободный текст заметки с набором тегов из chip-инпута:
 // удаляет существующие #теги из текста и добавляет актуальный набор в конец.
 function mergeNotesWithTags(text, tags) {
+  // Теги, набранные прямо в тексте (#утро), — тоже теги: раньше они
+  // вырезались и молча терялись, сохранялись только теги из отдельного поля.
+  const inline = [...(text || "").matchAll(/#([\w\-а-яА-ЯёЁ]+)/gu)].map((m) => m[1]);
+  const seen = new Set();
+  tags = [...(tags || []), ...inline].filter((t) => {
+    const k = t.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
   const body = (text || "")
     .replace(/#([\w\-а-яА-ЯёЁ]+)/gu, "")
     .replace(/\r\n?/g, "\n")
@@ -1059,8 +1072,8 @@ const TH = () => window.HrvTheme;
 function chartAxes(labelX, labelY) {
   const a = TH()?.chartAxis() || {};
   return [
-    { ...a, label: labelX, labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'", values: fmtAxisSec, incrs: SEC_AXIS_INCRS, gap: 4 },
-    { ...a, label: labelY, labelFont: "11px 'DM Sans'", font: "11px 'Space Mono'", size: 52 },
+    { ...a, label: labelX, values: fmtAxisSec, incrs: SEC_AXIS_INCRS, gap: 4 },
+    { ...a, label: labelY, size: 52 },
   ];
 }
 
@@ -1110,7 +1123,7 @@ function rrCfg(timed, w) {
     : (_u, _mn, _mx) => [-60, 0];
   const stroke = rrStrokeColor();
   const fill = TH()?.hexToRgba(stroke, 0.04) || `rgba(0,212,255,0.04)`;
-  const axes = chartAxes(timed ? "с от начала" : "с от сейчас", "RR, ms");
+  const axes = chartAxes(timed ? "с от начала" : "с от сейчас", "RR, мс");
   return {
     width: w, height: LIVE_PLOT_H,
     padding: [8, 40, 4, 4],
@@ -1152,6 +1165,8 @@ function makeRRPlot(el, timed) {
 // RunningSession.device_state) плюс пара локальных ("idle", "waiting").
 // "device" оставлен как синоним "waiting_beat" для чисто mock-сессий.
 function setLiveEmptyState(mode) {
+  const title = $("live_bio_title");
+  if (title) title.textContent = mode === "idle" ? "Нет активной записи" : "Запись идёт";
   const empty = $("live_rr_empty");
   if (!empty) return;
   if (mode === "idle") {
@@ -1431,6 +1446,7 @@ function showSessionNotesModal(sessionId, options) {
   _notesModalSessionId = sessionId;
   if (idEl) idEl.textContent = String(sessionId);
   const fromArchive = !!(options && options.fromArchive);
+  _notesModalFromArchive = fromArchive;
   const rawText = fromArchive
     ? (options.sessionName || "")
     : ($("session_name")?.value?.trim() || "");
@@ -1483,7 +1499,9 @@ async function saveSessionNotes() {
       body: JSON.stringify({ session_name: text || null }),
     });
     const savedName = res.session_name ?? (text || null);
-    if ($("session_name")) $("session_name").value = savedName || "";
+    // Поле «Запись» — только для заметки только что законченной сессии:
+    // заметка к архивной записи попадала туда и предлагалась следующей.
+    if (!_notesModalFromArchive && $("session_name")) $("session_name").value = savedName || "";
     await loadNoteTags();
     if (archSummaryCache?.id === sessionId) {
       archSummaryCache.session_name = savedName;
@@ -1493,7 +1511,7 @@ async function saveSessionNotes() {
     if ($("tab-archive")?.classList.contains("visible")) {
       await loadArchive().catch((e) => setErr(String(e.message || e)));
     }
-    setStatus(`Заметки к сессии #${sessionId} сохранены.`);
+    setBar(_notesModalFromArchive ? "arch_status" : "live_status", `Заметки к сессии #${sessionId} сохранены.`);
   } catch (e) {
     setErr(String(e.message || e));
     return;
@@ -1715,7 +1733,7 @@ function fmtTime(ts) {
   return new Date(ts * 1000).toLocaleString("ru-RU");
 }
 function fmtMetricMs(v) {
-  return v != null ? Number(v).toFixed(1) + " ms" : "—";
+  return v != null ? Number(v).toFixed(1) + " мс" : "—";
 }
 function tagPill(t) {
   const cls = TAG_PRESETS.includes(t) ? escapeHtml(t) : "";
@@ -1917,20 +1935,22 @@ function renderSummaryGrid(sum) {
   const fields = [
     // По исправленному ряду, как график RMSSD. Медиана и 10–90% вместо
     // mean/min/max: единичный сбой датчика двигал max на сотни мс.
-    ["RMSSD медиана", sum.rmssd_median != null ? sum.rmssd_median.toFixed(1) + " ms" : "—"],
-    ["RMSSD 10–90%", sum.rmssd_p10 != null ? `${sum.rmssd_p10.toFixed(0)}–${sum.rmssd_p90.toFixed(0)} ms` : "—"],
-    ["Mean RR",     meanRr != null ? Number(meanRr).toFixed(1) + " ms" : "—"],
-    ["Coherence",   coherence != null ? Number(coherence).toFixed(1) : "—"],
+    ["RMSSD медиана", sum.rmssd_median != null ? sum.rmssd_median.toFixed(1) + " мс" : "—"],
+    ["RMSSD 10–90%", sum.rmssd_p10 != null ? `${sum.rmssd_p10.toFixed(0)}–${sum.rmssd_p90.toFixed(0)} мс` : "—"],
+    ["Средний RR", meanRr != null ? Number(meanRr).toFixed(1) + " мс" : "—"],
+    ["Когерентность", coherence != null ? Number(coherence).toFixed(1) : "—"],
     ["Длительность", durMin != null ? durMin.toFixed(1) + " мин" : "—"],
-    ["Разрывы записи", breaks ? `${breaks.broken_minutes} из ${breaks.total_minutes} мин` : "—"],
-    ["vs baseline", vsBl],
-    ["Drift events", sum.drift_events != null ? String(sum.drift_events) : "—"],
-    ["Guided meditation", sum.opt_guided_phrases ? "да" : "нет"],
+    // Минуты считаются корзинами, последняя неполная — отсюда 481 при 480
+    // длительности. Долю от длительности не показываем, только сами минуты.
+    ["Разрывы записи", breaks ? (breaks.broken_minutes ? `${breaks.broken_minutes} мин` : "нет") : "—"],
+    ["К baseline", vsBl],
+    ["Провалы RMSSD (drift)", sum.drift_events != null ? String(sum.drift_events) : "—"],
+    ["Фразы-подсказки", sum.opt_guided_phrases ? "да" : "нет"],
     ["Аудио-биофидбек", sum.opt_audio_biofeedback ? "да" : "нет"],
-    ["Запись микрофона", sum.has_audio ? "есть файл" : (sum.opt_mic_recording ? "запрошена" : "нет")],
+    ["Запись микрофона", sum.has_audio ? "есть файл" : sum.audio_missing ? "файл не найден" : (sum.opt_mic_recording ? "запрошена" : "нет")],
     ["Акселерометр PMD", sum.opt_acc_recording ? "да" : "нет"],
     ["SD1", fmtMetricMs(archAnalysisCache?.poincare?.sd1)],
-    ["Peak Hz", archAnalysisCache?.spectrum?.peak_freq != null ? archAnalysisCache.spectrum.peak_freq + " Гц" : "—"],
+    ["Пик 0.04–0.15 Гц", archAnalysisCache?.spectrum?.peak_freq != null ? archAnalysisCache.spectrum.peak_freq + " Гц" : "—"],
   ];
   // Дыхание — только если в сессии есть акселерометр и оценка получилась.
   const br = archBreathingCache;
@@ -1982,16 +2002,36 @@ function destroyArchPlots() {
 // скрывает. Раскладка по ширине не завязана на uPlot-пиксели: у этих
 // графиков нет zoom/pan (в отличие от RR), поэтому пропорциональная раскладка
 // по durationSec не рассинхронизируется.
-function renderQualityStrip(el, strip, durationSec) {
+function renderQualityStrip(el, strip, durationSec, plot) {
   if (!el) return;
+  el._hrvStrip = { strip, durationSec };
   el.innerHTML = "";
   if (!strip?.length || !durationSec) return;
+  // Под областью построения графика и в его окне по X (лупа), иначе полоска
+  // расходится с кривой над ней.
+  let x0 = 0;
+  let x1 = durationSec;
+  if (plot?.over) {
+    const over = plot.over.getBoundingClientRect();
+    const host = el.parentElement.getBoundingClientRect();
+    el.style.marginLeft = `${over.left - host.left}px`;
+    el.style.width = `${over.width}px`;
+    if (plot.scales.x.min != null) { x0 = plot.scales.x.min; x1 = plot.scales.x.max; }
+    if (!plot._hrvQualityHook) {
+      plot._hrvQualityHook = true;
+      (plot.hooks.setScale ||= []).push((_u, key) => {
+        if (key === "x" && el._hrvStrip) renderQualityStrip(el, el._hrvStrip.strip, el._hrvStrip.durationSec, plot);
+      });
+    }
+  }
+  const span = Math.max(1e-6, x1 - x0);
   const warn = TH()?.cssVar("--yellow", "#f5c542") || "#f5c542";
-  const widthPct = Math.max(0.4, (60 / durationSec) * 100);
+  const widthPct = Math.max(0.4, (60 / span) * 100);
   for (const bucket of strip) {
+    if (bucket.x + 60 < x0 || bucket.x > x1) continue;
     const seg = document.createElement("div");
     seg.className = "quality-strip-seg";
-    seg.style.left = `${(bucket.x / durationSec) * 100}%`;
+    seg.style.left = `${((bucket.x - x0) / span) * 100}%`;
     seg.style.width = `${widthPct}%`;
     const alpha = Math.min(1, bucket.corrected_fraction * 5);
     seg.style.background = alpha > 0.02
@@ -2019,7 +2059,7 @@ function renderArchSdnn(analysis) {
   const opts = { ...(profile.options.sdnn || {}), scale: archSdnnScale, gaps: analysis.gaps };
   archSdnn = charts.makeSdnnPlot(dEl, analysis.sdnn_trend, analysis.duration_sec, ARCHIVE_PLOT_H, opts);
   applyArchLoupe("sdnn");
-  renderQualityStrip(qEl, analysis.quality_strip, analysis.duration_sec);
+  renderQualityStrip(qEl, analysis.quality_strip, analysis.duration_sec, archSdnn);
 }
 
 function renderArchRmssd(analysis) {
@@ -2040,7 +2080,7 @@ function renderArchRmssd(analysis) {
   }
   const opts = { scale: archRmssdScale, gaps: analysis.gaps };
   archRM = charts.makeRmssdPlot(el, analysis.rmssd_trend, analysis.duration_sec, ARCHIVE_PLOT_H, opts);
-  renderQualityStrip($("arch_rmssd_quality"), analysis.quality_strip, analysis.duration_sec);
+  renderQualityStrip($("arch_rmssd_quality"), analysis.quality_strip, analysis.duration_sec, archRM);
   applyArchLoupe("rmssd");
 }
 
@@ -2063,10 +2103,12 @@ function loupeDuration() {
   return Number(archAnalysisCache?.duration_sec) || 0;
 }
 
-function fmtLoupeClock(t) {
+function fmtLoupeClock(t, withSec = false) {
   const started = archSummaryCache?.started;
   if (!started) return `${Math.round(t)} с`;
-  return new Date((started + t) * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  const o = { hour: "2-digit", minute: "2-digit" };
+  if (withSec) o.second = "2-digit";
+  return new Date((started + t) * 1000).toLocaleTimeString("ru-RU", o);
 }
 
 // Окно лупы [x0, x1] с поправкой положения под текущую длину.
@@ -2093,7 +2135,9 @@ function syncLoupeBar() {
     slider.step = String(Math.max(1, (x1 - x0) / 20));
     slider.value = String(x0);
   }
-  if (label) label.textContent = `${fmtLoupeClock(x0)}–${fmtLoupeClock(x1)}`;
+  // Короткое окно — с секундами, иначе сдвиг ползунком не виден в подписи.
+  const sec = x1 - x0 < 15 * 60;
+  if (label) label.textContent = `${fmtLoupeClock(x0, sec)}–${fmtLoupeClock(x1, sec)}`;
 }
 
 // RR и волна дыхания по умолчанию приходят прореженными (на 8-часовой
@@ -2193,7 +2237,7 @@ function setLoupeView(x0, win) {
     archLoupe.on = true;
     archLoupe.start = Math.min(Math.max(0, x0), dur - win);
     const minEl = $("arch_loupe_min");
-    if (minEl) minEl.value = String(+(win / 60).toFixed(2));
+    if (minEl) minEl.value = String(+(win / 60).toFixed(win < 600 ? 1 : 0));
   }
   const box = $("arch_loupe_on");
   if (box) box.checked = archLoupe.on;
@@ -2409,74 +2453,104 @@ async function syncArchAudioPlayer(sum) {
   if (has && archRR) player.attachToPlot(archRR);
 }
 
+let archOpenToken = 0;
+
+// Сброс всего, что карточка могла унаследовать от предыдущей сессии.
+function resetArchCard() {
+  setBar("arch_err", "");
+  destroyArchPlots();
+  archAnalysisCache = null;
+  archSummaryCache = null;
+  archBreathingCache = null;
+  archSegments = null;
+  archSdnnScale = "linear";
+  archRmssdScale = "linear";
+  for (const id of ["arch_sdnn_scale_toggle", "arch_rmssd_scale_toggle"]) {
+    const b = $(id);
+    if (b) b.textContent = "лин";
+  }
+  renderQualityStrip($("arch_sdnn_quality"), null, 0);
+  renderQualityStrip($("arch_rmssd_quality"), null, 0);
+  const marker = $("arch_peak_marker");
+  if (marker) marker.style.display = "none";
+  const breathBlock = $("arch_breathing_block");
+  if (breathBlock) breathBlock.hidden = true;
+  const segCard = $("arch_segments_card");
+  if (segCard) segCard.hidden = true;
+  $("arch_summary_grid").innerHTML = "";
+  // Лупа — своя у каждой сессии: окно прошлой сессии к новой не относится.
+  archLoupe.on = false;
+  archLoupe.start = 0;
+  const box = $("arch_loupe_on");
+  if (box) box.checked = false;
+  const minEl = $("arch_loupe_min");
+  if (minEl) minEl.value = "10";
+  syncLoupeBar();
+}
+
 async function openArchiveSession(id) {
   if (currentSessionId != null && id === currentSessionId) {
     setErr("Построение графиков для активной сессии недоступно. Завершите сессию сначала.");
     return;
   }
+  // Каждое открытие получает номер; ответы, пришедшие после того, как
+  // открыли другую сессию, выбрасываются — иначе карточка смешивает две.
+  const token = ++archOpenToken;
   const detail = $("arch_detail");
   detail.classList.add("visible");
   $("arch_id").textContent = String(id);
-  archSdnnScale = "linear";
-  archRmssdScale = "linear";
   const delBtn = $("btn_delete_arch_session");
   if (delBtn) {
-    delBtn.hidden = false;
-    delBtn.onclick = () => deleteSession(id);
+    delBtn.hidden = true;
+    delBtn.onclick = null;
   }
+  resetArchCard();
 
-  destroyArchPlots();
-  archAnalysisCache = null;
-  archSummaryCache = null;
-  archBreathingCache = null;
+  const [sumR, analysisR, breathR, segR] = await Promise.allSettled([
+    api(`/api/sessions/${id}`),
+    api(sessionAnalysisUrl(id)),
+    api(sessionBreathingUrl(id)),
+    api(`/api/sessions/${id}/segments`),
+  ]);
+  if (token !== archOpenToken) return;
 
-  let sum = null;
-  try {
-    sum = await api(`/api/sessions/${id}`);
-  } catch {
-    $("arch_summary_grid").innerHTML = "<p style='color:var(--text-dim);font-size:.8rem'>Сводка недоступна (сессия ещё идёт?)</p>";
+  const sum = sumR.status === "fulfilled" ? sumR.value : null;
+  const analysis = analysisR.status === "fulfilled" ? analysisR.value : null;
+  archAnalysisCache = analysis;
+  archBreathingCache = breathR.status === "fulfilled" ? breathR.value : null;
+  archSegments = segR.status === "fulfilled" ? segR.value.segments : null;
+
+  if (!sum) {
+    const notFound = sumR.reason?.status === 404;
+    $("arch_summary_grid").innerHTML = notFound
+      ? "<p style='color:var(--text-dim);font-size:.8rem'>Сессия не найдена</p>"
+      : "<p style='color:var(--text-dim);font-size:.8rem'>Сводка недоступна (сессия ещё идёт?)</p>";
     const notesBlock = $("arch_notes_block");
     if (notesBlock) notesBlock.hidden = true;
     const explBlock = $("arch_expl_block");
     if (explBlock) explBlock.hidden = true;
-  }
-
-  let analysis = null;
-  try {
-    analysis = await api(sessionAnalysisUrl(id));
-    archAnalysisCache = analysis;
-  } catch (e) {
-    setErr(String(e.message || e));
-  }
-
-  try {
-    archBreathingCache = await api(sessionBreathingUrl(id));
-  } catch {
-    archBreathingCache = null;  // эндпойнт недоступен — блок просто скрыт
-  }
-
-  try {
-    archSegments = (await api(`/api/sessions/${id}/segments`)).segments;
-  } catch {
-    archSegments = null;
-  }
-
-  if (sum) {
+    ensureArchAudioPlayer()?.load(null, false);
+  } else {
     archSummaryCache = sum;
+    if (delBtn) {
+      delBtn.hidden = false;
+      delBtn.onclick = () => deleteSession(id);
+    }
     renderSummaryGrid(sum);
     renderArchExplanation(sum);
     renderArchNotes(sum);
-  } else {
-    ensureArchAudioPlayer()?.load(null, false);
   }
 
   if (analysis) {
     renderArchiveAnalysisCharts(analysis, sum);
+  } else if (sum) {
+    setBar("arch_err", String(analysisR.reason?.message || analysisR.reason || "Анализ недоступен"));
   }
   renderArchSegments();
 
   if (sum) {
     await syncArchAudioPlayer(sum);
+    if (token !== archOpenToken) return;
   }
 
   detail.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2774,8 +2848,15 @@ async function loadProgress() {
   if (participant) url += `&participant=${encodeURIComponent(participant)}`;
 
   try {
-    const { sessions } = await api(url);
+    const { sessions, total, limit } = await api(url);
     progSessionsRaw = sessions;
+    const note = $("prog_count_note");
+    if (note) {
+      note.hidden = false;
+      note.textContent = total > sessions.length
+        ? `Показаны последние ${sessions.length} из ${total} сессий — сузьте период или фильтр, чтобы увидеть остальные.`
+        : `Сессий: ${sessions.length}.`;
+    }
     renderProgCompareTable(sessions);
     buildProgressPlots();
   } catch (e) {
@@ -2843,6 +2924,9 @@ syncSourceFields();
 syncGuidedPhraseOptionsVisibility();
 initThemeUi();
 setLiveEmptyState("idle");
+// Подписи осей рисуются на canvas в момент отрисовки: если веб-шрифт ещё не
+// загрузился, они остаются запасным шрифтом. Перерисовать, когда загрузится.
+document.fonts?.ready.then(() => nextFrame(resizePlots)).catch(() => {});
 syncRecordingState();
 loadArchive().catch(() => {});
 

@@ -17,6 +17,21 @@
   // Совпадает с rrCfg в app.js — правый отступ под последнюю подпись оси X.
   const CHART_PADDING = [8, 40, 4, 4];
 
+  // Графики во времени в архиве стоят столбиком и связаны общей лупой и
+  // лентой отрезков: одна и та же секунда обязана быть на одном пикселе.
+  // Поэтому у всех одна ширина левой оси и один правый отступ; правый
+  // отступ равен месту под правую ось «Дыхание и RMSSD» (46 + 52).
+  const TIME_Y_SIZE = 64;
+  const TIME_RIGHT_AXIS = 52;
+  const TIME_PADDING = [8, 46 + TIME_RIGHT_AXIS, 4, 4];
+  // На узком экране запас под правую ось съедает половину графика: там
+  // правой оси нет ни у кого (у «Дыхание и RMSSD» шкала RMSSD — в легенде).
+  const NARROW_PX = 640;
+  const TIME_PADDING_NARROW = [8, 16, 4, 4];
+  function timePadding(w) {
+    return w < NARROW_PX ? TIME_PADDING_NARROW : TIME_PADDING;
+  }
+
   const xScaleLinear = { time: false, distr: 1 };
 
   function fmtAxisSec(u, splits) {
@@ -78,6 +93,13 @@
     const total = xdata.length;
     const radius = opts?.pointRadius ?? 2.2;
     const colorFn = opts?.pointColor || gradientPointColor;
+    // Свой рисунок точек uPlot не обрезает: без clip точки за границами
+    // шкалы ложились на оси и вылезали за карточку.
+    const { left, top, width, height } = u.bbox;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left, top, width, height);
+    ctx.clip();
     for (let i = 0; i < total; i++) {
       // valToPos(..., true) — canvas px от края холста (уже с bbox).
       const x = u.valToPos(xdata[i], "x", true);
@@ -101,6 +123,7 @@
     ctx.lineTo(x1, y1);
     ctx.stroke();
     ctx.setLineDash([]);
+    ctx.restore();
   }
 
   function hexToRgba(hex, alpha) {
@@ -152,8 +175,8 @@
           { points: { show: false } },
         ],
         axes: [
-          { ...axisStyle(), label: "RRₙ, ms", values: (u, s) => s.map((v) => Math.round(v)) },
-          { ...axisStyle(), label: "RRₙ₊₁, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
+          { ...axisStyle(), label: "RRₙ, мс", values: (u, s) => s.map((v) => Math.round(v)) },
+          { ...axisStyle(), label: "RRₙ₊₁, мс", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
         ],
         hooks: {
           draw: [(u) => poincareDrawPoints(u, opts)],
@@ -199,12 +222,18 @@
       {
         width: w,
         height: height || 260,
-        padding: CHART_PADDING,
+        padding: timePadding(w),
         scales: {
           // Static range: [0, xMax] blocks X zoom — uPlot re-applies it on every
           // setScale and snaps back to the full session. A callback lets zoom/pan
           // keep a narrowed window while defaulting to the full extent.
-          x: { ...xScaleLinear, range: (_u, min, max) => [min ?? 0, max ?? xMax] },
+          // В архиве (noZoom) окно по X ведёт общая лупа — ось всегда от 0 до
+          // конца записи, как у соседних графиков; иначе она начиналась с
+          // первого удара и ходила по делениям иначе, чем они.
+          x: {
+            ...xScaleLinear,
+            range: opts?.noZoom ? () => [0, xMax] : (_u, min, max) => [min ?? 0, max ?? xMax],
+          },
           y: { time: false, distr: 1, range: [yMin, yMax] },
         },
         series: [
@@ -216,7 +245,7 @@
         ],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...axisStyle(), label: "RR, ms", size: 52, values: (u, s) => s.map((v) => Math.round(v)) },
+          { ...axisStyle(), label: "RR, мс", size: TIME_Y_SIZE, values: (u, s) => s.map((v) => Math.round(v)) },
         ],
         hooks: trimOpts?.applied ? { draw: [(u) => drawTrimBands(u, { trim: trimOpts })] } : {},
         cursor: opts?.noCursor
@@ -306,6 +335,19 @@
     return [lo, hi];
   }
 
+  // Деления логарифмической шкалы: uPlot подписывает только степени 10, и
+  // на диапазоне 5–200 мс оставалось два числа.
+  const LOG_TICKS = [1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 70, 100, 150, 200, 300, 500, 1000];
+  function logAxisSplits(u, axisIdx, min, max) {
+    return LOG_TICKS.filter((v) => v >= min && v <= max);
+  }
+
+  function trendYAxis(label, opts) {
+    const base = { ...axisStyle(), label, size: TIME_Y_SIZE };
+    if (opts?.scale !== "log") return base;
+    return { ...base, splits: logAxisSplits, values: (u, vals) => vals.map((v) => String(v)) };
+  }
+
   function trendYScale(rawYs, opts, fallbackMax) {
     if (opts?.scale !== "log") {
       const yMax = opts?.yMax ?? (finiteMax(rawYs, fallbackMax) * 1.15);
@@ -328,7 +370,7 @@
       {
         width: w,
         height: height || 260,
-        padding: CHART_PADDING,
+        padding: timePadding(w),
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
           y: yScale,
@@ -342,7 +384,7 @@
         ],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...axisStyle(), label: "SDNN, ms", size: 52 },
+          trendYAxis("SDNN, мс", opts),
         ],
         hooks: {
           draw: [(u) => drawRejectedWindows(u, opts?.gaps)],
@@ -366,7 +408,7 @@
       {
         width: w,
         height: height || 260,
-        padding: CHART_PADDING,
+        padding: timePadding(w),
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
           y: yScale,
@@ -381,7 +423,7 @@
         ],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...axisStyle(), label: "RMSSD, ms", size: 52 },
+          trendYAxis("RMSSD, мс", opts),
         ],
         hooks: {
           draw: [(u) => drawRejectedWindows(u, opts?.gaps)],
@@ -438,6 +480,11 @@
         const xdata = u.data[xIdx];
         const ydata = u.data[xIdx + 1];
         if (!xdata?.length) return;
+        const { left, top, width, height } = u.bbox;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(left, top, width, height);
+        ctx.clip();
         ctx.fillStyle = hexToRgba(color, 0.35);
         for (let i = 0; i < xdata.length; i++) {
           const x = u.valToPos(xdata[i], "x", true);
@@ -446,6 +493,7 @@
           ctx.arc(x, y, 1.8, 0, Math.PI * 2);
           ctx.fill();
         }
+        ctx.restore();
       });
     });
 
@@ -475,8 +523,8 @@
         },
         series,
         axes: [
-          { ...axisStyle(), label: "RRₙ, ms" },
-          { ...axisStyle(), label: "RRₙ₊₁, ms", size: 52 },
+          { ...axisStyle(), label: "RRₙ, мс" },
+          { ...axisStyle(), label: "RRₙ₊₁, мс", size: 52 },
         ],
         hooks: { draw: drawHooks },
         cursor: { show: true, x: true, y: true },
@@ -603,7 +651,7 @@
         series: [{ show: false }],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...axisStyle(), label: "SDNN, ms", size: 52 },
+          { ...axisStyle(), label: "SDNN, мс", size: 52 },
         ],
         hooks: {
           draw: [(u) => {
@@ -663,7 +711,7 @@
       {
         width: w,
         height: height || 260,
-        padding: CHART_PADDING,
+        padding: timePadding(w),
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
           y: { time: false, distr: 1, range: [-absMax, absMax] },
@@ -674,7 +722,7 @@
         ],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...axisStyle(), label: "мг (0.10–0.45 Гц)", size: 60 },
+          { ...axisStyle(), label: "мг (0.10–0.45 Гц)", size: TIME_Y_SIZE },
         ],
         hooks: {
           draw: [(u) => drawRejectedWindows(u, windows)],
@@ -697,7 +745,7 @@
       {
         width: w,
         height: height || 260,
-        padding: CHART_PADDING,
+        padding: timePadding(w),
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
           y: { time: false, distr: 1, range: [0, yMax] },
@@ -708,7 +756,7 @@
         ],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...axisStyle(), label: "дыхание, цикл/мин", size: 56 },
+          { ...axisStyle(), label: "дыхание, цикл/мин", size: TIME_Y_SIZE },
         ],
         cursor: { show: true, x: true, y: false },
         legend: { show: false },
@@ -726,8 +774,7 @@
     if (!xs?.length) return grid.map(() => null);
     const n = xs.length;
     return grid.map((x) => {
-      if (x <= xs[0]) return ys[0];
-      if (x >= xs[n - 1]) return ys[n - 1];
+      if (x < xs[0] || x > xs[n - 1]) return null;
       let lo = 0;
       let hi = n - 1;
       while (lo + 1 < hi) {
@@ -737,6 +784,9 @@
       }
       const x0 = xs[lo];
       const x1 = xs[hi];
+      // Разрыв записи (null) остаётся разрывом: арифметика с null давала 0,
+      // и линия RMSSD проваливалась в ноль там, где на своём графике — пропуск.
+      if (ys[lo] == null || ys[hi] == null) return null;
       if (x1 === x0) return ys[lo];
       const t = (x - x0) / (x1 - x0);
       return ys[lo] + t * (ys[hi] - ys[lo]);
@@ -757,14 +807,17 @@
       {
         width: w,
         height: height || 260,
-        padding: [8, 46, 4, 4],
+        // Правая ось занимает TIME_RIGHT_AXIS, а uPlot добавляет к ней свой
+        // отступ; итог должен совпасть с правым отступом TIME_PADDING
+        // (измерено: 16 даёт тот же край, что 98 у соседей).
+        padding: w < NARROW_PX ? TIME_PADDING_NARROW : [8, 16, 4, 4],
         scales: {
           x: { ...xScaleLinear, range: [0, xMax] },
           cpm: { time: false, distr: 1, range: [0, rateMax] },
           rmssd: { time: false, distr: 1, range: [0, rmssdMax] },
         },
         series: [
-          {},
+          { label: "время, с" },
           {
             scale: "cpm", width: 2, points: { show: false },
             stroke: T().cssVar("--chart-breathing", "#f0a83c"),
@@ -778,8 +831,8 @@
         ],
         axes: [
           { ...axisStyle(), label: "с от начала", values: fmtAxisSec, incrs: SEC_AXIS_INCRS },
-          { ...axisStyle(), scale: "cpm", label: "дыхание, цикл/мин", size: 56 },
-          { ...axisStyle(), scale: "rmssd", label: "RMSSD, ms", side: 1, size: 52 },
+          { ...axisStyle(), scale: "cpm", label: "дыхание, цикл/мин", size: TIME_Y_SIZE },
+          { ...axisStyle(), scale: "rmssd", label: "RMSSD, мс", side: 1, size: TIME_RIGHT_AXIS, show: w >= NARROW_PX },
         ],
         cursor: { show: true, x: true, y: false },
         legend: { show: true },

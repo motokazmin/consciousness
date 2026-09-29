@@ -233,8 +233,8 @@ def _session_filters(
     if ended_only:
         q += " AND ended IS NOT NULL"
     if participant:
-        q += " AND participant LIKE ?"
-        args.append(f"%{participant}%")
+        q += " AND ulower(participant) LIKE ?"
+        args.append(f"%{participant.lower()}%")
     if tag:
         q += " AND tag = ?"
         args.append(tag)
@@ -515,7 +515,9 @@ def list_sessions(
                 "opt_guided_phrases": bool(r[8]),
                 "opt_audio_biofeedback": bool(r[9]),
                 "opt_mic_recording": bool(r[10]),
-                "has_audio": bool(r[11]),
+                # Флаг в БД — «запись была», файл мог не доехать или быть
+                # удалён: без проверки плеер показывался и молча падал на 404.
+                "has_audio": bool(r[11]) and session_audio_path(r[0]).exists(),
                 "has_explanation": bool(r[12]),
                 "note_tags": parse_note_tags(r[2]),
                 "sd1": sd1,
@@ -546,13 +548,15 @@ def progress_data(
         started_before=started_before,
         ended_only=True,
     )
+    # Последние max_sessions по времени (раньше — первые: новые сессии молча
+    # выпадали), в выдаче — по возрастанию. total — сколько подошло всего.
+    total = conn.execute("SELECT COUNT(*)" + filt, args).fetchone()[0]
     q = (
         "SELECT id, tag, started, ended"
         + filt
-        + " ORDER BY started ASC LIMIT ?"
+        + " ORDER BY started DESC LIMIT ?"
     )
-    args.append(max_sessions)
-    sessions = conn.execute(q, args).fetchall()
+    sessions = conn.execute(q, [*args, max_sessions]).fetchall()[::-1]
 
     out_sessions = []
     for sid, stag, started, ended in sessions:
@@ -584,7 +588,7 @@ def progress_data(
             }
         )
     conn.close()
-    return {"sessions": out_sessions}
+    return {"sessions": out_sessions, "total": int(total), "limit": max_sessions}
 
 
 @app.delete("/api/history")
@@ -626,7 +630,7 @@ def get_session(session_id: int):
     ).fetchone()
     if not row:
         conn.close()
-        raise HTTPException(404)
+        raise HTTPException(404, "Сессия не найдена")
     (
         tag,
         session_name,
@@ -658,7 +662,8 @@ def get_session(session_id: int):
         summary["opt_audio_biofeedback"] = bool(opt_audio)
         summary["opt_mic_recording"] = bool(opt_mic)
         summary["opt_acc_recording"] = bool(opt_acc)
-        summary["has_audio"] = bool(has_audio)
+        summary["has_audio"] = bool(has_audio) and session_audio_path(session_id).exists()
+        summary["audio_missing"] = bool(has_audio) and not summary["has_audio"]
         summary["note_tags"] = parse_note_tags(session_name)
         summary["explanation"] = explanation
         if first_rr and first_rr[0] is not None:
@@ -867,7 +872,7 @@ def session_analysis_endpoint(
     ).fetchone()
     if not row:
         conn.close()
-        raise HTTPException(404)
+        raise HTTPException(404, "Сессия не найдена")
     started, ended = row
     if ended is None:
         conn.close()
@@ -905,7 +910,7 @@ def session_breathing_endpoint(
     ).fetchone()
     if not row:
         conn.close()
-        raise HTTPException(404)
+        raise HTTPException(404, "Сессия не найдена")
     started, ended = row
     if ended is None:
         conn.close()
@@ -987,13 +992,15 @@ def progress_analysis(
         started_before=started_before,
         ended_only=True,
     )
+    # Последние max_sessions по времени (раньше — первые: новые сессии молча
+    # выпадали), в выдаче — по возрастанию. total — сколько подошло всего.
+    total = conn.execute("SELECT COUNT(*)" + filt, args).fetchone()[0]
     q = (
         "SELECT id, tag, started, ended"
         + filt
-        + " ORDER BY started ASC LIMIT ?"
+        + " ORDER BY started DESC LIMIT ?"
     )
-    args.append(max_sessions)
-    sessions = conn.execute(q, args).fetchall()
+    sessions = conn.execute(q, [*args, max_sessions]).fetchall()[::-1]
 
     out_sessions = []
     for sid, stag, started, ended in sessions:
@@ -1008,16 +1015,11 @@ def progress_analysis(
         ).fetchall()
         if not rows:
             continue
-        stats = conn.execute(
-            "SELECT AVG(rmssd) FROM hrv_points WHERE session_id = ?",
-            (sid,),
-        ).fetchone()
-        rmssd_mean = float(stats[0]) if stats and stats[0] is not None else None
         analysis = progress_session_analysis(
             rows,
             started,
             ended,
-            rmssd_mean,
+            None,
             raw_rr_max=max_points_per_session,
         )
         out_sessions.append(
@@ -1029,7 +1031,7 @@ def progress_analysis(
             }
         )
     conn.close()
-    return {"sessions": out_sessions}
+    return {"sessions": out_sessions, "total": int(total), "limit": max_sessions}
 
 
 @app.get("/api/sessions/{session_id}/points")

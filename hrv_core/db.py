@@ -62,6 +62,11 @@ def wipe_session_audio_dir(*, audio_dir: Path | None = None) -> None:
 def init_db(path: Path | None = None) -> sqlite3.Connection:
     db = path or DB_PATH
     conn = sqlite3.connect(db, check_same_thread=False)
+    # LOWER и LIKE в SQLite не знают кириллицы: «Роман» и «роман» для них
+    # разные строки. Фильтры сравнивают через ulower().
+    conn.create_function(
+        "ulower", 1, lambda v: v.lower() if isinstance(v, str) else v, deterministic=True
+    )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -20,7 +20,11 @@
   }
 
   function initTheme() {
+    // Без сохранённого выбора — как в системе.
     let stored = "light";
+    try {
+      if (window.matchMedia?.("(prefers-color-scheme: dark)").matches) stored = "dark";
+    } catch (_) { /* ignore */ }
     try {
       const v = localStorage.getItem(THEME_KEY);
       if (v === "light" || v === "dark") stored = v;
@@ -47,8 +51,10 @@
       stroke: cssVar("--chart-axis", "#5a6478"),
       ticks: { stroke: cssVar("--chart-ticks", "#3a4050") },
       grid: { stroke: cssVar("--chart-grid", "#1e242d"), width: 1 },
-      labelFont: "11px 'DM Sans'",
-      font: "11px 'Space Mono'",
+      // Canvas не наследует CSS: без запасного семейства кириллица в
+      // подписях осей падала в шрифт по умолчанию — Times с засечками.
+      labelFont: "500 11px 'IBM Plex Sans', system-ui, sans-serif",
+      font: "11px 'IBM Plex Mono', ui-monospace, monospace",
     };
   }
 
